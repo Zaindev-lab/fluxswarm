@@ -1,0 +1,47 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  fluxswarm:
+    build: .
+    # Expose only on localhost by default; the reverse proxy (Caddy) is the
+    # public entrypoint. Remove the 127.0.0.1 bind only if Caddy runs elsewhere.
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      - HERMES_HOME=/app/hermes_home
+      - REDIS_URL=redis://redis:6379/0
+      - FLUXSWARM_REDIS_URL=redis://redis:6379/0
+      # Allow the multi-worker rate limiter to trust the proxy link-local IP.
+      - FLUXSWARM_TRUSTED_PROXIES=127.0.0.1,::1
+      # Billing stays closed until a real gateway is wired (returns 402).
+      - FLUXSWARM_PAYMENTS=0
+      # Forward these from your .env to enable auth/encryption/byok in prod:
+      # - FLUXSWARM_JWT_SECRET
+      # - FLUXSWARM_FERNET_KEY
+      # - FLUXSWARM_CORS_ORIGINS=https://yourdomain.com
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8787/health',timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    volumes:
+      # Mount your Hermes install so the platform can drive the ECC squad.
+      # Override HERMES_HOST_DIR to point at your own Hermes home; the kanban
+      # data is kept in a named volume so it persists independently.
+      - ${HERMES_HOST_DIR:-/app/hermes_home}:/app/hermes_home:rw
+      - fluxswarm_kanban:/app/hermes_home/kanban
+    restart: unless-stopped
+
+volumes:
+  fluxswarm_kanban:

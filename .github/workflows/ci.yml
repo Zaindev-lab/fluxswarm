@@ -1,0 +1,45 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install -r backend/requirements.txt pytest
+      - name: Import check
+        run: python -c "import main"
+        working-directory: backend
+      - name: Lint (syntax)
+        run: python -m py_compile main.py hermes_client.py
+        working-directory: backend
+      - name: Run tests
+        run: python -m pytest backend/tests -q
+      - name: Secret-leak static scan
+        run: |
+          if grep -rnI \
+              -e 'pdl_\(sdbx\|live\)_apikey_[A-Za-z0-9]' \
+              -e 'pdl_ntfset_[A-Za-z0-9]' \
+              -e 'sk-ant-[A-Za-z0-9]\{20,\}' \
+              -e 'AKIA[0-9A-Z]\{16\}' \
+              -e -- '-----BEGIN \(RSA \|EC \|OPENSSH \)\?PRIVATE KEY-----' \
+              --exclude=.env.example --exclude-dir=.git \
+              --include='*.py' --include='*.sh' --include='*.yml' --include='*.yaml' --include='*.json' --include='*.toml' \
+              . ; then
+            echo "SECRET LEAK FOUND"
+            exit 1
+          fi
+          echo "no real credentials present"
+  docker:
+    runs-on: ubuntu-latest
+    needs: test-backend
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t fluxswarm:ci .

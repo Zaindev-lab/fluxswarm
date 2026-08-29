@@ -1,0 +1,43 @@
+# Caddy reverse proxy with automatic HTTPS (TLS) for FluxSwarm.
+#
+# Caddy obtains and renews a Let's Encrypt (or ZeroSSL) certificate for the
+# domain automatically — no manual cert wiring needed. It also terminates TLS
+# and forwards plain HTTP to the fluxswarm container on 8787.
+#
+# Prereqs:
+#   - A DNS A/AAAA record pointing your domain at this host's public IP.
+#   - Ports 80 and 443 reachable from the internet (ACME HTTP-01 challenge).
+#   - This Caddy instance MUST be added to FLUXSWARM_TRUSTED_PROXIES so the
+#     backend trusts the X-Forwarded-For header it sets (see docker-compose.yml).
+#
+# Run (standalone):  caddy run --config Caddyfile
+# Run (compose):     add this file's service to docker-compose.yml (see DEPLOY.md).
+
+{
+    # Email used for ACME account / expiry notices.
+    email admin@fluxswarm.ai
+    # Staging certs while testing to avoid Let's Encrypt rate limits:
+    # acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+app.fluxswarm.ai {
+    # Security: only forward what the backend needs; Caddy sets X-Forwarded-*.
+    encode zstd gzip
+
+    # Reasonable body limit (project goals are short; keep abuse bounded).
+    request_body {
+        max_size 1MB
+    }
+
+    # WebSocket board updates.
+    reverse_proxy fluxswarm:8787 {
+        # Health-check the upstream so a dead backend is dropped fast.
+        health_uri /health
+        health_interval 10s
+        health_timeout 3s
+        # Pass through the real client IP via X-Forwarded-For (backend trusts
+        # this host, configured in FLUXSWARM_TRUSTED_PROXIES).
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Real-IP {remote_host}
+    }
+}

@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>FluxSwarm — منصة بناء الوكلاء</title>
+<style>
+  :root{
+    --bg:#0b0f17; --panel:#121826; --panel2:#0e1420; --border:#1f2937;
+    --fg:#e5e7eb; --muted:#9ca3af; --accent:#22d3ee; --accent2:#a855f7;
+    --green:#22c55e; --amber:#f59e0b; --blue:#3b82f6; --red:#ef4444;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:ui-sans-serif,system-ui,"Segoe UI",Tahoma;background:var(--bg);color:var(--fg)}
+  header{padding:18px 24px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;background:linear-gradient(90deg,#0e1420,#121826)}
+  header h1{font-size:20px;margin:0;background:linear-gradient(90deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
+  header .tag{font-size:12px;color:var(--muted)}
+  header .spacer{flex:1}
+  header button.nav{background:transparent;border:1px solid var(--border);color:var(--fg);padding:6px 12px;border-radius:8px;cursor:pointer;font-size:13px;margin-left:8px}
+  main{padding:24px;max-width:1100px;margin:0 auto}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:20px;margin-bottom:20px}
+  label{display:block;font-size:13px;color:var(--muted);margin-bottom:6px}
+  input,textarea{width:100%;background:var(--panel2);border:1px solid var(--border);color:var(--fg);border-radius:10px;padding:10px 12px;font-size:14px;font-family:inherit}
+  textarea{min-height:80px;resize:vertical}
+  button.primary{margin-top:12px;background:linear-gradient(90deg,var(--accent),var(--accent2));color:#04121a;border:0;border-radius:10px;padding:10px 18px;font-weight:700;cursor:pointer;font-size:14px}
+  button.ghost{background:transparent;border:1px solid var(--border);color:var(--fg);border-radius:10px;padding:8px 14px;cursor:pointer}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}
+  .agent{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px}
+  .agent .role{font-size:13px;color:var(--accent);font-weight:700}
+  .agent .name{font-size:15px;font-weight:700;margin:4px 0}
+  .agent .skills{font-size:11px;color:var(--muted)}
+  .task{border:1px solid var(--border);border-radius:10px;padding:12px 14px;background:var(--panel2);display:flex;align-items:center;gap:12px;margin-bottom:8px}
+  .task .dot{width:10px;height:10px;border-radius:50%;flex:0 0 auto}
+  .task .t-title{flex:1;font-size:14px}
+  .task .t-assign{font-size:12px;color:var(--muted)}
+  .s-done{background:var(--green)} .s-running{background:var(--blue);animation:pulse 1.5s infinite}
+  .s-queued{background:var(--amber)} .s-blocked{background:var(--red)} .s-unknown{background:var(--muted)}
+  @keyframes pulse{0%{opacity:.4}50%{opacity:1}100%{opacity:.4}}
+  .row{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end}
+  .hint{font-size:12px;color:var(--muted);margin-top:8px}
+  .empty{color:var(--muted);font-size:13px;padding:10px 0}
+  .plan{background:var(--panel2);border:1px solid var(--border);border-radius:14px;padding:18px;display:flex;flex-direction:column}
+  .plan.best{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+  .plan .pname{font-size:18px;font-weight:800}
+  .plan .price{font-size:26px;font-weight:800;margin:8px 0}
+  .plan .price small{font-size:13px;color:var(--muted);font-weight:400}
+  .plan ul{list-style:none;padding:0;margin:10px 0;font-size:13px;color:var(--muted)}
+  .plan li{padding:3px 0}
+  .credit{font-size:13px;color:var(--accent)}
+  .modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:50}
+  .modal.open{display:flex}
+  .modal .box{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:24px;width:min(420px,92vw)}
+  .tabs{display:flex;gap:8px;margin-bottom:14px}
+  .tabs button{background:var(--panel2);border:1px solid var(--border);color:var(--fg);padding:6px 12px;border-radius:8px;cursor:pointer}
+  .tabs button.active{border-color:var(--accent);color:var(--accent)}
+  .hidden{display:none}
+  .refbox{background:var(--panel2);border:1px dashed var(--accent);border-radius:10px;padding:12px;font-size:13px}
+  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--panel);border:1px solid var(--border);padding:10px 16px;border-radius:10px;font-size:13px;display:none;z-index:60}
+  .toast.show{display:block}
+  .pill{display:inline-block;font-size:11px;padding:2px 8px;border-radius:999px;background:var(--panel2);border:1px solid var(--border);color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <h1>⚡ FluxSwarm</h1>
+  <span class="tag">منصة بناء المشاريع بالوكلاء — سرب ECC devops</span>
+  <span class="spacer"></span>
+  <button class="nav" onclick="setLang('ar')">🇸🇦 ع</button>
+  <button class="nav" onclick="setLang('en')">🇬🇧 EN</button>
+  <span id="userPill" class="pill hidden"></span>
+  <button class="nav" id="navPricing" onclick="gotoSection('pricing')" data-i18n="nav_pricing">الباقات</button>
+  <button class="nav" id="navRef" onclick="gotoSection('referrals')" data-i18n="nav_ref">الإحالات</button>
+  <button class="nav" id="navByok" onclick="gotoSection('byok')" data-i18n="nav_byok">مفاتيحي</button>
+  <button class="nav" id="navMarket" onclick="gotoSection('market')" data-i18n="nav_market">المتجر</button>
+  <button class="nav" id="navLogin" onclick="openAuth()" data-i18n="nav_login">دخول / تسجيل</button>
+</header>
+<main>
+
+  <!-- HERO / CREATE -->
+  <div class="card" id="hero">
+    <h2 style="margin-top:0;font-size:18px" data-i18n="hero_title">أنشئ مشروعاً بسرب كامل من الوكلاء</h2>
+    <div class="row">
+      <div style="flex:1;min-width:200px">
+        <label data-i18n="lbl_pname">اسم المشروع</label>
+        <input id="pname" placeholder="مثال: متجر Todo" />
+      </div>
+      <div style="flex:2;min-width:300px">
+        <label data-i18n="lbl_pgoal">هدف البناء (ينفّذه السرب)</label>
+        <textarea id="pgoal" placeholder="ابنِ تطبيق FastAPI مع مصادقة واختبارات و CI/CD"></textarea>
+      </div>
+    </div>
+    <button class="primary" id="createBtn" onclick="createProject()" data-i18n="btn_launch">🚀 أطلق السرب</button>
+    <button class="ghost" onclick="launchDemo()" data-i18n="btn_demo">▶ تجربة Demo مجانية</button>
+    <div class="hint" id="heroHint" data-i18n="hero_hint">سجّل الدخول لإنشاء مشاريع غير محدودة. أو جرّب الوضع التجريبي مباشرة.</div>
+  </div>
+
+  <!-- SQUAD -->
+  <div class="card">
+    <h2 style="margin-top:0;font-size:16px" data-i18n="squad_title">السرب (Squad)</h2>
+    <div class="grid" id="squadGrid"></div>
+  </div>
+
+  <!-- LIVE BOARD -->
+  <div class="card" id="boardCard">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <h2 style="margin-top:0;font-size:16px" data-i18n="board_title">لوحة المهام الحية</h2>
+      <span class="counter" id="liveCounter">غير متصل</span>
+    </div>
+    <div id="taskList"><div class="empty" data-i18n="board_empty">لم يُبدأ أي سرب بعد. أنشئ مشروعاً أو جرّب Demo.</div></div>
+    <div id="secResult" style="margin-top:12px"></div>
+    <div class="card" style="margin-top:16px">
+      <h2 style="margin-top:0;font-size:16px" id="secTitle">🔒 تقرير الأمان (ECC AgentShield)</h2>
+      <div class="hint" id="secHint">فحص أمني آلي على مخرجات السرب: تسريب أسرار، حقن تعليمات، ثغرات شائعة.</div>
+      <button class="ghost" id="secBtn" onclick="runSecurity()">فحص الأمان</button>
+    </div>
+  </div>
+
+  <!-- PRICING -->
+  <div class="card hidden" id="pricing">
+    <h2 style="margin-top:0;font-size:18px" data-i18n="pricing_title">الباقات والأسعار</h2>
+    <div class="grid" id="plansGrid"></div>
+    <div class="hint" data-i18n="pricing_hint">كل الباقات تشمل السرب الكامل (6 وكلاء). الفرق في الرصيد والتنفيذ المتوازي والدعم.</div>
+  </div>
+
+  <!-- REFERRALS -->
+  <div class="card hidden" id="referrals">
+    <h2 style="margin-top:0;font-size:18px" data-i18n="ref_title">برنامج الإحالات</h2>
+    <div id="refContent"><div class="empty" data-i18n="ref_empty">سجّل الدخول لعرض رابط الإحالة ورصيدك.</div></div>
+  </div>
+
+  <!-- BYOK -->
+  <div class="card hidden" id="byok">
+    <h2 style="margin-top:0;font-size:18px" data-i18n="byok_title">🔑 مفاتيحك (BYOK)</h2>
+    <div class="hint" data-i18n="byok_hint">في الوضع المدفوع، تجلب مفتاح مزوّدك فتدفع أنت لتوكناتك — FluxSwarm لا تتقاضى سوى رسوم التنسيق. المفاتيح مشفّرة ولا تظهر لنا أبداً بشكل واضح.</div>
+    <div class="row" style="margin-top:10px">
+      <div style="flex:1;min-width:160px"><label>المزوّد</label>
+        <select id="byok_provider" style="width:100%;background:var(--panel2);border:1px solid var(--border);color:var(--fg);border-radius:10px;padding:10px">
+          <option value="anthropic">Anthropic (Claude)</option>
+          <option value="openai">OpenAI</option>
+          <option value="gemini">Gemini</option>
+          <option value="kimi">Kimi</option>
+        </select>
+      </div>
+      <div style="flex:3;min-width:260px"><label>المفتاح (API Key)</label>
+        <input id="byok_token" placeholder="sk-... أو ANTHROPIC_API_KEY" />
+      </div>
+    </div>
+    <button class="primary" onclick="saveKey()">حفظ المفتاح</button>
+    <div id="byokList" style="margin-top:10px"></div>
+  </div>
+
+  <!-- SQUAD MARKETPLACE -->
+  <div class="card hidden" id="market">
+    <h2 style="margin-top:0;font-size:18px" data-i18n="market_title">🛒 متجر السرب (Squad Marketplace)</h2>
+    <div class="hint" data-i18n="market_hint">انشر تشكيلة وكلائك كقالب يشتريه الآخرون برصيد، أو اشترِ سرباً جاهزاً من المجتمع.</div>
+    <div class="row" style="margin-top:10px">
+      <div style="flex:1"><label data-i18n="tpl_name">اسم القالب</label><input id="tpl_name" placeholder="مثال: سرب ويب آمن" /></div>
+      <div style="flex:1"><label data-i18n="tpl_price">السعر (رصيد)</label><input id="tpl_price" type="number" value="10" /></div>
+    </div>
+    <label data-i18n="tpl_desc">الوصف</label><textarea id="tpl_desc" placeholder="ما الذي يبنيه هذا السرب؟"></textarea>
+    <label data-i18n="tpl_agents">الوكلاء (أسماء معروضة مفصولة بفاصلة)</label><input id="tpl_agents" placeholder="Planner, Architect, DevOps, TDD, Reviewer, Builder" />
+    <button class="primary" onclick="publishTpl()">📦 انشر القالب</button>
+    <h3 style="font-size:15px;margin-top:16px" data-i18n="market_list">القوالب المتاحة</h3>
+    <div class="grid" id="tplGrid"></div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0;font-size:16px">بوت تيليغرام</h2>
+    <div class="hint">أرسل هدفك مباشرة إلى بوت FluxSwarm على تيليغرام وسيردّ عليك بنتائج السرب حياً.</div>
+  </div>
+</main>
+
+<!-- AUTH MODAL -->
+<div class="modal" id="authModal">
+  <div class="box">
+    <div class="tabs">
+      <button id="tabLogin" class="active" onclick="switchTab('login')">دخول</button>
+      <button id="tabReg" onclick="switchTab('reg')">تسجيل</button>
+    </div>
+    <div id="loginForm">
+      <label>البريد</label><input id="l_email" placeholder="you@x.com" />
+      <label>كلمة المرور</label><input id="l_pw" type="password" placeholder="••••••" />
+      <button class="primary" onclick="doLogin()">دخول</button>
+    </div>
+    <div id="regForm" class="hidden">
+      <label>الاسم</label><input id="r_name" placeholder="اسمك" />
+      <label>البريد</label><input id="r_email" placeholder="you@x.com" />
+      <label>كلمة المرور</label><input id="r_pw" type="password" placeholder="••••••" />
+      <label>رمز الإحالة (اختياري)</label><input id="r_ref" placeholder="FLX-XXXXXXXX" />
+      <button class="primary" onclick="doRegister()">إنشاء حساب</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const API="";
+let token=null, currentUser=null, currentSlug=null, ws=null;
+const params=new URLSearchParams(location.search);
+if(params.get("ref")) document.getElementById("r_ref").value=params.get("ref");
+
+function toast(m){const t=document.getElementById("toast");t.textContent=m;t.classList.add("show");setTimeout(()=>t.classList.remove("show"),2600);}
+function esc(s){return String(s??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));}
+function gotoSection(id){["pricing","referrals","byok","market"].forEach(s=>document.getElementById(s).classList.toggle("hidden",s!==id));window.scrollTo({top:document.getElementById(id).offsetTop-60,behavior:"smooth"});}
+function openAuth(){document.getElementById("authModal").classList.add("open");}
+function switchTab(t){document.getElementById("tabLogin").classList.toggle("active",t==="login");document.getElementById("tabReg").classList.toggle("active",t==="reg");document.getElementById("loginForm").classList.toggle("hidden",t!=="login");document.getElementById("regForm").classList.toggle("hidden",t!=="reg");}
+
+async function loadSquad(){const r=await fetch(API+"/api/squad");const d=await r.json();const g=document.getElementById("squadGrid");g.innerHTML="";[...d.workers,d.verifier,d.synthesizer].forEach(a=>{const div=document.createElement("div");div.className="agent";div.innerHTML=`<div class="role">${a.role}</div><div class="name">${a.display||a.profile}</div><div class="skills">مهارات: ${a.skills.join(", ")}</div>`;g.appendChild(div);});}
+async function loadPlans(){const r=await fetch(API+"/api/plans");const d=await r.json();const g=document.getElementById("plansGrid");g.innerHTML="";d.forEach(p=>{const div=document.createElement("div");div.className="plan"+(p.id==="pro"?" best":"");div.innerHTML=`<div class="pname">${p.name}</div><div class="price">$${p.price}<small>/شهر</small></div><div class="credit">${p.credits} رصيد · تنفيذ متوازي ×${p.parallel}</div><ul><li>${p.desc}</li><li>السرب الكامل (6 وكلاء)</li><li>بث حيّ للوحة</li><li>بوت تيليغرام</li></ul><button class="ghost" onclick="subscribe('${p.id}')">${p.price==0?"استخدم مجاناً":"اشترك"}</button>`;g.appendChild(div);});}
+
+function setUser(u){currentUser=u;document.getElementById("userPill").classList.remove("hidden");document.getElementById("userPill").textContent=`${esc(u.name)} · ${u.plan} · ${u.credits} رصيد`;document.getElementById("navLogin").textContent="خروج";document.getElementById("heroHint").textContent="مسجّل الدخول — أطلق سربك الآن.";loadReferrals();loadByok();}
+function clearUser(){currentUser=null;token=null;document.getElementById("userPill").classList.add("hidden");document.getElementById("navLogin").textContent="دخول / تسجيل";}
+
+async function doLogin(){const email=document.getElementById("l_email").value.trim();const pw=document.getElementById("l_pw").value;const r=await fetch(API+"/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email,password:pw})});if(!r.ok){toast("فشل الدخول");return;}const d=await r.json();token=d.token;setUser(d.user);document.getElementById("authModal").classList.remove("open");toast("تم الدخول");}
+async function doRegister(){const name=document.getElementById("r_name").value.trim();const email=document.getElementById("r_email").value.trim();const pw=document.getElementById("r_pw").value;const ref=document.getElementById("r_ref").value.trim()||null;const r=await fetch(API+"/api/auth/register",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email,name,password:pw,ref})});if(!r.ok){toast("فشل التسجيل: "+(await r.json()).detail);return;}const d=await r.json();token=d.token;setUser(d.user);document.getElementById("authModal").classList.remove("open");toast("تم إنشاء الحساب");}
+document.getElementById("navLogin").onclick=()=>{if(currentUser){clearUser();toast("تم تسجيل الخروج");}else{openAuth();}};
+
+async function subscribe(plan){if(!token){openAuth();return;}const r=await fetch(API+`/api/subscribe/${plan}`,{method:"POST",headers:{Authorization:"Bearer "+token}});if(!r.ok){let msg="فشل الاشتراك";try{msg=(await r.json()).detail||msg;}catch(e){}toast(msg);return;}const u=await r.json();setUser(u);toast("تم تحديث الباقة إلى "+plan);}
+
+async function loadReferrals(){if(!token){document.getElementById("refContent").innerHTML='<div class="empty">سجّل الدخول لعرض رابط الإحالة.</div>';return;}const r=await fetch(API+"/api/referrals",{headers:{Authorization:"Bearer "+token}});const d=await r.json();document.getElementById("refContent").innerHTML=`<div class="refbox">رابط الإحالة الخاص بك:<br><b>${location.origin}/?ref=${d.ref_code}</b><br>تكسب <b>${d.reward_credits} رصيد</b> عن كل صديق يشترك بباقة مدفوعة.</div>`;}
+
+async function loadByok(){if(!token){document.getElementById("byokList").innerHTML='<div class="empty">سجّل الدخول لإدارة مفاتيحك.</div>';return;}const r=await fetch(API+"/api/keys",{headers:{Authorization:"Bearer "+token}});const d=await r.json();const ks=Object.keys(d.keys||{});document.getElementById("byokList").innerHTML=ks.length?ks.map(k=>`<span class="pill">${k}: ${d.keys[k]}</span>`).join(" "):'<div class="empty">لا مفاتيح بعد — أضف مفتاحاً لتفعيل BYOK.</div>';}
+async function saveKey(){if(!token){openAuth();return;}const provider=document.getElementById("byok_provider").value;const tok=document.getElementById("byok_token").value.trim();if(!tok){toast("أدخل المفتاح");return;}const r=await fetch(API+"/api/keys",{method:"POST",headers:{Authorization:"Bearer "+token,"Content-Type":"application/json"},body:JSON.stringify({provider,token:tok})});if(!r.ok){toast("فشل الحفظ");return;}document.getElementById("byok_token").value="";toast("تم حفظ المفتاح (مشفّر)");loadByok();}
+
+async function createProject(){
+  const name=document.getElementById("pname").value.trim();
+  const goal=document.getElementById("pgoal").value.trim();
+  if(!goal){toast("اكتب هدف البناء");return;}
+  if(!token){toast("سجّل الدخول أولاً");openAuth();return;}
+  const btn=document.getElementById("createBtn");btn.disabled=true;btn.textContent="... جارٍ الإطلاق";
+  try{
+    const r=await fetch(API+"/api/projects",{method:"POST",headers:{Authorization:"Bearer "+token,"Content-Type":"application/json"},body:JSON.stringify({name:name||"مشروع",goal})});
+    if(r.status===402){toast("نفد الرصيد");return;}
+    if(!r.ok){toast("خطأ: "+(await r.json()).detail);return;}
+    const d=await r.json();currentSlug=d.slug;connectWS(d.slug);pollTasks(d.slug);
+  }catch(e){toast("خطأ: "+e.message);}
+  finally{btn.disabled=false;btn.textContent="🚀 أطلق السرب";}
+}
+
+async function launchDemo(){
+  const r=await fetch(API+"/api/demo/launch");const d=await r.json();currentSlug=d.slug;connectWS(d.slug);pollTasks(d.slug);toast("وضع Demo يعمل");
+}
+
+function connectWS(slug){if(ws)ws.close();ws=new WebSocket(`ws://${location.host}/ws/${slug}?token=${token||""}`);ws.onopen=()=>{document.getElementById("liveCounter").textContent="● متصل حياً";};ws.onclose=()=>{document.getElementById("liveCounter").textContent="✕ منقطع";};ws.onmessage=(ev)=>{const msg=JSON.parse(ev.data);if(msg.type==="snapshot"||msg.type==="update")renderTasks(msg.tasks);if(msg.type==="error")document.getElementById("liveCounter").textContent="⚠ "+msg.detail;};}
+async function pollTasks(slug){const r=await fetch(API+`/api/projects/${slug}/tasks`+(token?`?`:""),{headers:token?{Authorization:"Bearer "+token}:{}});if(!r.ok)return;const d=await r.json();renderTasks(d);}
+function renderTasks(tasks){const el=document.getElementById("taskList");if(!tasks||!tasks.length){el.innerHTML='<div class="empty">لا مهام.</div>';return;}el.innerHTML="";const cls={done:"s-done",running:"s-running",queued:"s-queued",blocked:"s-blocked",unknown:"s-unknown"};for(const t of tasks){const div=document.createElement("div");div.className="task";const name=t.assignee_display||t.assignee||"";div.innerHTML=`<span class="dot ${cls[t.state]||'s-unknown'}"></span><span class="t-title">${esc(t.title)}</span><span class="t-assign">${esc(name)} · ${esc(t.state)}</span>`;el.appendChild(div);}document.getElementById("liveCounter").textContent=`● ${tasks.length} بطاقات`;}
+
+async function publishTpl(){if(!token){openAuth();return;}
+  const name=document.getElementById("tpl_name").value.trim();
+  const desc=document.getElementById("tpl_desc").value.trim();
+  const price=parseInt(document.getElementById("tpl_price").value)||10;
+  const agents=document.getElementById("tpl_agents").value.split(",").map(s=>s.trim()).filter(Boolean);
+  if(!name||!agents.length){toast("اكتب الاسم والوكلاء");return;}
+  const r=await fetch(API+"/api/templates",{method:"POST",headers:{Authorization:"Bearer "+token,"Content-Type":"application/json"},body:JSON.stringify({name,description:desc,agents,price_credits:price})});
+  if(!r.ok){toast("فشل النشر");return;}
+  toast("تم نشر القالب");loadTemplates();}
+
+async function loadTemplates(){const r=await fetch(API+"/api/templates");const d=await r.json();const g=document.getElementById("tplGrid");g.innerHTML="";
+  d.forEach(t=>{const div=document.createElement("div");div.className="plan";div.innerHTML=`<div class="pname">${esc(t.name)}</div><div class="credit">${t.price_credits} رصيد · ${t.agents.length} وكلاء</div><div class="hint">${esc(t.description||"")}</div><button class="ghost" onclick="buyTpl(${t.id})">شراء</button>`;g.appendChild(div);});}
+
+async function buyTpl(id){if(!token){openAuth();return;}
+  const goal=prompt("اكتب هدف بناء السرب (أو اتركه فارغاً لاستخدام وصف القالب):","");
+  const r=await fetch(API+`/api/templates/${id}/buy`,{method:"POST",headers:{Authorization:"Bearer "+token,"Content-Type":"application/json"},body:JSON.stringify({goal:goal||""})});
+  if(!r.ok){toast("فشل الشراء: "+(await r.json()).detail);return;}
+  const d=await r.json();setUser(d.user);
+  if(d.launched){toast("تم الشراء ✅ وتشغيل السرب: "+d.slug);}
+  else{toast("تم الدفع لكن فشل التشغيل: "+(d.launch_error||"unknown"));}
+  loadTemplates();}
+
+loadSquad();loadPlans();loadTemplates();
+
+/* ===================== i18n ===================== */
+const I18N = {
+  ar: {
+    nav_pricing:"الباقات", nav_ref:"الإحالات", nav_byok:"مفاتيحي", nav_login:"دخول / تسجيل",
+    hero_title:"أنشئ مشروعاً بسرب كامل من الوكلاء", lbl_pname:"اسم المشروع", lbl_pgoal:"هدف البناء (ينفّذه السرب)",
+    btn_launch:"🚀 أطلق السرب", btn_demo:"▶ تجربة Demo مجانية",
+    hero_hint:"سجّل الدخول لإنشاء مشاريع غير محدودة. أو جرّب الوضع التجريبي مباشرة.",
+    squad_title:"السرب (Squad)", board_title:"لوحة المهام الحية",
+    board_empty:"لم يُبدأ أي سرب بعد. أنشئ مشروعاً أو جرّب Demo.",
+    pricing_title:"الباقات والأسعار",
+    pricing_hint:"كل الباقات تشمل السرب الكامل (6 وكلاء). الفرق في الرصيد والتنفيذ المتوازي والدعم.",
+    ref_title:"برنامج الإحالات", ref_empty:"سجّل الدخول لعرض رابط الإحالة ورصيدك.",
+    byok_title:"🔑 مفاتيحك (BYOK)",
+    byok_hint:"اجلب مفتاح Claude/GPT/Gemini فيدفع مفتاحك للتوكنات ويرفع جودة المخرجات عن النموذج المجاني (متاح حتى في خطة Demo). FluxSwarm لا تتقاضى سوى رسوم التنسيق. المفاتيح مشفّرة ولا تُعرض أبداً بشكل واضح.",
+    sec_title:"🔒 تقرير الأمان (ECC AgentShield)", sec_run:"فحص الأمان", sec_score:"درجة الأمان",
+    nav_market:"المتجر", market_title:"🛒 متجر السرب (Squad Marketplace)",
+    market_hint:"انشر تشكيلة وكلائك كقالب يشتريه الآخرون برصيد، أو اشترِ سرباً جاهزاً من المجتمع.",
+    tpl_name:"اسم القالب", tpl_price:"السعر (رصيد)", tpl_desc:"الوصف", market_list:"القوالب المتاحة"
+  },
+  en: {
+    nav_pricing:"Pricing", nav_ref:"Referrals", nav_byok:"My Keys", nav_login:"Login / Sign up",
+    hero_title:"Launch a project with a full agent squad", lbl_pname:"Project name", lbl_pgoal:"Build goal (the squad will execute it)",
+    btn_launch:"🚀 Launch squad", btn_demo:"▶ Free Demo",
+    hero_hint:"Sign in for unlimited projects, or try Demo instantly.",
+    squad_title:"The Squad", board_title:"Live task board",
+    board_empty:"No swarm started yet. Create a project or try Demo.",
+    pricing_title:"Plans & Pricing",
+    pricing_hint:"All plans include the full squad (6 agents). Differences are in credits, parallel runs, and support.",
+    ref_title:"Referral Program", ref_empty:"Sign in to see your referral link and credits.",
+    byok_title:"🔑 Your Keys (BYOK)",
+    byok_hint:"Bring your Claude/GPT/Gemini key — your key pays for tokens and lifts output quality above the free model (available even on the Demo plan). FluxSwarm only charges a coordination fee. Keys are encrypted and never shown in plaintext.",
+    sec_title:"🔒 Security Report (ECC AgentShield)", sec_run:"Run security scan", sec_score:"Security score",
+    nav_market:"Marketplace", market_title:"🛒 Squad Marketplace",
+    market_hint:"Publish your agent lineup as a template others buy with credits, or buy a ready-made squad from the community.",
+    tpl_name:"Template name", tpl_price:"Price (credits)", tpl_desc:"Description", market_list:"Available templates"
+  }
+};
+let LANG = "ar";
+function setLang(l){LANG=l;document.documentElement.lang=l;document.documentElement.dir = l==="ar"?"rtl":"ltr";
+  document.querySelectorAll("[data-i18n]").forEach(el=>{const k=el.getAttribute("data-i18n");if(I18N[l][k])el.textContent=I18N[l][k];});
+  document.getElementById("secTitle").textContent=I18N[l].sec_title;
+  document.getElementById("secBtn").textContent=I18N[l].sec_run;
+}
+setLang("ar");
+
+/* security scan button wired after project launch */
+async function runSecurity(){
+  if(!currentSlug){toast("ابدأ سرباً أولاً / start a swarm first");return;}
+  const el=document.getElementById("secResult");el.innerHTML=`<div class="hint">${I18N[LANG].sec_run}…</div>`;
+  const r=await fetch(API+`/api/projects/${currentSlug}/security`,{headers:token?{Authorization:"Bearer "+token}:{}});
+  if(!r.ok){el.innerHTML=`<div class="hint">${I18N[LANG].sec_run} failed</div>`;return;}
+  const d=await r.json();
+  const color = d.score>=90?"var(--green)":d.score>=70?"var(--amber)":"var(--red)";
+  el.innerHTML=`<div class="refbox"><b>${I18N[LANG].sec_score}: <span style="color:${color}">${d.score}/100 (${d.label})</span></b><br>method: ${d.method}<br>findings: ${d.findings.length}</div>`;
+}
+</script>
+<footer style="text-align:center;padding:18px 12px;font-size:13px;color:#7a8699;border-top:1px solid #e0e5ee;margin-top:32px">
+  FluxSwarm · <a href="/privacy" style="color:#0b59c5">الخصوصية</a> · <a href="/terms" style="color:#0b59c5">الشروط</a>
+</footer>
+</body>
+</html>
