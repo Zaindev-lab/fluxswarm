@@ -94,6 +94,14 @@ def test_link_appears_in_ccpa_payload_and_survives_deletion():
     assert db.get_user_by_telegram_chat(333333) is None
 
 
+def test_index_serves_telegram_wiring():
+    r = client.get("/")
+    assert r.status_code == 200
+    assert '"/api/telegram/link"' in r.text
+    assert '"/api/telegram/status"' in r.text
+    assert "tg_link" in r.text
+
+
 def test_credit_spend_and_failed_launch_refund():
     # Round-trip on a freshly registered account (credits = demo allowance).
     email = "credit-roundtrip@fluxswarm.test"

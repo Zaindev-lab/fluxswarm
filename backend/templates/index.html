@@ -165,8 +165,9 @@
   </div>
 
   <div class="card">
-    <h2 style="margin-top:0;font-size:16px">بوت تيليغرام</h2>
-    <div class="hint">أرسل هدفك مباشرة إلى بوت FluxSwarm على تيليغرام وسيردّ عليك بنتائج السرب حياً.</div>
+    <h2 style="margin-top:0;font-size:16px" data-i18n="tg_title">🤖 ربط بوت تيليغرام</h2>
+    <div class="hint" data-i18n="tg_hint">أرسل هدفك إلى بوت FluxSwarm على تيليغرام وسيردّ بنتائج السرب حياً. اربط حسابك ليُدار الإطلاق برصيدك وباقتك.</div>
+    <div id="tgBody" class="empty" data-i18n="tg_login_hint">سجّل الدخول لربط تيليغرام بحسابك.</div>
   </div>
 </main>
 
@@ -209,8 +210,8 @@ function switchTab(t){document.getElementById("tabLogin").classList.toggle("acti
 async function loadSquad(){const r=await fetch(API+"/api/squad");const d=await r.json();const g=document.getElementById("squadGrid");g.innerHTML="";[...d.workers,d.verifier,d.synthesizer].forEach(a=>{const div=document.createElement("div");div.className="agent";div.innerHTML=`<div class="role">${a.role}</div><div class="name">${a.display||a.profile}</div><div class="skills">مهارات: ${a.skills.join(", ")}</div>`;g.appendChild(div);});}
 async function loadPlans(){const r=await fetch(API+"/api/plans");const d=await r.json();const g=document.getElementById("plansGrid");g.innerHTML="";d.forEach(p=>{const div=document.createElement("div");div.className="plan"+(p.id==="pro"?" best":"");div.innerHTML=`<div class="pname">${p.name}</div><div class="price">$${p.price}<small>/شهر</small></div><div class="credit">${p.credits} رصيد · تنفيذ متوازي ×${p.parallel}</div><ul><li>${p.desc}</li><li>السرب الكامل (6 وكلاء)</li><li>بث حيّ للوحة</li><li>بوت تيليغرام</li></ul><button class="ghost" onclick="subscribe('${p.id}')">${p.price==0?"استخدم مجاناً":"اشترك"}</button>`;g.appendChild(div);});}
 
-function setUser(u){currentUser=u;document.getElementById("userPill").classList.remove("hidden");document.getElementById("userPill").textContent=`${esc(u.name)} · ${u.plan} · ${u.credits} رصيد`;document.getElementById("navLogin").textContent="خروج";document.getElementById("heroHint").textContent="مسجّل الدخول — أطلق سربك الآن.";loadReferrals();loadByok();}
-function clearUser(){currentUser=null;token=null;document.getElementById("userPill").classList.add("hidden");document.getElementById("navLogin").textContent="دخول / تسجيل";}
+function setUser(u){currentUser=u;document.getElementById("userPill").classList.remove("hidden");document.getElementById("userPill").textContent=`${esc(u.name)} · ${u.plan} · ${u.credits} رصيد`;document.getElementById("navLogin").textContent="خروج";document.getElementById("heroHint").textContent="مسجّل الدخول — أطلق سربك الآن.";loadReferrals();loadByok();loadTelegram();}
+function clearUser(){currentUser=null;token=null;document.getElementById("userPill").classList.add("hidden");document.getElementById("navLogin").textContent="دخول / تسجيل";loadTelegram();}
 
 async function doLogin(){const email=document.getElementById("l_email").value.trim();const pw=document.getElementById("l_pw").value;const r=await fetch(API+"/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email,password:pw})});if(!r.ok){toast("فشل الدخول");return;}const d=await r.json();token=d.token;setUser(d.user);document.getElementById("authModal").classList.remove("open");toast("تم الدخول");}
 async function doRegister(){const name=document.getElementById("r_name").value.trim();const email=document.getElementById("r_email").value.trim();const pw=document.getElementById("r_pw").value;const ref=document.getElementById("r_ref").value.trim()||null;const r=await fetch(API+"/api/auth/register",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email,name,password:pw,ref})});if(!r.ok){toast("فشل التسجيل: "+(await r.json()).detail);return;}const d=await r.json();token=d.token;setUser(d.user);document.getElementById("authModal").classList.remove("open");toast("تم إنشاء الحساب");}
@@ -222,6 +223,33 @@ async function loadReferrals(){if(!token){document.getElementById("refContent").
 
 async function loadByok(){if(!token){document.getElementById("byokList").innerHTML='<div class="empty">سجّل الدخول لإدارة مفاتيحك.</div>';return;}const r=await fetch(API+"/api/keys",{headers:{Authorization:"Bearer "+token}});const d=await r.json();const ks=Object.keys(d.keys||{});document.getElementById("byokList").innerHTML=ks.length?ks.map(k=>`<span class="pill">${k}: ${d.keys[k]}</span>`).join(" "):'<div class="empty">لا مفاتيح بعد — أضف مفتاحاً لتفعيل BYOK.</div>';}
 async function saveKey(){if(!token){openAuth();return;}const provider=document.getElementById("byok_provider").value;const tok=document.getElementById("byok_token").value.trim();if(!tok){toast("أدخل المفتاح");return;}const r=await fetch(API+"/api/keys",{method:"POST",headers:{Authorization:"Bearer "+token,"Content-Type":"application/json"},body:JSON.stringify({provider,token:tok})});if(!r.ok){toast("فشل الحفظ");return;}document.getElementById("byok_token").value="";toast("تم حفظ المفتاح (مشفّر)");loadByok();}
+
+async function loadTelegram(){
+  const body=document.getElementById("tgBody");
+  if(!token){body.className="empty";body.textContent=I18N[LANG].tg_login_hint;return;}
+  let st={linked:false};
+  const r=await fetch(API+"/api/telegram/status",{headers:{Authorization:"Bearer "+token}});
+  if(r.ok)st=await r.json();
+  body.className="";
+  if(st.linked){
+    body.innerHTML=`<div class="refbox">${I18N[LANG].tg_linked}: <b>${esc(String(st.telegram_chat_id))}</b><br><button class="ghost" style="margin-top:10px" onclick="unlinkTelegram()">${I18N[LANG].tg_unlink}</button></div>`;
+  }else{
+    body.innerHTML=`<button class="ghost" onclick="linkTelegram()">${I18N[LANG].tg_link}</button>`;
+  }
+}
+async function linkTelegram(){
+  if(!token){openAuth();return;}
+  const r=await fetch(API+"/api/telegram/link",{headers:{Authorization:"Bearer "+token}});
+  if(!r.ok){toast("فشل طلب الرمز");return;}
+  const d=await r.json();
+  const body=document.getElementById("tgBody");
+  body.innerHTML=`<div class="refbox">${I18N[LANG].tg_code_hint} <b>/link ${esc(d.code)}</b><br><span class="hint">${I18N[LANG].tg_code_ttl}: ${Math.round(d.ttl_seconds/60)} دقيقة.</span></div>`;
+}
+async function unlinkTelegram(){
+  const r=await fetch(API+"/api/telegram/link",{method:"DELETE",headers:{Authorization:"Bearer "+token}});
+  let ok=false;try{ok=(await r.json()).ok;}catch(e){}
+  toast(ok?I18N[LANG].tg_unlinked:I18N[LANG].tg_unlink_fail);loadTelegram();
+}
 
 async function createProject(){
   const name=document.getElementById("pname").value.trim();
@@ -268,7 +296,7 @@ async function buyTpl(id){if(!token){openAuth();return;}
   else{toast("تم الدفع لكن فشل التشغيل: "+(d.launch_error||"unknown"));}
   loadTemplates();}
 
-loadSquad();loadPlans();loadTemplates();
+loadSquad();loadPlans();loadTemplates();loadTelegram();
 
 /* ===================== i18n ===================== */
 const I18N = {
@@ -287,7 +315,11 @@ const I18N = {
     sec_title:"🔒 تقرير الأمان (ECC AgentShield)", sec_run:"فحص الأمان", sec_score:"درجة الأمان",
     nav_market:"المتجر", market_title:"🛒 متجر السرب (Squad Marketplace)",
     market_hint:"انشر تشكيلة وكلائك كقالب يشتريه الآخرون برصيد، أو اشترِ سرباً جاهزاً من المجتمع.",
-    tpl_name:"اسم القالب", tpl_price:"السعر (رصيد)", tpl_desc:"الوصف", market_list:"القوالب المتاحة"
+    tpl_name:"اسم القالب", tpl_price:"السعر (رصيد)", tpl_desc:"الوصف", market_list:"القوالب المتاحة",
+    tg_title:"🤖 ربط بوت تيليغرام", tg_hint:"أرسل هدفك إلى بوت FluxSwarm على تيليغرام وسيردّ بنتائج السرب حياً. اربط حسابك ليُدار الإطلاق برصيدك وباقتك.",
+    tg_login_hint:"سجّل الدخول لربط تيليغرام بحسابك.", tg_link:"ربط تيليغرام", tg_unlink:"إلغاء الربط",
+    tg_linked:"مربوط بتيليغرام (chat)", tg_code_hint:"افتح بوت FluxSwarm على تيليغرام وأرسل:",
+    tg_code_ttl:"الرمز صالح لمدة", tg_unlinked:"تم إلغاء الربط", tg_unlink_fail:"فشل إلغاء الربط"
   },
   en: {
     nav_pricing:"Pricing", nav_ref:"Referrals", nav_byok:"My Keys", nav_login:"Login / Sign up",
@@ -304,7 +336,11 @@ const I18N = {
     sec_title:"🔒 Security Report (ECC AgentShield)", sec_run:"Run security scan", sec_score:"Security score",
     nav_market:"Marketplace", market_title:"🛒 Squad Marketplace",
     market_hint:"Publish your agent lineup as a template others buy with credits, or buy a ready-made squad from the community.",
-    tpl_name:"Template name", tpl_price:"Price (credits)", tpl_desc:"Description", market_list:"Available templates"
+    tpl_name:"Template name", tpl_price:"Price (credits)", tpl_desc:"Description", market_list:"Available templates",
+    tg_title:"🤖 Link Telegram Bot", tg_hint:"Send your goal to the FluxSwarm Telegram bot and get live swarm results. Link your account so launches run under your credits and plan.",
+    tg_login_hint:"Sign in to link Telegram to your account.", tg_link:"Link Telegram", tg_unlink:"Unlink",
+    tg_linked:"Linked to Telegram (chat)", tg_code_hint:"Open the FluxSwarm bot on Telegram and send:",
+    tg_code_ttl:"Code valid for", tg_unlinked:"Unlinked", tg_unlink_fail:"Unlink failed"
   }
 };
 let LANG = "ar";
@@ -327,7 +363,7 @@ async function runSecurity(){
 }
 </script>
 <footer style="text-align:center;padding:18px 12px;font-size:13px;color:#7a8699;border-top:1px solid #e0e5ee;margin-top:32px">
-  FluxSwarm · <a href="/privacy" style="color:#0b59c5">الخصوصية</a> · <a href="/terms" style="color:#0b59c5">الشروط</a>
+  FluxSwarm · <a href="/privacy" style="color:#0b59c5">الخصوصية</a> · <a href="/terms" style="color:#0b59c5">الشروط</a> · <a href="/privacy-en" style="color:#0b59c5">Privacy (EN)</a> · <a href="/terms-en" style="color:#0b59c5">Terms (EN)</a>
 </footer>
 </body>
 </html>
