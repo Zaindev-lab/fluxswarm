@@ -258,8 +258,12 @@ Server restarted through `run.ps1` so the process environment carries the Paddle
 
 - **D-2 (ops side)** operator generates an age keypair and keeps it off the host.
 - **Operator-only pre-launch:** LIVE Paddle keys, permanent webhook URL/domain,
-  `FLUXSWARM_PAYMENTS=1`, cron for `monitor.sh`, fill `FLUXSWARM_LEGAL_*`, counsel
-  review of the policy wording (all itemized in `PADDLE_LIVE_CHECKLIST.md`).
+  `FLUXSWARM_PAYMENTS=1`, cron for `monitor.sh`, counsel review of the policy
+  wording (all itemized in `PADDLE_LIVE_CHECKLIST.md`).
+- **Company details ✅** `FLUXSWARM_LEGAL_*` (AI FOR SAAS, registry, tax ID, address,
+  phone) + `FLUXSWARM_CONTACT_EMAIL` are set in `.env`; all four legal pages render
+  the operating-entity block with phone, verified live and covered by
+  `tests/test_legal.py` (env-driven entity + hide-when-unset).
 
 **Arrived-at verdict: GO** — all P1 findings closed, every actionable gap resolved;
 the only outstanding inputs are the operator's live credentials + company details.

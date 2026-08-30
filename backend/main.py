@@ -950,11 +950,12 @@ def _legal_entity_block(lang: str) -> str:
     if not ent:
         return ""
     if lang == "en":
-        labels = ("Commercial registry no.", "Tax ID", "Registered office")
+        labels = ("Commercial registry no.", "Tax ID", "Registered office", "Phone")
     else:
-        labels = ("السجل التجاري", "الرقم الضريبي", "المقر المسجّل")
+        labels = ("السجل التجاري", "الرقم الضريبي", "المقر المسجّل", "الهاتف")
     vals = [os.environ.get(k, "").strip() for k in
-            ("FLUXSWARM_LEGAL_REGISTRY_NO", "FLUXSWARM_LEGAL_TAX_ID", "FLUXSWARM_LEGAL_ADDRESS")]
+            ("FLUXSWARM_LEGAL_REGISTRY_NO", "FLUXSWARM_LEGAL_TAX_ID",
+             "FLUXSWARM_LEGAL_ADDRESS", "FLUXSWARM_LEGAL_PHONE")]
     bits = [f"{lab}: <b>{v}</b>" for lab, v in zip(labels, vals) if v]
     suffix = (" — " + " · ".join(bits)) if bits else ""
     heading = "Operating entity" if lang == "en" else "الكيان التشغيلي"
@@ -970,7 +971,9 @@ def privacy_page():
 <p>حقوقك (CCPA/CPRA): حق الاطلاع على بياناتك عبر <code>GET /api/account/export</code>، وحق الحذف الكامل عبر <code>DELETE /api/account</code>.</p>
 <p>يُستبعد سجلّ التدقيق الأمني (Append-only) من الحذف: يُحتفظ به للأغراض الأمنية والتحقيقية ولا يُستخدم لأي غرض تسويقي. قد تتضمن مدخلاته البريد الإلكتروني وعنوان IP تلقائياً لأغراض التحقيق في إساءة الاستخدام، وهي غير قابلة للمحو.</p>"""
     body += _legal_entity_block("ar")
-    body += f'<p>أسئلة: <a href="mailto:{contact}">{contact}</a></p>'
+    _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
+    body += f'<p>أسئلة: <a href="mailto:{contact}">{contact}</a>'
+    body += f" · {_phone}</p>" if _phone else "</p>"
     return _LEGAL_BASE.format(title="سياسة الخصوصية", body=body)
 
 
@@ -983,7 +986,9 @@ def privacy_page_en():
 <p>Your rights (CCPA/CPRA): access your data via <code>GET /api/account/export</code>, and request full erasure via <code>DELETE /api/account</code>.</p>
 <p>The security audit log is append-only and is excluded from erasure: it is retained for security and investigation purposes only, is never used for marketing, and its entries may include your email address and IP address automatically.</p>"""
     body += _legal_entity_block("en")
-    body += f'<p>Questions: <a href="mailto:{contact}">{contact}</a></p>'
+    _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
+    body += f'<p>Questions: <a href="mailto:{contact}">{contact}</a>'
+    body += f" · {_phone}</p>" if _phone else "</p>"
     return _LEGAL_BASE_EN.format(title="Privacy Policy", body=body)
 
 
@@ -995,7 +1000,9 @@ def terms_page():
 <p>تُمنح الائتمانات عند تأكيد الدفع فقط. تُرفض أنشطة إساءة الاستخدام أو المحتوى غير القانوني أو إشباع السرب بشكل ضار، وقد يوقف الحساب.</p>
 <p>تُطبَّق هذه الشروط بموجب قوانين الولايات المتحدة.</p>"""
     body += _legal_entity_block("ar")
-    body += f'<p>اتصل بنا: <a href="mailto:{contact}">{contact}</a></p>'
+    _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
+    body += f'<p>اتصل بنا: <a href="mailto:{contact}">{contact}</a>'
+    body += f" · {_phone}</p>" if _phone else "</p>"
     return _LEGAL_BASE.format(title="شروط الاستخدام", body=body)
 
 
@@ -1007,7 +1014,9 @@ def terms_page_en():
 <p>Credits are granted only after a confirmed payment. Abuse, unlawful content, or harmful swarm activity is prohibited and may result in account suspension.</p>
 <p>These terms are governed by the laws of the United States.</p>"""
     body += _legal_entity_block("en")
-    body += f'<p>Contact: <a href="mailto:{contact}">{contact}</a></p>'
+    _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
+    body += f'<p>Contact: <a href="mailto:{contact}">{contact}</a>'
+    body += f" · {_phone}</p>" if _phone else "</p>"
     return _LEGAL_BASE_EN.format(title="Terms of Service", body=body)
 
 
