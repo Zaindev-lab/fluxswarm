@@ -247,6 +247,12 @@ Server restarted through `run.ps1` so the process environment carries the Paddle
   parallelism by the user's plan, and **refund the credit on launch failure** (all
   audited). Anonymous (unlinked) launch remains for the demo; full auth-gating is an
   operator decision before public exposure.
+- **EN UI completion**: `index.html` is now fully localized — the `t()`/`fmt()`
+  helpers feed every dynamic string (toasts, plan cards, task counter, marketplace,
+  auth flow, Telegram panel), static labels carry `data-i18n`, plan descriptions map
+  per id, language choice persists (localStorage), and switching live-renders the
+  dynamic sections. Verified with a Node harness (ar-init + EN-toggle, no
+  missing-key/TDZ failures).
 
 ### 6.7 Remaining open items (all optional / operator-only — none blocking)
 
