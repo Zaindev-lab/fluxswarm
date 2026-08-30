@@ -1029,6 +1029,36 @@ def api_account_delete(request: Request, user: dict = Depends(get_current_user))
     return {"ok": removed, "note": "تم حذف الحساب وكل البيانات المرتبطة به"}
 
 
+# ---------- Telegram account linking ----------
+@app.get("/api/telegram/link")
+def api_telegram_link(request: Request, user: dict = Depends(get_current_user)):
+    """Issue (or reuse) the one-time pairing code the user types to the bot.
+
+    The code binds the bot chat to this account; at most one active code per
+    user (TTL 10 min), so repeated calls simply re-serve the same code.
+    """
+    code = db.new_telegram_link_code(user["id"])
+    audit.audit("telegram.code", uid=user["id"], email=user["email"],
+                ip=_client_ip(request), outcome="ok")
+    return {"code": code, "ttl_seconds": db.TELEGRAM_LINK_TTL,
+            "bot": os.environ.get("TELEGRAM_BOT_USERNAME", "fluxswarm_bot")}
+
+
+@app.get("/api/telegram/status")
+def api_telegram_status(request: Request, user: dict = Depends(get_current_user)):
+    link = db.get_telegram_link(user["id"])
+    return {"linked": bool(link), "telegram_chat_id": link["telegram_chat_id"] if link else None,
+            "linked_at": link["linked_at"] if link else None}
+
+
+@app.delete("/api/telegram/link")
+def api_telegram_unlink(request: Request, user: dict = Depends(get_current_user)):
+    removed = db.unlink_telegram(user["id"])
+    audit.audit("telegram.unlink", uid=user["id"], email=user["email"],
+                ip=_client_ip(request), outcome="ok" if removed else "missing")
+    return {"ok": removed}
+
+
 # ---------- squad marketplace ----------
 class TemplateIn(BaseModel):
     name: str

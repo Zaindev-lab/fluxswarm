@@ -87,7 +87,9 @@ Paddle is the seller of record (`payments.py:104-123`, `.env.example:22-27`, `ma
 
 ### 3.1 Results
 - **Command:** `C:\Users\DELL\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe -m pytest backend/tests -q`
-- **Result: `57 passed in 4.41s`** (100% pass; 7 tests added for the Paddle refund path in the post-fix pass, see §6). Original audit: 50 passed.
+- **Result: `65 passed`** (100% pass; 7 tests added for the Paddle refund path, 6 for
+  Telegram account linking, 2 for CCPA HTTP + audit sensitive-key stripping in later passes).
+  Original audit: 50 passed.
 - **`python -m py_compile` on every `backend/*.py`: all 15 modules compile cleanly.**
 
 ### 3.2 Stage-5 surface coverage — AUDITED, gaps reported (no code added)
@@ -109,9 +111,11 @@ Paddle is the seller of record (`payments.py:104-123`, `.env.example:22-27`, `ma
 | `transaction_id` → paying user mapping (`db.payment_user_by_txn`) | ✅ | `test_paddle.py:205-212` |
 | HTTP-level signed refund closes the loop (pro → demo, credits kept) | ✅ | `test_paddle_flow_api.py:194-224` |
 
-### 3.3 Coverage gaps (REPORTED, not fixed)
-- **G-1 (P2):** No HTTP-level TestClient test for `GET /api/account/export` or `DELETE /api/account` through the FastAPI app (current tests exercise `db.account_payload`/`db.delete_user` directly). The routes are thin wrappers, so risk is low, but an end-to-end auth'd TestClient assertion would close the gap.
-- **G-2 (P2):** No test asserts the **audit trail omits sensitive keys** end-to-end (i.e. a payment webhook whose `detail` would contain a secret is never written). `audit.py` logic is unit-trustworthy but untested against the sensitive-key set.
+### 3.3 Coverage gaps (all REPORTED gaps now closed in later passes)
+- **G-1 ✅** HTTP-level TestClient end-to-end assertions for `GET /api/account/export`
+  and `DELETE /api/account` were added in §6 (``test_account_export_delete_via_api``).
+- **G-2 ✅** An end-to-end test now proves the audit trail omits sensitive keys
+  (``test_audit_trail_strips_sensitive_keys``); `audit.py` `_SENSITIVE_KEYS` extended.
 - **G-3 (P2):** `deploy/bootstrap.sh` orchestration (Caddy render, `.env` generation) is **not** covered by any automated test; only `bash -n` syntax was checked here.
 - **G-4 (P3 — PARTIALLY CLOSED):** No DB-level credit-retention assertion, but the API level now asserts `credits == 120` after refund in `test_paddle_flow_api.py:194-224` (both refund tests). DB-level assertion remains a nice-to-have.
 
@@ -234,6 +238,15 @@ Server restarted through `run.ps1` so the process environment carries the Paddle
 - **Go-live guide**: new `backend/PADDLE_LIVE_CHECKLIST.md` — Paddle live signup,
   domain/business/identity verification (documents Paddle accepts), business
   settings, key/catalog swap, live smoke test incl. refund, rollback, ops cadence.
+- **Telegram account linking (REVIEW_OUTCOME #5, partial ✅)**: new pair-code flow —
+  `GET /api/telegram/link` issues a one-time 10-min code, the bot redeems it
+  (`/link <code>`) via `db.consume_telegram_link_code`; `/api/telegram/status` and
+  `DELETE /api/telegram/link` manage the binding; the link is exported with the CCPA
+  payload and wiped on account deletion. Once linked, bot launches use a
+  **user-scoped board** (`u<uid>-tg-…`), **spend one credit** per goal, cap
+  parallelism by the user's plan, and **refund the credit on launch failure** (all
+  audited). Anonymous (unlinked) launch remains for the demo; full auth-gating is an
+  operator decision before public exposure.
 
 ### 6.7 Remaining open items (all optional / operator-only — none blocking)
 

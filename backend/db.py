@@ -111,6 +111,19 @@ def init_db():
             detail TEXT NOT NULL DEFAULT '{}',
             created_at REAL NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS telegram_links (
+            telegram_chat_id INTEGER PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            linked_at REAL NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );
+        CREATE TABLE IF NOT EXISTS telegram_codes (
+            code TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            expires_at REAL NOT NULL,
+            used INTEGER NOT NULL DEFAULT 0,
+            created_at REAL NOT NULL
+        );
         """
     )
     c.commit()
@@ -393,6 +406,110 @@ def payment_user_by_txn(txn_id: str) -> int | None:
         c.close()
 
 
+# ---------- Telegram account linking ----------
+TELEGRAM_LINK_TTL = 600  # seconds a pairing code stays valid
+
+
+def new_telegram_link_code(user_id: int, ttl: int = TELEGRAM_LINK_TTL) -> str:
+    """Issue a one-time pairing code for a user.
+
+    A user holds at most one *active* (unused + unexpired) code at a time; a
+    still-valid code is re-served instead of minting a new one, which throttles
+    code generation (one per 10 min) without a separate limiter.
+    """
+    c = _conn()
+    try:
+        now = time.time()
+        c.execute("DELETE FROM telegram_codes WHERE used=1 OR expires_at < ?", (now,))
+        row = c.execute(
+            "SELECT code FROM telegram_codes WHERE user_id=? AND used=0 AND expires_at >= ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (user_id, now),
+        ).fetchone()
+        if row:
+            return row["code"]
+        for _ in range(8):
+            code = secrets.token_hex(3).upper()
+            try:
+                c.execute(
+                    "INSERT INTO telegram_codes (code,user_id,expires_at,used,created_at) VALUES (?,?,?,0,?)",
+                    (code, user_id, now + ttl, now),
+                )
+                c.commit()
+                return code
+            except sqlite3.IntegrityError:
+                continue
+        raise ValueError("could_not_generate_code")
+    finally:
+        c.close()
+
+
+def consume_telegram_link_code(code: str, telegram_chat_id: int) -> dict | None:
+    """Redeem a pairing code as PLAIN chat id -> account; None when invalid.
+
+    Expired or already-used codes are cleared and rejected. The resulting link
+    is upserted so re-pairing a chat to a different account (or vice versa) just
+    overwrites the old binding. Called from the bot process on ``/link``.
+    """
+    c = _conn()
+    try:
+        now = time.time()
+        c.execute("DELETE FROM telegram_codes WHERE used=1 OR expires_at < ?", (now,))
+        row = c.execute(
+            "SELECT * FROM telegram_codes WHERE code=?", (str(code).strip().upper(),)
+        ).fetchone()
+        if not row:
+            return None
+        if row["used"] or row["expires_at"] < now:
+            return None
+        uid = row["user_id"]
+        # Replace any existing binding for this chat/user (move link, not stack).
+        c.execute("DELETE FROM telegram_links WHERE telegram_chat_id=? OR user_id=?", (telegram_chat_id, uid))
+        c.execute("INSERT INTO telegram_links (telegram_chat_id,user_id,linked_at) VALUES (?,?,?)",
+                  (telegram_chat_id, uid, now))
+        c.execute("UPDATE telegram_codes SET used=1 WHERE code=? AND used=0", (row["code"],))
+        c.commit()
+        user = c.execute("SELECT id, name, plan FROM users WHERE id=?", (uid,)).fetchone()
+        return dict(user)
+    finally:
+        c.close()
+
+
+def get_user_by_telegram_chat(telegram_chat_id: int) -> dict | None:
+    """Resolve which (if any) platform account a Telegram chat is linked to."""
+    c = _conn()
+    try:
+        row = c.execute(
+            "SELECT u.* FROM telegram_links t JOIN users u ON u.id=t.user_id "
+            "WHERE t.telegram_chat_id=?",
+            (telegram_chat_id,),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        c.close()
+
+
+def get_telegram_link(user_id: int) -> dict | None:
+    c = _conn()
+    try:
+        row = c.execute(
+            "SELECT telegram_chat_id, linked_at FROM telegram_links WHERE user_id=?", (user_id,)
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        c.close()
+
+
+def unlink_telegram(user_id: int) -> bool:
+    c = _conn()
+    try:
+        cur = c.execute("DELETE FROM telegram_links WHERE user_id=?", (user_id,))
+        c.commit()
+        return cur.rowcount > 0
+    finally:
+        c.close()
+
+
 # ---------- CCPA / account rights ----------
 def account_payload(user_id: int) -> dict:
     """Everything the platform holds about a user (CCPA/CPRA right to access)."""
@@ -414,8 +531,11 @@ def account_payload(user_id: int) -> dict:
             "SELECT template_id,created_at FROM template_purchases WHERE buyer_id=?", (user_id,))]
         pays = [dict(r) for r in c.execute(
             "SELECT id,gateway,kind,created_at FROM payment_events WHERE user_id=?", (user_id,))]
+        tg = [dict(r) for r in c.execute(
+            "SELECT telegram_chat_id,linked_at FROM telegram_links WHERE user_id=?", (user_id,))]
         return {"user": dict(u), "projects": projects, "referrals": refs,
-                "templates": tpls, "template_purchases": buys, "payment_events": pays}
+                "templates": tpls, "template_purchases": buys, "payment_events": pays,
+                "telegram_links": tg}
     finally:
         c.close()
 
@@ -434,6 +554,7 @@ def delete_user(user_id: int) -> bool:
             "DELETE FROM template_purchases WHERE buyer_id=?",
             "DELETE FROM referrals WHERE referrer_code=?",
             "DELETE FROM payment_events WHERE user_id=?",
+            "DELETE FROM telegram_links WHERE user_id=?",
             "DELETE FROM users WHERE id=?",
         ):
             try:
@@ -573,6 +694,19 @@ def get_user_credits(user_id: int) -> int:
     try:
         row = c.execute("SELECT credits FROM users WHERE id=?", (user_id,)).fetchone()
         return int(row["credits"]) if row else 0
+    finally:
+        c.close()
+
+
+def add_credit(user_id: int, amount: int = 1) -> bool:
+    """Top up credits (used to refund a spent credit on launch failure)."""
+    if amount <= 0:
+        return False
+    c = _conn()
+    try:
+        cur = c.execute("UPDATE users SET credits = credits + ? WHERE id=?", (amount, user_id))
+        c.commit()
+        return cur.rowcount > 0
     finally:
         c.close()
 
