@@ -25,9 +25,35 @@ fi
 tar czf "$BACKUP_DIR/$NAME" \
   -C "$REPO_DIR" backend/data .env 2>/dev/null || true
 
-# Rotate: keep the newest 7 of each pattern.
-ls -1t "$BACKUP_DIR"/fluxswarm-*.tar.gz 2>/dev/null | tail -n +8 | xargs -r rm
-ls -1t "$BACKUP_DIR"/kanban-*.tar.gz 2>/dev/null | tail -n +8 | xargs -r rm
+# Optional age-encrypted off-site copy (D-2): when a recipient is configured, the
+# tarball is re-encrypted and the plaintext is REMOVED, so the box never stores
+# raw PII/credentials in the clear. Encrypt with your own keypair:
+#   age-keygen -o backup.agekey      # keep this OFF the host
+# then export FLUXSWARM_BACKUP_AGE_RECIPIENT=$(age-keygen -y backup.agekey)
+# in the crontab/shell that runs backup.sh.
+if [[ -n "${FLUXSWARM_BACKUP_AGE_RECIPIENT:-}" ]]; then
+  if command -v age >/dev/null 2>&1; then
+    age -r "$FLUXSWARM_BACKUP_AGE_RECIPIENT" -o "$BACKUP_DIR/$NAME.age" "$BACKUP_DIR/$NAME"
+    rm -f "$BACKUP_DIR/$NAME"
+    NAME="$NAME.age"
+    echo "encrypted off-site copy: $BACKUP_DIR/$NAME"
+  else
+    echo "WARN: FLUXSWARM_BACKUP_AGE_RECIPIENT is set but 'age' is not installed — keeping plaintext." >&2
+  fi
+fi
+
+# Rotate: keep the newest 7 of each pattern (nullglob-safe — no matches = no-op,
+# so the FIRST backup on a fresh box succeeds where `ls` over an empty glob would
+# return exit 2 and kill the script under set -euo pipefail).
+shopt -s nullglob
+for pat in 'fluxswarm-*.tar.gz' 'fluxswarm-*.tar.gz.age' 'kanban-*.tar.gz'; do
+  files=("$BACKUP_DIR"/$pat)
+  if ((${#files[@]} > 7)); then
+    mapfile -t newest < <(printf '%s\n' "${files[@]}" | sort -rV)
+    rm -f "${newest[@]:7}"
+  fi
+done
+shopt -u nullglob
 
 echo "backup: $BACKUP_DIR/$NAME ($(du -h "$BACKUP_DIR/$NAME" | cut -f1))"
-echo "rotations kept: $(ls -1 "$BACKUP_DIR"/fluxswarm-*.tar.gz 2>/dev/null | wc -l)"
+echo "rotations kept: $(ls -1 "$BACKUP_DIR"/fluxswarm-*.tar.gz* 2>/dev/null | wc -l)"

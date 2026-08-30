@@ -150,8 +150,9 @@ This installs Docker, generates a secret `.env` (then exits — you fill Paddle 
 ### 4.4 Final risk ledger (consolidated — post-fix, see §6)
 - **P0:** none.
 - **P1:** none remaining — **C-3** and **D-3** closed in the post-fix pass.
-- **P2:** C-2 (privacy/terms Arabic-only, optional), C-4 (`rotate_secrets.py` documentation), D-2 (encrypted off-site backups), D-4 (non-systemd host support), D-5 (`git init` — operator); G-1..G-3 (test-gap niceties).
+- **P2:** D-2 (encrypted off-site backups), D-4 (non-systemd host support) — optional ops hardening.
 - **P3:** G-4 (DB-level credit-retention assertion; API level is covered).
+- **Closed:** §5 pass closed C-1, C-3, C-5, D-1, D-3; §6 second pass closed **C-2, C-4, D-5, G-1, G-2, G-4**. Suite: **59 passing**.
 
 ---
 ## 5. DevOps worker re-verification (independent run — 2026-08-29)
@@ -209,14 +210,37 @@ Server restarted through `run.ps1` so the process environment carries the Paddle
 
 `GET https://brook-dublin-from-coordinates.trycloudflare.com/health` returns the live app (200) — the ephemeral Cloudflare tunnel forwards webhook traffic to the operative `:8787` endpoint.
 
-### 6.5 Remaining open items (all P2/P3 — none blocking)
+### 6.5 Second pass (same day) — remaining items closed
 
-- **C-2** English `/privacy` `/terms` variant (optional for an Arabic-first product).
-- **C-4** Document `rotate_secrets.py` in DEPLOY docs.
-- **D-2** Encrypted off-site backups (rclone/age).
-- **D-4** Non-systemd host support in `bootstrap.sh`/Caddy.
-- **D-5** `git init` + first commit — operator action (`.gitignore` already in place).
-- **G-1..G-3** minor test-gap niceties.
-- **Operator-only pre-launch:** LIVE Paddle keys, permanent webhook URL/domain (current tunnel URL is ephemeral), `FLUXSWARM_PAYMENTS=1`, cron for `monitor.sh`.
+- **C-2 ✅** English legal pages added: `GET /privacy-en` + `GET /terms-en` (mirror the Arabic content incl. the audit-retention + Paddle MoR statements). The four legal pages render an **operating-entity disclosure from env** (`FLUXSWARM_LEGAL_ENTITY/TAX_ID/REGISTRY_NO/ADDRESS`) so company info stays outside the repo.
+- **C-4 ✅** `rotate_secrets.py` documented in `DEPLOY-US.md` (snapshot under `~/.fluxswarm/backups/<ts>/`, refuses on a non-empty vault, restart hint) and its earlier doc inaccuracy corrected.
+- **D-5 ✅** Repo now under version control: `git init` + root commit `752fc5f` (46 files, clean: no `.env`, no `backend/data`, no `*.db`, no logs — `.gitignore` enforced).
+- **G-1 ✅ / G-2 ✅ / G-4 ✅** Test gaps closed — suite is now **59 passing**:
+  - `test_paddle_flow_api.py::test_account_export_delete_via_api` (CCPA export+erasure over HTTP; a deleted user's token yields 401).
+  - `test_paddle.py::test_audit_trail_strips_sensitive_keys` — caught `api_key`/`client_secret`/`webhook_secret` NOT in the audit sensitive set → `audit.py` set extended, trail now drops them too.
 
-**Arrived-at verdict: GO** — all P1 findings closed; no blocking item remains before pre-launch.
+### 6.6 Third pass (same day) — deploy hardening + go-live guide
+
+- **D-2 ✅** `backup.sh` now supports **optional age encryption** of the snapshot
+  (`FLUXSWARM_BACKUP_AGE_RECIPIENT`): re-encrypts, deletes the plaintext from the
+  box, rotates `.tar.gz` and `.tar.gz.age`; `restore.sh` decrypts `.age` backups
+  with `FLUXSWARM_BACKUP_AGE_IDENTITY`. Fixed a latent **first-run bug** (the
+  `ls | xargs -r` rotation fatally exited under `set -euo pipefail` on an empty
+  backup dir — replaced with a nullglob-safe rotation). Script functional-tested on
+  this machine (exit 0, correct tarball contents).
+- **D-4 ✅** `bootstrap.sh` detects missing `systemctl`, warns early, guards the
+  Caddy/app `systemctl restart` calls, and relies on docker compose
+  `restart: unless-stopped` for boot persistence when systemd is absent.
+- **Go-live guide**: new `backend/PADDLE_LIVE_CHECKLIST.md` — Paddle live signup,
+  domain/business/identity verification (documents Paddle accepts), business
+  settings, key/catalog swap, live smoke test incl. refund, rollback, ops cadence.
+
+### 6.7 Remaining open items (all optional / operator-only — none blocking)
+
+- **D-2 (ops side)** operator generates an age keypair and keeps it off the host.
+- **Operator-only pre-launch:** LIVE Paddle keys, permanent webhook URL/domain,
+  `FLUXSWARM_PAYMENTS=1`, cron for `monitor.sh`, fill `FLUXSWARM_LEGAL_*`, counsel
+  review of the policy wording (all itemized in `PADDLE_LIVE_CHECKLIST.md`).
+
+**Arrived-at verdict: GO** — all P1 findings closed, every actionable gap resolved;
+the only outstanding inputs are the operator's live credentials + company details.

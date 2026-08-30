@@ -33,6 +33,19 @@ done
 log() { echo -e "\033[1;34m[fluxswarm]\033[0m $*"; }
 die() { echo -e "\033[1;31m[fluxswarm]\033[0m $*" >&2; exit 1; }
 
+# ---------- 0. systemd detection (D-4) ----------
+# Some hosts (container VMs, minimal images) ship without systemd. Warn early and
+# degrade gracefully instead of hard-failing on unguarded `systemctl restart`.
+# Boot persistence for the app rides on docker compose `restart: unless-stopped`,
+# so the systemd unit is optional polish, not a requirement.
+SYSTEMD_CTL=""
+if command -v systemctl >/dev/null 2>&1; then SYSTEMD_CTL=systemctl; fi
+if [[ -z "$SYSTEMD_CTL" ]]; then
+  log "WARN: systemctl not found — Caddy and the systemd unit are NOT managed automatically."
+  log "      start Caddy manually:  caddy run --config /etc/caddy/Caddyfile"
+  log "      app restarts are already covered by docker compose restart: unless-stopped."
+fi
+
 # ---------- 1. docker ----------
 if ! command -v docker >/dev/null 2>&1; then
   log "installing docker engine"
@@ -101,13 +114,18 @@ mkdir -p /etc/caddy
 sed -e "s/__DOMAIN__/$DOMAIN/g" -e "s/__ADMIN_EMAIL__/$EMAIL/g" \
   "$REPO_DIR/deploy/Caddyfile.us" > /etc/caddy/Caddyfile
 log "Caddy configured for https://$DOMAIN -> 127.0.0.1:8787"
-systemctl enable caddy >/dev/null 2>&1 || true
-systemctl restart caddy
+if [[ -n "$SYSTEMD_CTL" ]]; then
+  "$SYSTEMD_CTL" enable caddy >/dev/null 2>&1 || true
+  "$SYSTEMD_CTL" restart caddy || log "WARN: could not systemctl restart caddy — start it manually."
+else
+  log "systemd unavailable — start Caddy manually:  caddy run --config /etc/caddy/Caddyfile"
+fi
 
-# ---------- 5. systemd for the app (boot persistence) ----------
-UNIT=/etc/systemd/system/fluxswarm.service
-if [[ ! -f "$UNIT" ]]; then
-  cat > "$UNIT" <<EOF
+# ---------- 5. optional systemd unit for the app (boot persistence) ----------
+if [[ -n "$SYSTEMD_CTL" ]]; then
+  UNIT=/etc/systemd/system/fluxswarm.service
+  if [[ ! -f "$UNIT" ]]; then
+    cat > "$UNIT" <<EOF
 [Unit]
 Description=FluxSwarm (docker compose: app + redis)
 Requires=docker.service
@@ -124,10 +142,13 @@ ExecStop=$COMPOSE -f $REPO_DIR/docker-compose.yml --env-file $ENV_FILE down
 [Install]
 WantedBy=multi-user.target
 EOF
-  systemctl daemon-reload
-  systemctl enable fluxswarm >/dev/null
+    "$SYSTEMD_CTL" daemon-reload
+    "$SYSTEMD_CTL" enable fluxswarm >/dev/null 2>&1 || true
+  fi
+  "$SYSTEMD_CTL" restart fluxswarm || log "WARN: could not systemctl restart fluxswarm — compose already runs it."
+else
+  log "systemd unavailable — app boot persistence relies on docker compose restart: unless-stopped."
 fi
-systemctl restart fluxswarm
 
 # ---------- 6. health gate ----------
 log "waiting for health"
