@@ -50,6 +50,9 @@ REFERRAL_REWARD_CREDITS = 25  # credits granted to referrer when referred user s
 def _conn() -> sqlite3.Connection:
     c = sqlite3.connect(DB)
     c.row_factory = sqlite3.Row
+    # Enforce FK constraints (DB-1): schema is FK-clean, and delete_user already
+    # removes children before the user row, so this is safe to enable.
+    c.execute("PRAGMA foreign_keys=ON")
     return c
 
 
@@ -124,6 +127,16 @@ def init_db():
             used INTEGER NOT NULL DEFAULT 0,
             created_at REAL NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS demo_usage (
+            who TEXT NOT NULL,
+            day TEXT NOT NULL,
+            count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (who, day)
+        );
+        CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_id);
+        CREATE INDEX IF NOT EXISTS idx_purchases_template ON template_purchases(template_id);
+        CREATE INDEX IF NOT EXISTS idx_purchases_buyer ON template_purchases(buyer_id);
+        CREATE INDEX IF NOT EXISTS idx_referrals_code ON referrals(referrer_code);
         """
     )
     c.commit()
@@ -255,6 +268,28 @@ def add_project(user_id: int, board_slug: str, name: str, goal: str) -> int:
     c.commit()
     c.close()
     return pid
+
+
+def bump_demo_usage(who: str, day: str) -> int:
+    """Increment a daily demo-usage bucket atomically; returns the NEW count.
+
+    `who` = "anon" for the public instant demo, or "u{user_id}" for an
+    authenticated user dispatching shared flux-demo-* boards. The front-line
+    abuse cap (P0, FIX-1): demo surfaces are cost-bearing, so they cannot be
+    unlimited regardless of plan.
+    """
+    c = _conn()
+    try:
+        c.execute(
+            "INSERT INTO demo_usage(who, day, count) VALUES(?,?,1) "
+            "ON CONFLICT(who,day) DO UPDATE SET count = count + 1",
+            (who, day),
+        )
+        c.commit()
+        row = c.execute("SELECT count FROM demo_usage WHERE who=? AND day=?", (who, day)).fetchone()
+        return int(row["count"])
+    finally:
+        c.close()
 
 
 def list_user_projects(user_id: int) -> list[dict]:

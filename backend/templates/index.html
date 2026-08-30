@@ -3,6 +3,12 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="FluxSwarm — اكتب الهدف وابنِ تطبيقك مع سرب ECC من 6 وكلاء ذكاء اصطناعي يعمل مباشرة. BYOK يعني أنت تدفع توكناتك." />
+<meta property="og:title" content="FluxSwarm — منصة بناء الوكلاء" />
+<meta property="og:description" content="اكتب الهدف — سرب من 6 وكلاء ECC يبني تطبيقك مباشرة. BYOK يعني أنت تدفع توكناتك." />
+<meta property="og:type" content="website" />
+<meta name="twitter:card" content="summary" />
+{% if canonical %}<link rel="canonical" href="{{ canonical }}" />{% endif %}
 <title>FluxSwarm — منصة بناء الوكلاء</title>
 <style>
   :root{
@@ -58,15 +64,23 @@
   .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--panel);border:1px solid var(--border);padding:10px 16px;border-radius:10px;font-size:13px;display:none;z-index:60}
   .toast.show{display:block}
   .pill{display:inline-block;font-size:11px;padding:2px 8px;border-radius:999px;background:var(--panel2);border:1px solid var(--border);color:var(--muted)}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .skip-link{position:absolute;left:-9999px;top:0;z-index:100;background:var(--accent);color:#04121a;padding:8px 14px;border-radius:0 0 8px 0;text-decoration:none;font-weight:700}
+  .skip-link:focus{left:0}
+  @media (prefers-reduced-motion: reduce){
+    .s-running{animation:none}
+    *{animation:none!important;transition:none!important}
+  }
 </style>
 </head>
 <body>
-<header>
+<a class="skip-link" href="#main" data-i18n="skip_link">تخطَّ إلى المحتوى</a>
+<header role="navigation" aria-label="FluxSwarm">
   <h1>⚡ FluxSwarm</h1>
   <span class="tag" data-i18n="header_tag">منصة بناء المشاريع بالوكلاء — سرب ECC devops</span>
   <span class="spacer"></span>
-  <button class="nav" onclick="setLang('ar')">🇸🇦 ع</button>
-  <button class="nav" onclick="setLang('en')">🇬🇧 EN</button>
+  <button class="nav" onclick="setLang('ar')" aria-label="العربية">🇸🇦 ع</button>
+  <button class="nav" onclick="setLang('en')" aria-label="English">🇬🇧 EN</button>
   <span id="userPill" class="pill hidden"></span>
   <button class="nav" id="navPricing" onclick="gotoSection('pricing')" data-i18n="nav_pricing">الباقات</button>
   <button class="nav" id="navRef" onclick="gotoSection('referrals')" data-i18n="nav_ref">الإحالات</button>
@@ -74,7 +88,7 @@
   <button class="nav" id="navMarket" onclick="gotoSection('market')" data-i18n="nav_market">المتجر</button>
   <button class="nav" id="navLogin" onclick="openAuth()" data-i18n="nav_login">دخول / تسجيل</button>
 </header>
-<main>
+<main id="main" role="main">
 
   <!-- HERO / CREATE -->
   <div class="card" id="hero">
@@ -301,6 +315,7 @@ async function buyTpl(id){if(!token){openAuth();return;}
 /* ===================== i18n ===================== */
 const I18N = {
   ar: {
+    skip_link:"تخطَّ إلى المحتوى",
     header_tag:"منصة بناء المشاريع بالوكلاء — سرب ECC devops",
     nav_pricing:"الباقات", nav_ref:"الإحالات", nav_byok:"مفاتيحي", nav_login:"دخول / تسجيل", nav_market:"المتجر",
     hero_title:"أنشئ مشروعاً بسرب كامل من الوكلاء", lbl_pname:"اسم المشروع", lbl_pgoal:"هدف البناء (ينفّذه السرب)",
@@ -342,6 +357,7 @@ const I18N = {
     tg_code_ttl:"الرمز صالح لمدة", tg_unlinked:"تم إلغاء الربط", tg_unlink_fail:"فشل إلغاء الربط"
   },
   en: {
+    skip_link:"Skip to content",
     header_tag:"Agent-powered project builder — ECC devops squad",
     nav_pricing:"Pricing", nav_ref:"Referrals", nav_byok:"My Keys", nav_login:"Login / Sign up", nav_market:"Marketplace",
     hero_title:"Launch a project with a full agent squad", lbl_pname:"Project name", lbl_pgoal:"Build goal (the squad will execute it)",

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import atexit
+import datetime
 import ipaddress
 import json
 import os
@@ -157,6 +158,20 @@ def _payments_enabled() -> bool:
     return os.environ.get("FLUXSWARM_PAYMENTS", "").strip().lower() in ("1", "true", "yes")
 
 
+def _operator_maintenance() -> bool:
+    """Operator kill-switch (FIX-1): when FLUXSWARM_KILL_SWITCH=1, ALL
+    cost-bearing/demo surfaces reject with 503. Default off."""
+    return os.environ.get("FLUXSWARM_KILL_SWITCH", "").strip().lower() in ("1", "true", "yes")
+
+
+_DEMO_DAILY_CAP = int(os.environ.get("FLUXSWARM_DEMO_DAILY_CAP", "25"))
+
+
+def _today() -> str:
+    """Local calendar day (YYYY-MM-DD) — the period key for durable demo caps."""
+    return datetime.date.today().isoformat()
+
+
 # ---------- security headers ----------
 # Paddle Checkout overlay needs: SDK script (cdn.paddle.com), its iframe
 # (checkout / sandbox-checkout), and API calls (api.paddle.com).
@@ -257,13 +272,13 @@ def get_current_user(request: Request) -> dict:
 class RegisterIn(BaseModel):
     email: str
     name: str
-    password: str
+    password: str = Field(max_length=4096)
     ref: str | None = None
 
 
 class LoginIn(BaseModel):
     email: str
-    password: str
+    password: str = Field(max_length=4096)
 
 
 class ProjectCreate(BaseModel):
@@ -275,7 +290,9 @@ class ProjectCreate(BaseModel):
 # ---------- marketing / public ----------
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
-    return templates.TemplateResponse(request=request, name="index.html", context={"title": "FluxSwarm"})
+    base = os.environ.get("FLUXSWARM_PUBLIC_BASE_URL", "").strip().rstrip("/")
+    return templates.TemplateResponse(request=request, name="index.html",
+                                      context={"title": "FluxSwarm", "canonical": base + "/" if base else ""})
 
 
 @app.get("/api/plans")
@@ -302,10 +319,15 @@ def api_demo_launch(request: Request):
     demo user's own plan cap (demo -> parallel 1), not a fixed 8.
 
     A per-IP burst cap prevents anonymous abuse (each launch runs a real,
-    compute-costly Hermes swarm).
+    compute-costly Hermes swarm); a durable daily cap bounds total cost per
+    bucket and an operator kill-switch can halt ALL demo/cost-bearing surfaces.
     """
+    if _operator_maintenance():
+        raise HTTPException(status_code=503, detail="الخدمة في صيانة مؤقتة — حاول لاحقاً")
     if not limiter.ip_allowed(_client_ip(request)):
         raise HTTPException(status_code=429, detail="محاولات كثيرة جداً — انتظر قليلاً")
+    if db.bump_demo_usage("anon", _today()) > _DEMO_DAILY_CAP:
+        raise HTTPException(status_code=429, detail="تجاوزت حد الاستخدام التجريبي اليومي")
     demo = db.get_user_by_id(1) or db.get_user_by_ref("demo")
     if demo is None:
         # db.seed_demo() runs at import, but guard anyway: a missing demo user
@@ -471,6 +493,10 @@ def api_tasks(slug: str, user: dict = Depends(get_current_user)):
 def api_dispatch(slug: str, dry_run: bool = False, user: dict = Depends(get_current_user)):
     if not slug.startswith(f"u{user['id']}-") and not slug.startswith("flux-demo-"):
         raise HTTPException(status_code=403, detail="غير مصرّح")
+    if _operator_maintenance():
+        raise HTTPException(status_code=503, detail="الخدمة في صيانة مؤقتة — حاول لاحقاً")
+    if slug.startswith("flux-demo-") and db.bump_demo_usage(f"u{user['id']}", _today()) > _DEMO_DAILY_CAP:
+        raise HTTPException(status_code=429, detail="تجاوزت حد الاستخدام التجريبي اليومي")
     try:
         return hc.dispatch(slug, max_spawn=db.PLANS[user["plan"]]["parallel"], dry_run=dry_run)
     except Exception as e:
@@ -599,109 +625,13 @@ async def api_payments_webhook(request: Request):
         raise HTTPException(status_code=503, detail="webhook غير مهيأ")
     body = await request.body()
     signature = request.headers.get("Paddle-Signature")
-    if not getattr(gw, "operative", False):
-        audit.audit("payments.webhook", outcome="fail", reason="gateway_not_configured",
-                    ip=_client_ip(request))
-        raise HTTPException(status_code=503, detail="webhook غير مهيأ")
-    try:
-        processed = _process_paddle_payload(body, signature, request)
-    except HTTPException:
-        _debug_webhook_failure(body, signature, request)
-        raise
+    processed = _process_paddle_payload(body, signature, request)
     return {"accepted": True, "deduplicated": processed.get("deduplicated", False)}
 
 
 @app.get("/api/payments/webhook")
 def api_payments_webhook_get():
     raise HTTPException(status_code=405, detail="method not allowed")
-
-
-@app.get("/api/payments/debug-verify")
-def api_payments_debug_verify(request: Request, h: str = "", sig: str = ""):
-    """TEMPORARY localhost-only: report what the LIVE process computes for a
-    given webhook body (hex) + Paddle-Signature, to root-cause mismatches."""
-    if _client_ip(request) not in ("127.0.0.1", "::1"):
-        raise HTTPException(status_code=403, detail="local only")
-    import hashlib
-    import hmac
-    gw = payments_mod.get_gateway()
-    body = bytes.fromhex(h)
-    ok = gw._verify_signature(body, sig or None)
-    secret = getattr(gw, "_secret", "")
-    ts_part, _, h1_part = (sig or "").partition(";h1=")
-    parsed_ts = ts_part[3:] if ts_part.startswith("ts=") else ""
-    try:
-        float_ts = float(parsed_ts) if parsed_ts else None
-        int_ts = int(float_ts) if float_ts is not None else None
-    except ValueError:
-        int_ts = None
-    expected = None
-    if int_ts is not None:
-        expected = hmac.new(
-            secret.encode(),
-            f"paddle-{int_ts};{body.decode('utf-8', 'replace')}".encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
-    return {
-        "verify_result": ok,
-        "sig_received": (sig or "")[:60],
-        "h1_received": h1_part[:24],
-        "ts_parsed": parsed_ts,
-        "ts_int": int_ts,
-        "expected_h1": (expected or "")[:24],
-        "now_server": time.time(),
-        "secret_len": len(secret),
-        "secret_sha": hashlib.sha256(secret.encode()).hexdigest()[:16],
-        "body_len": len(body),
-        "body_sha": hashlib.sha256(body).hexdigest()[:24],
-    }
-
-
-def _debug_webhook_failure(body: bytes, signature: str | None, request: Request) -> None:
-    """TEMPORARY diagnostic: record facts about a rejected webhook so the signed
-    bytes can be compared locally. Writes to the local temp dir only."""
-    import hashlib
-
-    try:
-        gw = payments_mod.get_gateway()
-        secret = getattr(gw, "_secret", "")
-        direct = gw._verify_signature(body, signature or None)
-        redo = payments_mod.verify_paddle_signature(body, signature or "", secret=secret, now=time.time())
-        ts_part, _, h1_part = (signature or "").partition(";h1=")
-        try:
-            float_ts = float(ts_part[3:]) if ts_part.startswith("ts=") else None
-            int_ts = int(float_ts) if float_ts is not None else None
-        except ValueError:
-            int_ts = None
-        expected = None
-        if int_ts is not None:
-            expected = hmac.new(secret.encode(),
-                                f"paddle-{int_ts};{body.decode('utf-8', 'replace')}".encode("utf-8"),
-                                hashlib.sha256).hexdigest()
-        path = os.environ.get("FLUXSWARM_TMP") or r"C:\Users\DELL\AppData\Local\Temp\opencode\webhook_debug.log"
-        hashlib_bytes = hashlib.sha256(body).hexdigest()
-        body_file = rf"C:\Users\DELL\AppData\Local\Temp\opencode\wh_body_{hashlib_bytes[:16]}.bin"
-        with open(body_file, "wb") as fh:
-            fh.write(body)
-        line = (
-            "FAIL ts={ts} ctype={ct} clen={clen} sha={sha} sig={sig} "
-            "direct={direct} redo={redo} exp={exp} secret_sha={ss} dump={dump}\n"
-        ).format(
-            ts=time.time(),
-            ct=request.headers.get("Content-Type"),
-            clen=request.headers.get("Content-Length") or len(body),
-            sha=hashlib_bytes[:24],
-            sig=(signature or "").replace("\n", " "),
-            direct=direct,
-            redo=redo,
-            exp=(expected or "")[:24],
-            ss=hashlib.sha256(secret.encode()).hexdigest()[:16],
-            dump=body_file,
-        )
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(line)
-    except Exception:
-        pass
 
 
 def _process_paddle_payload(body: bytes, signature: str | None, request: Request) -> dict:
@@ -997,7 +927,8 @@ def terms_page():
     contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
     body = """<h1>شروط الاستخدام (Terms of Service)</h1>
 <p>تُقدَّم الخدمة «كما هي». الاشتراكات المدفوعة تدار بواسطة Paddle (Merchant of Record) وفق شروطها.</p>
-<p>تُمنح الائتمانات عند تأكيد الدفع فقط. تُرفض أنشطة إساءة الاستخدام أو المحتوى غير القانوني أو إشباع السرب بشكل ضار، وقد يوقف الحساب.</p>
+<p>تُمنح الائتمانات عند تأكيد الدفع فقط. لا تنتهي صلاحية الائتمانات. يُعاد رصيد الائتمانات تلقائياً عند فشل إطلاق السرب. عند استرداد مبلغ من Paddle تُحوَّل الباقة إلى Demo ويبقى الرصيد الحالي بحوزتك.</p>
+<p>تُرفض أنشطة إساءة الاستخدام أو المحتوى غير القانوني أو إشباع السرب بشكل ضار، وقد يوقف الحساب.</p>
 <p>تُطبَّق هذه الشروط بموجب قوانين الولايات المتحدة.</p>"""
     body += _legal_entity_block("ar")
     _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
@@ -1011,7 +942,8 @@ def terms_page_en():
     contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
     body = """<h1>Terms of Service</h1>
 <p>The service is provided &quot;as is&quot;. Paid subscriptions are processed by Paddle (Merchant of Record) under its own terms.</p>
-<p>Credits are granted only after a confirmed payment. Abuse, unlawful content, or harmful swarm activity is prohibited and may result in account suspension.</p>
+<p>Credits are granted only after a confirmed payment and never expire. Credits are refunded automatically when a swarm launch fails. If you obtain a refund from Paddle, your plan is downgraded to Demo and your current credit balance is kept.</p>
+<p>Abuse, unlawful content, or harmful swarm activity is prohibited and may result in account suspension.</p>
 <p>These terms are governed by the laws of the United States.</p>"""
     body += _legal_entity_block("en")
     _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()

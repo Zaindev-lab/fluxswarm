@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <!-- Replace YOUR_DOMAIN and refresh lastmod at deploy time. -->
+  <url>
+    <loc>https://YOUR_DOMAIN/</loc>
+    <priority>1.0</priority>
+  </url>
+  <url>
+    <loc>https://YOUR_DOMAIN/pricing</loc>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://YOUR_DOMAIN/privacy-en</loc>
+    <priority>0.4</priority>
+  </url>
+  <url>
+    <loc>https://YOUR_DOMAIN/terms-en</loc>
+    <priority>0.4</priority>
+  </url>
+</urlset>

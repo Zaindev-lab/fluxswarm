@@ -1,0 +1,7 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /ws/
+
+# Replace YOUR_DOMAIN at deploy time (Phase 15/Hosting checklist).
+Sitemap: https://YOUR_DOMAIN/sitemap.xml

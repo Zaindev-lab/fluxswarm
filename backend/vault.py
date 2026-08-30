@@ -14,10 +14,13 @@ is migrated out exactly once and the plaintext copy removed.
 from __future__ import annotations
 
 import base64
+import logging
 import os
 from pathlib import Path
 
 from cryptography.fernet import Fernet
+
+_log = logging.getLogger("vault")
 
 BASE = Path(__file__).resolve().parent
 _LEGACY_KEY_FILE = BASE / "data" / ".fernet_key"
@@ -84,6 +87,9 @@ def get_user_key(user_id: int, provider: str) -> str | None:
     try:
         return _FERNET.decrypt(enc.encode()).decode()
     except Exception:
+        # Never silently ship an empty/corrupt key upstream (F6/FIX-4): log the
+        # condition loudly so ops can detect key-rotation or store corruption.
+        _log.warning("vault.decrypt failed for user %s provider %s", user_id, provider)
         return None
 
 
