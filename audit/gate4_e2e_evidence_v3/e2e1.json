@@ -1,0 +1,509 @@
+{
+  "e2e_index": 1,
+  "goal": "Create a Python CLI todo app (add/list/done subcommands) with pytest unit tests and a README.md.",
+  "temp_home": "C:\\Users\\DELL\\AppData\\Local\\Temp\\opencode\\gate4_home2",
+  "slug": "u4-gate4-candidatec-e2e1",
+  "rerun_meta": {
+    "clean_single_launch": true,
+    "path_guard": "C:\\Users\\DELL\\AppData\\Local\\Temp\\opencode\\pc_guard_gate4_home2",
+    "pip_target": "C:\\Users\\DELL\\AppData\\Local\\Temp\\opencode\\pip_target_gate4_home2",
+    "max_spawn": 4,
+    "timeout_s": 10800
+  },
+  "provision": {
+    "bundled_source": true,
+    "target_exists_after": true,
+    "byte_identical_to_bundled": true
+  },
+  "swarm": {
+    "root": "t_224bfcf8",
+    "workers": [
+      "t_466c5103",
+      "t_115fd515",
+      "t_0f5af804",
+      "t_b54da29d"
+    ],
+    "verifier": "t_0bf815e3",
+    "synthesizer": "t_25b2b282"
+  },
+  "pinning_after_launch": [
+    {
+      "id": "t_0bf815e3",
+      "assignee": "ecc-reviewer",
+      "model_override": "nemotron-3-ultra-free",
+      "provider_override": "opencode-free"
+    },
+    {
+      "id": "t_0f5af804",
+      "assignee": "ecc-devops",
+      "model_override": "nemotron-3-ultra-free",
+      "provider_override": "opencode-free"
+    },
+    {
+      "id": "t_115fd515",
+      "assignee": "ecc-architect",
+      "model_override": "nemotron-3-ultra-free",
+      "provider_override": "opencode-free"
+    },
+    {
+      "id": "t_224bfcf8",
+      "assignee": "fluxswarm",
+      "model_override": "nemotron-3-ultra-free",
+      "provider_override": "opencode-free"
+    },
+    {
+      "id": "t_25b2b282",
+      "assignee": "ecc-build-fixer",
+      "model_override": "nemotron-3-ultra-free",
+      "provider_override": "opencode-free"
+    },
+    {
+      "id": "t_466c5103",
+      "assignee": "ecc-planner",
+      "model_override": "nemotron-3-ultra-free",
+      "provider_override": "opencode-free"
+    },
+    {
+      "id": "t_b54da29d",
+      "assignee": "ecc-tdd",
+      "model_override": "nemotron-3-ultra-free",
+      "provider_override": "opencode-free"
+    }
+  ],
+  "dispatch": {
+    "outcome": "stuck",
+    "terminal": false,
+    "timed_out": true,
+    "stall": true,
+    "stuck_tasks": [
+      {
+        "id": "t_466c5103",
+        "title": "Plan the feature breakdown",
+        "body": "Plan the feature breakdown\n\n## Swarm protocol\n- Swarm root / shared blackboard: `t_224bfcf8`.\n- Read sibling/parent handoffs from Kanban context before working.\n- Put machine-readable facts in completion metadata.\n- Put cross-worker notes on the root task using structured comments.\n- Goal: Create a Python CLI todo app (add/list/done subcommands) with pytest unit tests and a README.md.\n",
+        "assignee": "ecc-planner",
+        "status": "running",
+        "priority": 0,
+        "tenant": null,
+        "workspace_kind": "scratch",
+        "workspace_path": "C:\\Users\\DELL\\AppData\\Local\\Temp\\opencode\\gate4_home2\\kanban\\boards\\u4-gate4-candidatec-e2e1\\workspaces\\t_466c5103",
+        "branch_name": null,
+        "project_id": null,
+        "created_by": "fluxswarm",
+        "created_at": 1788297272,
+        "started_at": 1788297296,
+        "completed_at": null,
+        "result": null,
+        "skills": [
+          "plan-orchestrate"
+        ],
+        "max_retries": null,
+        "model_override": "nemotron-3-ultra-free",
+        "provider_override": "opencode-free",
+        "session_id": null,
+        "workflow_template_id": null,
+        "current_step_key": null,
+        "state": "running",
+        "assignee_display": "planner"
+      },
+      {
+        "id": "t_115fd515",
+        "title": "Design system architecture",
+        "body": "Design system architecture\n\n## Swarm protocol\n- Swarm root / shared blackboard: `t_224bfcf8`.\n- Read sibling/parent handoffs from Kanban context before working.\n- Put machine-readable facts in completion metadata.\n- Put cross-worker notes on the root task using structured comments.\n- Goal: Create a Python CLI todo app (add/list/done subcommands) with pytest unit tests and a README.md.\n",
+        "assignee": "ecc-architect",
+        "status": "running",
+        "priority": 0,
+        "tenant": null,
+        "workspace_kind": "scratch",
+        "workspace_path": "C:\\Users\\DELL\\AppData\\Local\\Temp\\opencode\\gate4_home2\\kanban\\boards\\u4-gate4-candidatec-e2e1\\workspaces\\t_115fd515",
+        "branch_name": null,
+        "project_id": null,
+        "created_by": "fluxswarm",
+        "created_at": 1788297272,
+        "started_at": 1788297298,
+        "completed_at": null,
+        "result": null,
+        "skills": [
+          "api-design",
+          "fastapi-patterns"
+        ],
+        "max_retries": null,
+        "model_override": "nemotron-3-ultra-free",
+        "provider_override": "opencode-free",
+        "session_id": null,
+        "workflow_template_id": null,
+        "current_step_key": null,
+        "state": "running",
+        "assignee_display": "architect"
+      },
+      {
+        "id": "t_0f5af804",
+        "title": "Set up CI/CD and containerization",
+        "body": "Set up CI/CD and containerization\n\n## Swarm protocol\n- Swarm root / shared blackboard: `t_224bfcf8`.\n- Read sibling/parent handoffs from Kanban context before working.\n- Put machine-readable facts in completion metadata.\n- Put cross-worker notes on the root task using structured comments.\n- Goal: Create a Python CLI todo app (add/list/done subcommands) with pytest unit tests and a README.md.\n",
+        "assignee": "ecc-devops",
+        "status": "running",
+        "priority": 0,
+        "tenant": null,
+        "workspace_kind": "scratch",
+        "workspace_path": "C:\\Users\\DELL\\AppData\\Local\\Temp\\opencode\\gate4_home2\\kanban\\boards\\u4-gate4-candidatec-e2e1\\workspaces\\t_0f5af804",
+        "branch_name": null,
+        "project_id": null,
+        "created_by": "fluxswarm",
+        "created_at": 1788297272,
+        "started_at": 1788297298,
+        "completed_at": null,
+        "result": null,
+        "skills": [
+          "docker-patterns",
+          "deployment-patterns"
+        ],
+        "max_retries": null,
+        "model_override": "nemotron-3-ultra-free",
+        "provider_override": "opencode-free",
+        "session_id": null,
+        "workflow_template_id": null,
+        "current_step_key": null,
+        "state": "running",
+        "assignee_display": "devops"
+      },
+      {
+        "id": "t_b54da29d",
+        "title": "Write the test suite",
+        "body": "Write the test suite\n\n## Swarm protocol\n- Swarm root / shared blackboard: `t_224bfcf8`.\n- Read sibling/parent handoffs from Kanban context before working.\n- Put machine-readable facts in completion metadata.\n- Put cross-worker notes on the root task using structured comments.\n- Goal: Create a Python CLI todo app (add/list/done subcommands) with pytest unit tests and a README.md.\n",
+        "assignee": "ecc-tdd",
+        "status": "running",
+        "priority": 0,
+        "tenant": null,
+        "workspace_kind": "scratch",
+        "workspace_path": "C:\\Users\\DELL\\AppData\\Local\\Temp\\opencode\\gate4_home2\\kanban\\boards\\u4-gate4-candidatec-e2e1\\workspaces\\t_b54da29d",
+        "branch_name": null,
+        "project_id": null,
+        "created_by": "fluxswarm",
+        "created_at": 1788297272,
+        "started_at": 1788297299,
+        "completed_at": null,
+        "result": null,
+        "skills": [
+          "tdd-workflow"
+        ],
+        "max_retries": null,
+        "model_override": "nemotron-3-ultra-free",
+        "provider_override": "opencode-free",
+        "session_id": null,
+        "workflow_template_id": null,
+        "current_step_key": null,
+        "state": "running",
+        "assignee_display": "tdd"
+      },
+      {
+        "id": "t_0bf815e3",
+        "title": "Verify swarm outputs",
+        "body": "Review every worker handoff and blackboard update. Gate the swarm: complete only with metadata {\"gate\": \"pass\"} when evidence is sufficient; otherwise block with exact missing work.\n\n## Swarm protocol\n- Swarm root / shared blackboard: `t_224bfcf8`.\n- Read sibling/parent handoffs from Kanban context before working.\n- Put machine-readable facts in completion metadata.\n- Put cross-worker notes on the root task using structured comments.\n- Goal: Create a Python CLI todo app (add/list/done subcommands) with pytest unit tests and a README.md.\n",
+        "assignee": "ecc-reviewer",
+        "status": "todo",
+        "priority": 0,
+        "tenant": null,
+        "workspace_kind": "scratch",
+        "workspace_path": null,
+        "branch_name": null,
+        "project_id": null,
+        "created_by": "fluxswarm",
+        "created_at": 1788297272,
+        "started_at": null,
+        "completed_at": null,
+        "result": null,
+        "skills": [
+          "requesting-code-review"
+        ],
+        "max_retries": null,
+        "model_override": "nemotron-3-ultra-free",
+        "provider_override": "opencode-free",
+        "session_id": null,
+        "workflow_template_id": null,
+        "current_step_key": null,
+        "state": "queued",
+        "assignee_display": "reviewer"
+      },
+      {
+        "id": "t_25b2b282",
+        "title": "Synthesize swarm outputs",
+        "body": "Synthesize the verified worker outputs into the final deliverable. Do not start until the verifier has passed the gate.\n\n## Swarm protocol\n- Swarm root / shared blackboard: `t_224bfcf8`.\n- Read sibling/parent handoffs from Kanban context before working.\n- Put machine-readable facts in completion metadata.\n- Put cross-worker notes on the root task using structured comments.\n- Goal: Create a Python CLI todo app (add/list/done subcommands) with pytest unit tests and a README.md.\n",
+        "assignee": "ecc-build-fixer",
+        "status": "todo",
+        "priority": 0,
+        "tenant": null,
+        "workspace_kind": "scratch",
+        "workspace_path": null,
+        "branch_name": null,
+        "project_id": null,
+        "created_by": "fluxswarm",
+        "created_at": 1788297272,
+        "started_at": null,
+        "completed_at": null,
+        "result": null,
+        "skills": [
+          "humanizer"
+        ],
+        "max_retries": null,
+        "model_override": "nemotron-3-ultra-free",
+        "provider_override": "opencode-free",
+        "session_id": null,
+        "workflow_template_id": null,
+        "current_step_key": null,
+        "state": "queued",
+        "assignee_display": "build-fixer"
+      }
+    ],
+    "raw": "Reclaimed:    0\nCrashed:      0\nTimed out:    0\nStale:        0\nAuto-blocked: 0\nPromoted:     0\nSpawned:      4\n  - t_466c5103  ->  ecc-planner  @ C:\\Users\\DELL\\AppData\\Local\\Temp\\opencode\\gate4_home2\\kanban\\boards\\u4-gate4-candidatec-e2e1\\workspaces\\t_466c5103\n  - t_115fd515  ->  ecc-architect  @ C:\\Users\\DELL\\AppData\\Local\\Temp\\opencode\\gate4_home2\\kanban\\boards\\u4-gate4-candidatec-e2e1\\workspaces\\t_115fd515\n  - t_0f5af804  ->  ecc-devops  @ C:\\Users\\DELL\\AppData\\Local\\Temp\\opencode\\gate4_home2\\kanban\\boards\\u4-gate4-candidatec-e2e1\\workspaces\\t_0f5af804\n  - t_b54da29d  ->  ecc-tdd  @ C:\\Users\\DELL\\AppData\\Local\\Temp\\opencode\\gate4_home2\\kanban\\boards\\u4-gate4-candidatec-e2e1\\workspaces\\t_b54da29d"
+  },
+  "spawn_argv": [
+    {
+      "at": 1788297295.973,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\bin\\hermes.exe kanban --board u4-gate4-candidatec-e2e1 dispatch --max 4"
+    },
+    {
+      "at": 1788297301.463,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-planner --cli --accept-hooks --skills plan-orchestrate -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_466c5103\""
+    },
+    {
+      "at": 1788297301.463,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-architect --cli --accept-hooks --skills api-design --skills fastapi-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_115fd515\""
+    },
+    {
+      "at": 1788297301.463,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-devops --cli --accept-hooks --skills docker-patterns --skills deployment-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_0f5af804\""
+    },
+    {
+      "at": 1788297301.463,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-tdd --cli --accept-hooks --skills tdd-workflow -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_b54da29d\""
+    },
+    {
+      "at": 1788297301.463,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\bin\\hermes.exe kanban --board u4-gate4-candidatec-e2e1 list --json"
+    },
+    {
+      "at": 1788297306.958,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-planner --cli --accept-hooks --skills plan-orchestrate -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_466c5103\""
+    },
+    {
+      "at": 1788297306.958,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-architect --cli --accept-hooks --skills api-design --skills fastapi-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_115fd515\""
+    },
+    {
+      "at": 1788297306.958,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-devops --cli --accept-hooks --skills docker-patterns --skills deployment-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_0f5af804\""
+    },
+    {
+      "at": 1788297306.958,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-tdd --cli --accept-hooks --skills tdd-workflow -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_b54da29d\""
+    },
+    {
+      "at": 1788297311.62,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-planner --cli --accept-hooks --skills plan-orchestrate -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_466c5103\""
+    },
+    {
+      "at": 1788297311.62,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-architect --cli --accept-hooks --skills api-design --skills fastapi-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_115fd515\""
+    },
+    {
+      "at": 1788297311.62,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-devops --cli --accept-hooks --skills docker-patterns --skills deployment-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_0f5af804\""
+    },
+    {
+      "at": 1788297311.62,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-tdd --cli --accept-hooks --skills tdd-workflow -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_b54da29d\""
+    },
+    {
+      "at": 1788297316.283,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-planner --cli --accept-hooks --skills plan-orchestrate -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_466c5103\""
+    },
+    {
+      "at": 1788297316.283,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-architect --cli --accept-hooks --skills api-design --skills fastapi-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_115fd515\""
+    },
+    {
+      "at": 1788297316.283,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-devops --cli --accept-hooks --skills docker-patterns --skills deployment-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_0f5af804\""
+    },
+    {
+      "at": 1788297316.283,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-tdd --cli --accept-hooks --skills tdd-workflow -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_b54da29d\""
+    },
+    {
+      "at": 1788297316.283,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\bin\\hermes.exe kanban --board u4-gate4-candidatec-e2e1 dispatch --max 4"
+    },
+    {
+      "at": 1788297321.013,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-planner --cli --accept-hooks --skills plan-orchestrate -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_466c5103\""
+    },
+    {
+      "at": 1788297321.013,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-architect --cli --accept-hooks --skills api-design --skills fastapi-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_115fd515\""
+    },
+    {
+      "at": 1788297321.013,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-devops --cli --accept-hooks --skills docker-patterns --skills deployment-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_0f5af804\""
+    },
+    {
+      "at": 1788297321.013,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-tdd --cli --accept-hooks --skills tdd-workflow -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_b54da29d\""
+    },
+    {
+      "at": 1788297325.88,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-planner --cli --accept-hooks --skills plan-orchestrate -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_466c5103\""
+    },
+    {
+      "at": 1788297325.88,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-architect --cli --accept-hooks --skills api-design --skills fastapi-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_115fd515\""
+    },
+    {
+      "at": 1788297325.88,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-devops --cli --accept-hooks --skills docker-patterns --skills deployment-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_0f5af804\""
+    },
+    {
+      "at": 1788297325.88,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-tdd --cli --accept-hooks --skills tdd-workflow -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_b54da29d\""
+    },
+    {
+      "at": 1788297330.614,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-planner --cli --accept-hooks --skills plan-orchestrate -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_466c5103\""
+    },
+    {
+      "at": 1788297330.614,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-architect --cli --accept-hooks --skills api-design --skills fastapi-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_115fd515\""
+    },
+    {
+      "at": 1788297330.614,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-devops --cli --accept-hooks --skills docker-patterns --skills deployment-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_0f5af804\""
+    },
+    {
+      "at": 1788297330.614,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-tdd --cli --accept-hooks --skills tdd-workflow -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_b54da29d\""
+    },
+    {
+      "at": 1788297335.283,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-planner --cli --accept-hooks --skills plan-orchestrate -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_466c5103\""
+    },
+    {
+      "at": 1788297335.283,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-architect --cli --accept-hooks --skills api-design --skills fastapi-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_115fd515\""
+    },
+    {
+      "at": 1788297335.283,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-devops --cli --accept-hooks --skills docker-patterns --skills deployment-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_0f5af804\""
+    },
+    {
+      "at": 1788297335.283,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-tdd --cli --accept-hooks --skills tdd-workflow -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_b54da29d\""
+    },
+    {
+      "at": 1788297339.796,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-planner --cli --accept-hooks --skills plan-orchestrate -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_466c5103\""
+    },
+    {
+      "at": 1788297339.796,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-architect --cli --accept-hooks --skills api-design --skills fastapi-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_115fd515\""
+    },
+    {
+      "at": 1788297339.796,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-devops --cli --accept-hooks --skills docker-patterns --skills deployment-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_0f5af804\""
+    },
+    {
+      "at": 1788297339.796,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-tdd --cli --accept-hooks --skills tdd-workflow -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_b54da29d\""
+    },
+    {
+      "at": 1788297339.796,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\bin\\hermes.exe kanban --board u4-gate4-candidatec-e2e1 dispatch --max 4"
+    },
+    {
+      "at": 1788297344.374,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-planner --cli --accept-hooks --skills plan-orchestrate -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_466c5103\""
+    },
+    {
+      "at": 1788297344.374,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-architect --cli --accept-hooks --skills api-design --skills fastapi-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_115fd515\""
+    },
+    {
+      "at": 1788297344.374,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-devops --cli --accept-hooks --skills docker-patterns --skills deployment-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_0f5af804\""
+    },
+    {
+      "at": 1788297344.374,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-tdd --cli --accept-hooks --skills tdd-workflow -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_b54da29d\""
+    },
+    {
+      "at": 1788297349.001,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-planner --cli --accept-hooks --skills plan-orchestrate -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_466c5103\""
+    },
+    {
+      "at": 1788297349.001,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-architect --cli --accept-hooks --skills api-design --skills fastapi-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_115fd515\""
+    },
+    {
+      "at": 1788297349.001,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-devops --cli --accept-hooks --skills docker-patterns --skills deployment-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_0f5af804\""
+    },
+    {
+      "at": 1788297349.001,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-tdd --cli --accept-hooks --skills tdd-workflow -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_b54da29d\""
+    },
+    {
+      "at": 1788297353.616,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-planner --cli --accept-hooks --skills plan-orchestrate -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_466c5103\""
+    },
+    {
+      "at": 1788297353.616,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-architect --cli --accept-hooks --skills api-design --skills fastapi-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_115fd515\""
+    },
+    {
+      "at": 1788297353.616,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-devops --cli --accept-hooks --skills docker-patterns --skills deployment-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_0f5af804\""
+    },
+    {
+      "at": 1788297353.616,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-tdd --cli --accept-hooks --skills tdd-workflow -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_b54da29d\""
+    },
+    {
+      "at": 1788297358.286,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-planner --cli --accept-hooks --skills plan-orchestrate -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_466c5103\""
+    },
+    {
+      "at": 1788297358.286,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-architect --cli --accept-hooks --skills api-design --skills fastapi-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_115fd515\""
+    },
+    {
+      "at": 1788297358.286,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-devops --cli --accept-hooks --skills docker-patterns --skills deployment-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_0f5af804\""
+    },
+    {
+      "at": 1788297358.286,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-tdd --cli --accept-hooks --skills tdd-workflow -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_b54da29d\""
+    },
+    {
+      "at": 1788297362.793,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-planner --cli --accept-hooks --skills plan-orchestrate -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_466c5103\""
+    },
+    {
+      "at": 1788297362.793,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-architect --cli --accept-hooks --skills api-design --skills fastapi-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_115fd515\""
+    },
+    {
+      "at": 1788297362.793,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-devops --cli --accept-hooks --skills docker-patterns --skills deployment-patterns -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_0f5af804\""
+    },
+    {
+      "at": 1788297362.793,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\hermes.EXE -p ecc-tdd --cli --accept-hooks --skills tdd-workflow -m nemotron-3-ultra-free --provider opencode-free --toolsets browser,clarify,code_execution,computer_use,cronjob,delegation,file,image_gen,kanban,memory,session_search,skills,terminal,todo,tts,vision,web chat -q \"work kanban task t_b54da29d\""
+    },
+    {
+      "at": 1788297362.793,
+      "argv": "C:\\Users\\DELL\\AppData\\Local\\hermes\\bin\\hermes.exe kanban --board u4-gate4-candidatec-e2e1 dispatch --max 4"
+    }
+  ],
+  "dispatch_wall_s": 100.5,
+  "shared_venv_writes": {
+    "non_pyc": [],
+    "pyc_count": 0
+  }
+}

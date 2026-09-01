@@ -45,6 +45,11 @@ def make_token(user: dict) -> str:
         "uid": user["id"],
         "email": user["email"],
         "plan": user["plan"],
+        # Float epoch: the logged_out_at gate compares iat against a float
+        # timestamp, so a token minted AFTER logout (even in the same second)
+        # must carry a strictly-later iat, while a pre-logout token keeps an
+        # earlier one. Integer seconds cannot distinguish those two cases.
+        "iat": time.time(),
         "exp": int(time.time()) + EXP_SECONDS,
     }
     return jwt.encode(payload, SECRET, algorithm=ALGO)

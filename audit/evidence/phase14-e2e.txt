@@ -1,0 +1,14 @@
+﻿1 me: e2e@x.com demo 3
+2 byok: 400
+2b list-keys(redacted): 200 {'keys': {}, 'byok_active': False}
+3 project: 200 u2-178809021 credits now 2
+4 tasks: 200 1
+5 dispatch: 200
+6 security: 200
+7 plans: ['demo', 'starter', 'pro', 'scale']
+8 subscribe(gate): 402
+9 template: 200 id 1
+10 buy-own: 400
+11 export: 200 keys ['user', 'projects', 'referrals', 'templates', 'template_purchases', 'payment_events', 'telegram_links']
+12 delete: 200 True
+13 gone: True

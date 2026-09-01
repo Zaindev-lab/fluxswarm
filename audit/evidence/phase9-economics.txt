@@ -1,0 +1,7 @@
+﻿referrer pre-reward credits: 3
+reward1: True
+referrer after: 28
+reward2 (dup): False
+referrer final: 28
+referred plan/credits: pro 120
+plans: {'demo': (0, 3, 1), 'starter': (29, 25, 2), 'pro': (99, 120, 4), 'scale': (299, 500, 6)}

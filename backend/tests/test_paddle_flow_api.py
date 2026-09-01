@@ -119,7 +119,8 @@ def test_paid_subscribe_opens_sandbox_checkout():
 def test_dev_complete_grants_and_shows_checkout_page():
     r = client.get("/mock-checkout/1/pro")
     assert r.status_code == 200
-    assert "دفعة تجريبية" in r.text
+    assert "Simulated payment" in r.text
+    assert "no real money" in r.text
 
     r = client.get("/api/payments/dev-complete/1/pro")
     assert r.status_code == 200, r.text

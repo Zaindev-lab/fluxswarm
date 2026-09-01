@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
+import sqlite3
 import subprocess
 import time
 from dataclasses import dataclass
@@ -30,6 +32,12 @@ _HERMES_BIN_ENV = os.environ.get("FLUXSWARM_HERMES_BIN")
 HERMES_BIN = Path(_HERMES_BIN_ENV) if _HERMES_BIN_ENV else Path("C:/Users/DELL/AppData/Local/hermes/bin/hermes.exe")
 HERMES_HOME = os.environ.get("HERMES_HOME", "C:/Users/DELL/AppData/Local/hermes")
 PROFILES_DIR = Path(HERMES_HOME) / "profiles"
+
+# Safe board-slug charset. Slugs are server-generated (u{uid}-{time}-{rand},
+# u{uid}-tg-…, flux-demo-…, tg-{chat}-…), but delete_boards validates every
+# incoming name against this before touching the filesystem, so a corrupted DB
+# row can never turn into an arbitrary path delete.
+_SAFE_SLUG_RE = re.compile(r"^[A-Za-z0-9_-]{1,120}$")
 
 # Agent profiles (internal Hermes profile names) + display names (no ecc- prefix).
 # Skill names MUST match real ECC skills under skills/ecc/skills (verified present).
@@ -64,7 +72,17 @@ ENV_MAP = {
 # Free, no-key provider that Hermes already has configured (OpenCode Free).
 # Used as the default so the squad runs end-to-end without the user supplying a key.
 FREE_PROVIDER = "opencode-free"
-FREE_MODEL = "hy3-free"
+FREE_MODEL = "nemotron-3-ultra-free"
+
+# Driver-loop ceiling for a swarm launch (seconds). This is the HARD upper
+# bound the background dispatcher waits on a launch before it reports the true
+# outcome; it is NOT the primary stuck-detection mechanism — that is the
+# no-progress stall detector in `dispatch()` which stops much earlier when a
+# provider outage stalls the swarm. 900s allows a healthy multi-wave swarm
+# (workers -> verifier -> synthesizer) to finish while bounding the total wait
+# so an upstream outage can never hold the driver for many hours. Overridable
+# via FLUXSWARM_DISPATCH_TIMEOUT_S for ops.
+DISPATCH_TIMEOUT_S = int(os.environ.get("FLUXSWARM_DISPATCH_TIMEOUT_S", "900"))
 
 # When the user explicitly opts into the free provider via BYOK UI, we record it
 # under this provider key so _resolve_runtime() can pick the right model.
@@ -75,16 +93,19 @@ def _resolve_runtime(provider_keys: Optional[dict]):
     """Return (model, provider) to pin every squad task to.
 
     Priority:
-      1. User BYOK key -> use that provider's model (Claude/GPT/...).
-      2. User selected 'opencode-free' in the BYOK UI -> free hosted model.
+      1. User explicitly selected 'opencode-free' in the BYOK UI -> free hosted
+         model. This WINS over any other BYOK key so a stray/paid key (e.g. a
+         stale OpenAI key) can never hijack an explicitly-chosen free runtime.
+      2. User BYOK key -> use that provider's model (Claude/GPT/...).
       3. Nothing supplied -> free hosted model (default, no key needed).
     """
     if provider_keys:
-        # Prefer the first BYOK provider we have a key for.
-        for prov in ("anthropic", "openai", "gemini", "kimi", "opencode-free"):
+        # Explicitly-enabled free tier takes priority over any paid BYOK key.
+        if provider_keys.get("opencode-free"):
+            return FREE_MODEL, FREE_PROVIDER
+        # Prefer the first paid BYOK provider we have a key for.
+        for prov in ("anthropic", "openai", "gemini", "kimi"):
             if provider_keys.get(prov):
-                if prov == "opencode-free":
-                    return FREE_MODEL, FREE_PROVIDER
                 return None, prov  # model chosen by Hermes for that provider
     return FREE_MODEL, FREE_PROVIDER
 
@@ -159,20 +180,133 @@ def _run(args: list[str], board: Optional[str] = None, capture=True,
 
 
 def ensure_board(slug: str) -> bool:
+    _raise_preflight()
     r = _run(["boards", "create", slug, "--description", f"FluxSwarm project {slug}"])
     r2 = _run(["boards", "ls"])
     return slug in r2.stdout
 
 
+def preflight() -> list[str]:
+    """Fail-fast diagnostics for the Hermes runtime.
+
+    Returns a list of unmet requirements (empty list == everything present).
+    Only filesystem stat()s — cheap, safe to call on every launch. A clear
+    message beats the raw FileNotFoundError/KeyError a missing install would
+    otherwise surface to the operator.
+    """
+    problems = []
+    if not HERMES_BIN.exists():
+        problems.append(
+            f"Hermes binary not found at {HERMES_BIN} "
+            "(install Hermes or point FLUXSWARM_HERMES_BIN at it)")
+    if not PROFILES_DIR.is_dir():
+        problems.append(f"Hermes profiles dir not found at {PROFILES_DIR} (check HERMES_HOME)")
+    for prof in _squad_profiles():
+        if not (PROFILES_DIR / prof).is_dir():
+            problems.append(f"squad profile missing: {PROFILES_DIR / prof}")
+    return problems
+
+
+def _raise_preflight():
+    """Raise RuntimeError with an actionable message when the Hermes runtime is
+    not usable. Fail fast BEFORE the caller pays for a broken board."""
+    problems = preflight()
+    if problems:
+        raise RuntimeError("Hermes runtime not ready: " + "; ".join(problems))
+
+
+# The Kanban Swarm CLI (`hermes kanban swarm`) hard-codes this skill name on the
+# verifier task (`hermes_cli/kanban_swarm.py`) and offers no way to override it.
+# The skill ships inside the bundled ``software-development`` collection, which
+# is NOT visible to the ECC profiles (each scans only ``skills/ecc/skills`` +
+# its own profile-local skills). A dispatcher-owned reviewer worker therefore
+# receives ``--skills requesting-code-review`` and dies at startup with
+# "Unknown skill(s): requesting-code-review". Candidate C fixes this by
+# provisioning the REAL bundled skill into ``skills/ecc/skills/`` (byte-for-byte)
+# BEFORE the swarm is created, so the verifier task resolves it normally.
+_VERIFIER_SKILL_NAME = "requesting-code-review"
+_ECC_SKILLS_DIR_NAME = "ecc/skills"
+
+
+def _bundled_verifier_skill_dir() -> Path:
+    """Locate the REAL bundled ``requesting-code-review`` skill directory.
+
+    Deterministic repository-relative discovery first (the Hermes bundled
+    ``software-development`` collection under HERMES_HOME/skills). Falls back to
+    Hermes' own skill-directory discovery mechanism when present.
+    """
+    primary = Path(HERMES_HOME) / "skills" / "software-development" / _VERIFIER_SKILL_NAME
+    if primary.is_dir():
+        return primary
+    try:
+        from agent.skill_utils import get_all_skills_dirs
+        for skills_dir in get_all_skills_dirs():
+            cand = Path(skills_dir) / "software-development" / _VERIFIER_SKILL_NAME
+            if cand.is_dir():
+                return cand
+            cand2 = Path(skills_dir) / _VERIFIER_SKILL_NAME
+            if cand2.is_dir() and (cand2 / "SKILL.md").exists():
+                return cand2
+    except Exception:
+        pass
+    return primary  # caller reports it cleanly when absent
+
+
+def _ensure_verifier_skill() -> Path:
+    """Provision the real bundled ``requesting-code-review`` skill for the
+    ``ecc-reviewer`` profile. Idempotent and non-destructive.
+
+    - Target ``skills/ecc/skills/requesting-code-review/SKILL.md`` present ->
+      no-op (NEVER overwrite, even a foreign/operator-tuned copy).
+    - Target missing OR an EMPTY stale dir (e.g. left by an interrupted earlier
+      provisioning) -> copy the REAL bundled skill from the
+      ``software-development`` collection BYTE-FOR-BYTE. An empty dir must not
+      silently re-create the MISSING-skill worker death.
+    - Target EXISTS with content but no ``SKILL.md`` -> fail loudly and refuse to
+      delete what may be a foreign directory.
+    - Bundled source absent -> fail safely with a clear diagnostic; do NOT
+      fabricate a skill or try to fake the review behavior.
+
+    Returns the target skill directory (for callers/tests).
+    """
+    target = Path(HERMES_HOME) / "skills" / _ECC_SKILLS_DIR_NAME / _VERIFIER_SKILL_NAME
+    if (target / "SKILL.md").exists():
+        return target
+    source = _bundled_verifier_skill_dir()
+    if not source.is_dir() or not (source / "SKILL.md").exists():
+        raise RuntimeError(
+            f"cannot provision verifier skill '{_VERIFIER_SKILL_NAME}': bundled "
+            f"source not found under {Path(HERMES_HOME) / 'skills'} "
+            "(expected in the 'software-development' collection). Refusing to "
+            "fabricate a replacement skill."
+        )
+    if target.exists():
+        if any(target.iterdir()):
+            raise RuntimeError(
+                f"cannot provision verifier skill '{_VERIFIER_SKILL_NAME}': target "
+                f"{target} exists with content but no SKILL.md; refusing to "
+                "overwrite a possibly-foreign directory. Remove it manually or "
+                "point the profile's skills.external_dirs elsewhere."
+            )
+        shutil.rmtree(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, target)
+    return target
+
+
 def launch_swarm(board: str, goal: str, provider_keys: Optional[dict] = None) -> SwarmResult:
     # Keys are passed via subprocess environment only (never written to disk).
+    _raise_preflight()
     cleanup_profile_keys()
+    # The swarm CLI hard-codes the verifier skill; make sure it resolves under
+    # the ecc-reviewer profile BEFORE the swarm/board tasks are created.
+    _ensure_verifier_skill()
     worker_args = []
     for prof, disp, title, skills in SQUAD:
         worker_args += ["--worker", f"{prof}:{title}:{skills}"]
     cmd = ["swarm", goal] + worker_args + [
-        "--verifier", f"{VERIFIER[0]}:{VERIFIER[1]}:{VERIFIER[2]}",
-        "--synthesizer", f"{SYNTHESIZER[0]}:{SYNTHESIZER[1]}:{SYNTHESIZER[2]}",
+        "--verifier", VERIFIER[0],
+        "--synthesizer", SYNTHESIZER[0],
         "--created-by", "fluxswarm",
         "--json",
     ]
@@ -199,16 +333,25 @@ def _pin_runtime(board: str, provider_keys: Optional[dict]):
     blocked. Pinning an explicit free model makes the worker run end-to-end.
     """
     model, provider = _resolve_runtime(provider_keys)
+    if not model:
+        # A provider without a model cannot be persisted by Hermes
+        # (provider_override requires a model_override). Fail loudly rather than
+        # silently leaving the task off the intended runtime.
+        raise RuntimeError(
+            f"cannot pin runtime: provider={provider!r} requires a model_override"
+        )
     tasks = list_tasks(board)
     for t in tasks:
         tid = t.get("id")
         if not tid:
             continue
-        args = ["set-model", tid]
-        if model:
-            args.append(model)
-        args += ["--provider", provider]
-        _run(args, board=board, provider_keys=provider_keys, capture=True)
+        args = ["set-model", tid, model, "--provider", provider]
+        r = _run(args, board=board, provider_keys=provider_keys, capture=True)
+        if r.returncode != 0:
+            detail = (r.stderr or r.stdout or "").strip()
+            raise RuntimeError(
+                f"kanban set-model failed (rc={r.returncode}) for task {tid}: {detail}"
+            )
 
 
 def launch_from_template(board: str, goal: str, agents: list[str],
@@ -234,13 +377,17 @@ def launch_from_template(board: str, goal: str, agents: list[str],
     verifier = verifier or VERIFIER
     synthesizer = synthesizer or SYNTHESIZER
 
+    _raise_preflight()
     cleanup_profile_keys()
+    # Same verifier-skill provisioning as launch_swarm: template-launched
+    # squads still create a verifier via the swarm CLI (hard-coded skill).
+    _ensure_verifier_skill()
     worker_args = []
     for prof, disp, title, skills in workers:
         worker_args += ["--worker", f"{prof}:{title}:{skills}"]
     cmd = ["swarm", goal] + worker_args + [
-        "--verifier", f"{verifier[0]}:{verifier[1]}:{verifier[2]}",
-        "--synthesizer", f"{synthesizer[0]}:{synthesizer[1]}:{synthesizer[2]}",
+        "--verifier", verifier[0],
+        "--synthesizer", synthesizer[0],
         "--created-by", "fluxswarm",
         "--json",
     ]
@@ -257,10 +404,70 @@ def launch_from_template(board: str, goal: str, agents: list[str],
     )
 
 
+def _board_activity_sig(board: str) -> tuple:
+    """Monotonic worker-activity fingerprint for the board, read from ``kanban.db``.
+
+    A healthy worker keeps calling the LLM and using tools while a task's
+    ``state`` may not have changed yet (the classic false-stall: single planner
+    doing reasoning + ``kanban_show`` before ever completing). The state-only
+    signature used to flag that healthy worker as ``no_progress``. This helper
+    adds a real activity signal — the highest worker heartbeat timestamp and the
+    task-event stream (count + last created_at) — so the stall detector only
+    trips when a worker is BOTH stuck in an unchanged state AND producing no
+    heartbeats / task-events.
+
+    Returns () when the board DB is unavailable (synthetic/offline/unit-test
+    boards), in which case the caller falls back to the state-only signature and
+    the pre-existing stall semantics are preserved.
+    """
+    db = Path(HERMES_HOME) / "kanban" / "boards" / board / "kanban.db"
+    try:
+        if not db.exists():
+            return ()
+        c = sqlite3.connect(str(db))
+        try:
+            max_hb = c.execute(
+                "SELECT MAX(COALESCE(last_heartbeat_at, 0)) FROM tasks"
+            ).fetchone()[0] or 0
+            evt_count = c.execute(
+                "SELECT COUNT(*) FROM task_events"
+            ).fetchone()[0] or 0
+            evt_max = c.execute(
+                "SELECT MAX(COALESCE(created_at, 0)) FROM task_events"
+            ).fetchone()[0] or 0
+            return (int(max_hb), int(evt_count), int(evt_max))
+        finally:
+            c.close()
+    except Exception:
+        return ()
+
+
 def dispatch(board: str, max_spawn: int = 8, dry_run: bool = False,
              provider_keys: Optional[dict] = None, blocking: bool = True,
-             timeout_s: int = 600) -> dict:
-    """Run the dispatcher. If blocking, poll until terminal state or timeout."""
+             timeout_s: int = 600, stall_passes: int = 4,
+             min_wait_s: int = 60) -> dict:
+    """Run the dispatcher. If blocking, poll until terminal state or timeout.
+
+    Returns a dict that always carries ``outcome`` so the caller can tell a
+    launch that converged from one that was cut short by the bounded wall-clock
+    window (provider/worker stall). ``timed_out`` is True only when we left the
+    loop with non-terminal tasks still pending. ``stuck_tasks`` lists the tasks
+    that were still ``running``/``queued`` when we stopped (i.e. what would
+    otherwise be left stranded).
+
+    The blocking window is deliberately bounded (``timeout_s``) — a provider
+    outage must not let the driver wait for many hours. Hermes's own reclamation
+    loop keeps re-dispatching inside this window; when the window expires we
+    report the residual state truthfully instead of silently dripping a
+    forever-stuck board.
+
+    ``stall_passes`` (default 4) triggers an early no-progress break: if the
+    board's task states stop changing across several consecutive passes while
+    work is still pending, the swarm is not converging (provider/worker stuck),
+    so the driver stops well before ``timeout_s`` instead of waiting many hours.
+    ``min_wait_s`` is a floor so a healthy multi-wave swarm that is still
+    advancing is never cut short by the stall detector in its opening moments.
+    """
     args = ["dispatch"]
     if dry_run:
         args.append("--dry-run")
@@ -275,17 +482,89 @@ def dispatch(board: str, max_spawn: int = 8, dry_run: bool = False,
         first = {"raw": r.stdout.strip()}
 
     if blocking:
-        # Keep dispatching in passes until everything is done/blocked or timeout.
+        # Keep dispatching in passes until everything is done/blocked or we
+        # conclude the board is stuck (no forward progress).
         deadline = time.time() + timeout_s
+        start = time.time()
+        last_sig = None
+        unchanged = 0
         while time.time() < deadline:
             tasks = list_tasks(board)
             states = [t.get("state") for t in tasks]
+            # Robust progress signature: worker ACTIVITY (heartbeat / task events)
+            # combined with task state. A healthy worker that is steadily calling
+            # the LLM and using tools advances heartbeats/events even while no
+            # task state has changed yet, so it is NOT misclassified as stalled.
+            # A genuinely stalled worker (provider/worker hang) advances neither,
+            # so it is still caught after stall_passes unchanged passes.
+            activity = _board_activity_sig(board)
+            # Heartbeat freshness is the liveness gate. Heartbeats land roughly
+            # every ~60s — far slower than the ~10-15s dispatcher pass cadence —
+            # so the raw activity TUPLE (which only changes on a new heartbeat)
+            # must NOT be the stall signal by itself: that would falsely stall a
+            # healthy long-running worker in the gap between two heartbeats.
+            # Instead, a worker with a RECENT heartbeat is demonstrably alive and
+            # progressing (mid-LLM/tool work), so we only declare a stall once the
+            # board's heartbeat has actually gone STALE (> heartbeat_grace) while
+            # task states stay unchanged for stall_passes passes. `()` (DB
+            # unavailable) counts as stale so the detector still works without
+            # board DB access (and in unit tests).
+            heartbeat_grace = 180
+            stale = (activity == () or (time.time() - activity[0]) > heartbeat_grace)
+            sig = (activity, tuple(sorted(states)))
             if not states or all(s in ("done", "blocked") for s in states):
-                break
+                first["terminal"] = True
+                first["timed_out"] = False
+                first["outcome"] = "ok"
+                first["stuck_tasks"] = []
+                return first
+            if sig == last_sig:
+                unchanged += 1
+            else:
+                unchanged = 0
+            last_sig = sig
             time.sleep(8)
             rr = _run(["dispatch", "--max", str(max_spawn)], board=board,
                       provider_keys=provider_keys)
-        first["terminal"] = True
+            # Early no-progress break: the same non-terminal states for several
+            # consecutive passes means the swarm is stuck (provider/worker hang),
+            # not converging. Give a healthy launch a grace floor so its first
+            # waves have time to start before we ever evaluate the stall.
+            if (unchanged >= stall_passes
+                    and time.time() - start >= min_wait_s
+                    and stale):
+                first["terminal"] = False
+                first["timed_out"] = True
+                first["stall"] = True
+                first["stall_passes"] = unchanged
+                first["outcome"] = "stuck"
+                first["stuck_tasks"] = [t for t in tasks
+                                        if t.get("state") in ("running", "queued")]
+                first["stuck_run_count"] = sum(
+                    1 for t in tasks if t.get("state") == "running")
+                first["done_count"] = sum(1 for t in tasks if t.get("state") == "done")
+                first["deadline_s"] = timeout_s
+                first["early"] = True
+                return first
+        # Wall-clock window expired with non-terminal work still pending.
+        tasks = list_tasks(board)
+        stuck = [t for t in tasks if t.get("state") in ("running", "queued")]
+        first["terminal"] = False
+        first["timed_out"] = True
+        first["outcome"] = "stuck"
+        first["stuck_tasks"] = stuck
+        first["stuck_run_count"] = sum(
+            1 for t in stuck if t.get("state") == "running")
+        first["done_count"] = sum(1 for t in list_tasks(board) if t.get("state") == "done")
+        first["deadline_s"] = timeout_s
+    else:
+        # Non-blocking single pass: we deliberately do NOT stamp `terminal` —
+        # the caller must treat a non-blocking dispatch as an in-flight launch
+        # that may still have work pending (see pragmatics/contract pinned by
+        # test_dispatch_completion.py). Provide an outcome label for callers
+        # that want one, but leave terminality untouched.
+        first.setdefault("timed_out", False)
+        first.setdefault("outcome", "pending")
     return first
 
 
@@ -312,6 +591,31 @@ def list_tasks(board: str) -> list[dict]:
                 a = pre[len("ecc-"):] + ":" + post
         t["assignee_display"] = a
     return data
+
+
+def board_has_completed_work(board: str) -> bool:
+    """True when any AGENT task on the board reached ``done`` (meaningful work).
+
+    Used for credit reconciliation: a launch that never completed a real agent
+    task (e.g. the provider fails before any agent finishes) produced no work
+    and is eligible for a credit refund; one that finished at least one agent
+    task consumed real work and must not be refunded.
+
+    The swarm ROOT planning card (assignee ``fluxswarm``) is auto-completed
+    immediately as the shared blackboard/anchor — it represents no agent work
+    and is deliberately excluded, so a board where every agent failed still
+    counts as "no completed work" and qualifies for the refund.
+    """
+    try:
+        tasks = list_tasks(board)
+    except Exception:
+        return False
+    for t in tasks:
+        if t.get("state") == "done":
+            assignee = (t.get("assignee") or "").strip().lower()
+            if assignee and assignee != "fluxswarm":
+                return True
+    return False
 
 
 def show_task(board: str, task_id: str) -> dict:
@@ -351,3 +655,34 @@ def list_boards() -> list[dict]:
         if slug and slug != "SLUG":
             out.append({"slug": slug})
     return out
+
+
+def delete_boards(slugs: list[str], boards_root: Path | None = None) -> int:
+    """Delete a user's Hermes kanban board directories (account erasure).
+
+    Defensive by construction: every slug must match the safe charset AND its
+    resolved path must stay inside the kanban boards root, so a corrupted slug
+    can never escalate into an arbitrary filesystem delete. Demo boards
+    (``flux-demo-*``) are shared and deliberately never passed here. Returns the
+    number of boards actually removed.
+    """
+    root = Path(boards_root) if boards_root is not None else Path(HERMES_HOME) / "kanban" / "boards"
+    root_resolved = str(root.resolve()) + os.sep
+    removed = 0
+    for raw in slugs or []:
+        slug = str(raw or "")
+        if not _SAFE_SLUG_RE.match(slug):
+            continue
+        target = (root / slug).resolve()
+        # Containment: resolve() normalises symlinks, so targets must literally
+        # live under the boards root. slug has no separators, but the check stays
+        # for defence when the boards root itself is redirected.
+        if not str(target).startswith(root_resolved):
+            continue
+        try:
+            if target.exists():
+                shutil.rmtree(target)
+                removed += 1
+        except OSError:
+            continue
+    return removed

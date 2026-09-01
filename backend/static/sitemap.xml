@@ -1,20 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <!-- Replace YOUR_DOMAIN and refresh lastmod at deploy time. -->
-  <url>
-    <loc>https://YOUR_DOMAIN/</loc>
-    <priority>1.0</priority>
-  </url>
-  <url>
-    <loc>https://YOUR_DOMAIN/pricing</loc>
-    <priority>0.8</priority>
-  </url>
-  <url>
-    <loc>https://YOUR_DOMAIN/privacy-en</loc>
-    <priority>0.4</priority>
-  </url>
-  <url>
-    <loc>https://YOUR_DOMAIN/terms-en</loc>
-    <priority>0.4</priority>
-  </url>
+  <url><loc>https://YOUR_DOMAIN/</loc><priority>1.0</priority></url>
+  <url><loc>https://YOUR_DOMAIN/pricing</loc><priority>0.8</priority></url>
+  <url><loc>https://YOUR_DOMAIN/how-it-works</loc><priority>0.8</priority></url>
+  <url><loc>https://YOUR_DOMAIN/faq</loc><priority>0.7</priority></url>
+  <url><loc>https://YOUR_DOMAIN/privacy-en</loc><priority>0.4</priority></url>
+  <url><loc>https://YOUR_DOMAIN/terms-en</loc><priority>0.4</priority></url>
+  <url><loc>https://YOUR_DOMAIN/refund-en</loc><priority>0.4</priority></url>
+  <url><loc>https://YOUR_DOMAIN/cookies-en</loc><priority>0.3</priority></url>
+  <url><loc>https://YOUR_DOMAIN/acceptable-use-en</loc><priority>0.3</priority></url>
 </urlset>

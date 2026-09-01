@@ -1,0 +1,9 @@
+﻿== red team ==
+.............................                                            [100%]
+29 passed in 5.38s
+== baseline ==
+........                                                                 [100%]
+80 passed in 5.93s
+== fix tests ==
+.....                                                                    [100%]
+5 passed in 1.08s

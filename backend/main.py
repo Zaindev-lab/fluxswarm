@@ -20,7 +20,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
@@ -223,26 +223,129 @@ def api_health():
 
 
 # ---------- background squad dispatch ----------
-def _bg_dispatch(slug: str, plan: str, provider_keys=None) -> None:
-    """One non-blocking dispatcher pass in a daemon thread (never holds the
-    HTTP request hostage for the up-to-10-minute swarm run)."""
+def _bg_dispatch(slug: str, plan: str, provider_keys=None, pid: int | None = None) -> None:
+    """Drive the dispatcher to a terminal state in a daemon thread.
+
+    A single non-blocking pass only processes the tasks that are READY at that
+    instant. Swarm workflows are multi-wave (workers -> verifier -> synthesizer):
+    tasks created as earlier ones finish would never run, leaving the board
+    stuck forever (reviewer `ready`, builder `todo`). Using the blocking
+    multi-pass loop (bounded by timeout_s) closes that gap while the HTTP
+    request still returns immediately — the loop lives in this thread.
+
+    Provider resilience: the loop is bounded so an upstream LLM outage cannot
+    hold the driver for many hours. On any failure, the project's
+    ``launch_status`` is persisted (and the launch credit refunded when no
+    meaningful work was produced) so the user is never charged for a build that
+    never executed, and the UI can surface a truthful paused/failed state
+    instead of an indefinitely-running board.
+    """
     try:
-        hc.dispatch(slug, max_spawn=db.PLANS.get(plan, {}).get("parallel", 1),
-                    provider_keys=provider_keys, blocking=False)
+        res = hc.dispatch(slug, max_spawn=db.PLANS.get(plan, {}).get("parallel", 1),
+                          provider_keys=provider_keys, blocking=True,
+                          timeout_s=hc.DISPATCH_TIMEOUT_S)
     except Exception as e:
-        # Surface the failure for ops instead of silently dropping the swarm.
+        # Surface the failure for ops instead of silently dropping the swarm,
+        # and protect the credit: a launch that errored before any agent
+        # produced work is refunded (idempotently) and marked on the project.
         try:
+            if pid is not None:
+                _finalize_launch(slug, pid,
+                                 status="error", outcome="launch_error",
+                                 reason=type(e).__name__)
             audit.audit("dispatch.fire", outcome="error", slug=slug, reason=type(e).__name__)
+        except Exception:
+            pass
+        return
+    if pid is None:
+        # No project row to persist to (demo/standalone); just audit the outcome.
+        try:
+            audit.audit("dispatch.fire", outcome=res.get("outcome", "ok"), slug=slug,
+                        timed_out=bool(res.get("timed_out")))
+        except Exception:
+            pass
+        return
+    res_outcome = res.get("outcome", "ok")
+    if res_outcome == "ok" or res.get("timed_out") is False:
+        _finalize_launch(slug, pid, status="ok", outcome="converged", reason="")
+    else:
+        # Provider/worker stall or error: land the launch in a recoverable,
+        # truthful state and refund the credit when no real work was produced.
+        reason = "no_progress" if res.get("stall") else "timeout"
+        _finalize_launch(slug, pid, status="stuck", outcome="stuck", reason=reason)
+
+
+def _finalize_launch(slug: str, pid: int, *, status: str, outcome: str, reason: str) -> None:
+    """Persist the launch terminal state and reconcile the launch credit.
+
+    Credit policy (use the existing single-credit model): a launch that ends
+    stuck / timed-out / errored BEFORE any task reached ``done`` produced no
+    meaningful work, so its single credit is refunded — once, idempotently
+    (guarded by the project's ``launch_refunded`` flag). A launch that
+    completed at least one task consumed real work and is never refunded.
+    """
+    try:
+        existing = _project_by_pid(pid)
+        was_refunded = bool(existing and existing.get("launch_refunded"))
+        refunded = was_refunded
+        if outcome != "converged" and not was_refunded:
+            try:
+                work_done = hc.board_has_completed_work(slug)
+            except Exception:
+                work_done = False
+            if not work_done:
+                proj = existing
+                if proj is not None and not proj.get("launch_refunded"):
+                    if db.refund_launch_credit(proj["user_id"]):
+                        refunded = True
+                        try:
+                            audit.audit("dispatch.fire", outcome="credit_refund",
+                                        slug=slug, project_id=pid, reason=reason)
+                        except Exception:
+                            pass
+        db.set_launch_outcome(pid, status, outcome, reason, refunded=refunded)
+    except Exception:
+        # Never let bookkeeping failure crash the daemon thread.
+        try:
+            audit.audit("dispatch.fire", outcome="reconcile_error", slug=slug, project_id=pid)
         except Exception:
             pass
 
 
-def _fire_dispatch(slug: str, plan: str, provider_keys=None) -> None:
+def _project_by_pid(pid: int) -> dict | None:
+    """Fetch a project row by id, including the launch bookkeeping columns."""
+    try:
+        c = db._conn()
+        try:
+            row = c.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+            return dict(row) if row else None
+        finally:
+            c.close()
+    except Exception:
+        return None
+
+
+def _fire_dispatch(slug: str, plan: str, provider_keys=None, pid: int | None = None) -> None:
     threading.Thread(target=_bg_dispatch, args=(slug, plan),
-                     kwargs={"provider_keys": provider_keys}, daemon=True).start()
+                     kwargs={"provider_keys": provider_keys, "pid": pid}, daemon=True).start()
 
 
 # ---------- auth dependency ----------
+def _token_session_ok(user: dict, payload: dict) -> bool:
+    """True only when the JWT was issued after the user's last logout/reset.
+
+    On logout / password change / password reset we set ``users.logged_out_at``
+    to "now"; any token whose ``iat`` predates it is refused. Stateless JWTs
+    carry no server-side revocation list, so this timestamp is the minimal
+    correct revocation primitive: it kills every session of that user (the safe
+    behaviour for all three operations) without a blacklist table.
+    """
+    logged_out = user.get("logged_out_at") or 0
+    if not logged_out:
+        return True
+    return float(payload.get("iat") or 0) >= float(logged_out)
+
+
 def get_current_user_optional(request: Request) -> dict | None:
     ah = request.headers.get("Authorization", "")
     token = ah.replace("Bearer ", "") if ah.startswith("Bearer ") else request.cookies.get("fs_token")
@@ -251,7 +354,10 @@ def get_current_user_optional(request: Request) -> dict | None:
     payload = auth_mod.decode_token(token)
     if not payload:
         return None
-    return db.get_user_by_id(payload["uid"])
+    user = db.get_user_by_id(payload["uid"])
+    if not user or not _token_session_ok(user, payload):
+        return None
+    return user
 
 
 def get_current_user(request: Request) -> dict:
@@ -265,6 +371,8 @@ def get_current_user(request: Request) -> dict:
     user = db.get_user_by_id(payload["uid"])
     if not user:
         raise HTTPException(status_code=401, detail="مستخدم غير موجود")
+    if not _token_session_ok(user, payload):
+        raise HTTPException(status_code=401, detail="انتهت الجلسة — سجّل الدخول مجدداً")
     return user
 
 
@@ -279,6 +387,20 @@ class RegisterIn(BaseModel):
 class LoginIn(BaseModel):
     email: str
     password: str = Field(max_length=4096)
+
+
+class PasswordChangeIn(BaseModel):
+    current: str = Field(max_length=4096)
+    new: str = Field(max_length=4096)
+
+
+class ResetRequestIn(BaseModel):
+    email: str
+
+
+class ResetIn(BaseModel):
+    token: str = Field(min_length=8, max_length=128)
+    new_password: str = Field(max_length=4096)
 
 
 class ProjectCreate(BaseModel):
@@ -430,6 +552,88 @@ def api_me(user: dict = Depends(get_current_user)):
     return public_user(user)
 
 
+@app.post("/api/auth/logout")
+def api_logout(request: Request, user: dict = Depends(get_current_user)):
+    """Log out the user: invalidates EVERY currently-issued session token.
+
+    Stateless JWTs have no server-side list, so we record ``logged_out_at`` and
+    refuse any token whose ``iat`` predates it. (The client should also discard
+    its stored token.)
+    """
+    db.mark_logged_out(user["id"])
+    audit.audit("auth.logout", uid=user["id"], email=user["email"],
+                ip=_client_ip(request), outcome="ok")
+    return {"ok": True, "note": "سُجّل خروجك — أزل الرمز من المتصفح"}
+
+
+@app.post("/api/auth/password")
+def api_change_password(p: PasswordChangeIn, request: Request,
+                        user: dict = Depends(get_current_user)):
+    """Authenticated password change: verify the current password, then set the
+    new hash and invalidate all existing sessions (log out everywhere)."""
+    if len(p.new) < 8:
+        raise HTTPException(status_code=400, detail="كلمة المرور الجديدة قصيرة جداً (8 أحرف على الأقل)")
+    if not db.authenticate(user["email"], p.current):
+        audit.audit("auth.password", uid=user["id"], email=user["email"],
+                    ip=_client_ip(request), outcome="fail", reason="bad_current")
+        raise HTTPException(status_code=401, detail="كلمة المرور الحالية غير صحيحة")
+    db.set_password(user["id"], p.new)
+    audit.audit("auth.password", uid=user["id"], email=user["email"],
+                ip=_client_ip(request), outcome="ok")
+    return {"ok": True, "note": "تغيّرت كلمة المرور وخرجت من كل الجلسات"}
+
+
+def _reset_self_service() -> bool:
+    """Dev/test-only echo flag.
+
+    There is no mailer in this install, so a minted reset token has no delivery
+    channel. When FLUXSWARM_RESET_SELF_SERVICE=1 the token is returned in the
+    response so the full flow can be exercised (tests, local dev). Production
+    keeps it OFF: the token is still single-use + expiring + hashed at rest, but
+    it is discarded after minting and the client only ever receives the same
+    generic response (anti-enumeration).
+    """
+    return os.environ.get("FLUXSWARM_RESET_SELF_SERVICE", "").strip().lower() in ("1", "true", "yes")
+
+
+@app.post("/api/auth/reset-request")
+def api_reset_request(p: ResetRequestIn, request: Request):
+    """Start a password reset. Identical response whether or not the email
+    exists (no account enumeration); rate-limited like login/register."""
+    ip = _client_ip(request)
+    limiter.hit_ip(ip)
+    if not limiter.ip_allowed(ip):
+        raise HTTPException(status_code=429, detail="محاولات كثيرة جداً — انتظر قليلاً")
+    email = p.email.lower().strip()
+    user = db.get_user_by_email(email)
+    data = {"ok": True, "detail": "إذا كان البريد مسجّلاً فيتلقّى رابط إعادة التعيين"}
+    if user:
+        raw = db.create_password_reset(user["id"])
+        if _reset_self_service():
+            data["reset_token"] = raw  # dev/test channel only (no mailer)
+        audit.audit("auth.reset.request", uid=user["id"], email=user["email"],
+                    ip=ip, outcome="ok", delivered=_reset_self_service())
+    else:
+        audit.audit("auth.reset.request", email=email, ip=ip, outcome="miss")
+    return data
+
+
+@app.post("/api/auth/reset")
+def api_reset(p: ResetIn, request: Request):
+    """Complete a reset: consume the single-use token, set a new password and
+    invalidate all existing sessions (also usable by an operator from support)."""
+    if len(p.new_password) < 8:
+        raise HTTPException(status_code=400, detail="كلمة المرور قصيرة جداً (8 أحرف على الأقل)")
+    uid = db.consume_password_reset(p.token)
+    if not uid:
+        raise HTTPException(status_code=400, detail="رمز إعادة التعيين غير صالح أو منتهٍ أو مستخدم من قبل")
+    db.set_password(uid, p.new_password)
+    u = db.get_user_by_id(uid)
+    audit.audit("auth.reset", uid=uid, email=(u or {}).get("email", ""),
+                ip=_client_ip(request), outcome="ok")
+    return {"ok": True, "note": "أُعيد تعيين كلمة المرور — سجّل الدخول من جديد"}
+
+
 def public_user(u: dict) -> dict:
     return {
         "id": u["id"], "email": u["email"], "name": u["name"],
@@ -467,8 +671,8 @@ def api_create_project(payload: ProjectCreate, request: Request,
         c.commit()
         c.close()
         raise HTTPException(status_code=500, detail=str(e))
-    db.add_project(user["id"], slug, payload.name or "مشروع", goal)
-    _fire_dispatch(slug, user["plan"], _user_provider_keys(user))
+    pid = db.add_project(user["id"], slug, payload.name or "مشروع", goal)
+    _fire_dispatch(slug, user["plan"], _user_provider_keys(user), pid=pid)
     audit.audit("project.create", uid=user["id"], email=user["email"], ip=_client_ip(request),
                 outcome="ok", slug=slug, plan=user["plan"])
     return {
@@ -476,6 +680,18 @@ def api_create_project(payload: ProjectCreate, request: Request,
         "workers": swarm.worker_ids, "verifier_id": swarm.verifier_id,
         "synthesizer_id": swarm.synthesizer_id,
     }
+
+
+@app.get("/api/projects/{slug}/workspace")
+def api_workspace(slug: str, user: dict = Depends(get_current_user)):
+    # Same ownership rules as the task board: private boards require the owner,
+    # demo boards are public showcase. Generated files are the user's "result".
+    if not slug.startswith(f"u{user['id']}-") and not slug.startswith("flux-demo-"):
+        raise HTTPException(status_code=403, detail="غير مصرّح")
+    try:
+        return {"slug": slug, "content": hc.read_workspace(slug)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/projects/{slug}/tasks")
@@ -699,29 +915,29 @@ def checkout_page(request: Request):
     token = _paddle_client_token()
     sandbox = "sandbox" in os.environ.get("PADDLE_API_BASE", "")
     if not token:
-        return """<!doctype html><html lang="ar"><head><meta charset="utf-8"><title>FluxSwarm · الدفع</title></head>
+        return """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>FluxSwarm · Checkout</title></head>
 <body style="font-family:system-ui;max-width:560px;margin:60px auto;text-align:center">
-<h2>الدفع غير جاهز بعد</h2>
-<p>PADDLE_CLIENT_TOKEN غير مضبوط — أضف رمز العميل من لوحة Paddle ثم أعد التشغيل.</p>
+<h2>Checkout is not ready yet</h2>
+<p>PADDLE_CLIENT_TOKEN is not set — add the client token from your Paddle dashboard and restart.</p>
 </body></html>"""
     env = ""
     if sandbox:
         env = "try { Paddle.Environment.set(\"sandbox\"); } catch (e) {}\n"
-    page = """<!doctype html><html lang="ar"><head><meta charset="utf-8">
-<title>FluxSwarm · الدفع الآمن</title>
+    page = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>FluxSwarm · Secure checkout</title>
 <script src="https://cdn.paddle.com/paddle/v2/paddle.js"></script>
 </head>
 <body style="font-family:system-ui;max-width:560px;margin:60px auto;text-align:center;line-height:1.8">
-<h2 id="fs-status">جارٍ فتح نافذة الدفع الآمنة…</h2>
-<p style="color:#666;font-size:14px">إذا لم تظهر النافذة خلال لحظات، تأكد من السماح بالنوافذ المنبثقة ثم اضغط الزر، أو أعد فتح الرابط.</p>
-<button id="fs-retry" onclick="openCheckout()" style="margin:14px 0;font-size:15px;padding:10px 24px;cursor:pointer;border-radius:8px;border:1px solid #1b6ef3;background:#1b6ef3;color:#fff">اضغط هنا لفتح نافذة الدفع</button>
+<h2 id="fs-status">Opening the secure payment window…</h2>
+<p style="color:#666;font-size:14px">If the window does not appear within a few seconds, allow pop-ups and press the button, or reopen the link.</p>
+<button id="fs-retry" onclick="openCheckout()" style="margin:14px 0;font-size:15px;padding:10px 24px;cursor:pointer;border-radius:8px;border:1px solid #1b6ef3;background:#1b6ef3;color:#fff">Open the payment window</button>
 <script>
 __PADDLE_ENV__
 var fsStatus = document.getElementById('fs-status');
 var fsLog = function (m) { console.log('[fluxswarm]', m); if (fsStatus) fsStatus.textContent = m; };
-window.onerror = function (msg, src, line) { fsLog("خطأ برمجي: " + msg + " (" + line + ")"); };
+window.onerror = function (msg, src, line) { fsLog("Script error: " + msg + " (" + line + ")"); };
 window.addEventListener('unhandledrejection', function (e) {
-  fsLog("فشل غير معالج: " + (e.reason ? (e.reason.message || e.reason) : "unknown"));
+  fsLog("Unhandled failure: " + (e.reason ? (e.reason.message || e.reason) : "unknown"));
 });
 
 var txn = new URLSearchParams(window.location.search).get('_ptxn');
@@ -730,28 +946,28 @@ var initialized = false;
 
 function openCheckout() {
   if (typeof Paddle === 'undefined') {
-    fsLog("لم يُحمَّل محرك الدفع (cdn.paddle.com) من هذا المتصفح. جرّب: تحديث الصفحة، أو متصفح آخر، أو تعطيل مانع الإعلانات.");
+    fsLog("The payment engine (cdn.paddle.com) did not load in this browser. Try: refresh the page, a different browser, or disable the ad blocker.");
     return;
   }
   if (!txn) {
-    fsLog("الرابط غير مكتمل — أعد فتحه من صفحة الاشتراك.");
+    fsLog("This link is incomplete — reopen it from the subscription page.");
     return;
   }
-  fsLog("جارٍ فتح نافذة الدفع الآمنة…");
+  fsLog("Opening the secure payment window…");
   try {
     Paddle.Checkout.open({ transactionId: txn, settings: { displayMode: "overlay" } });
     watchdog = setTimeout(function () {
-      fsLog("لم تتأكد النافذة خلال 8 ثوانٍ — اضغط الزر أعلاه لتجربة أخرى.");
+      fsLog("The window was not confirmed within 8 seconds — press the button above to try again.");
     }, 8000);
   } catch (err) {
-    fsLog("تعذّر فتح الدفع: " + err.message);
+    fsLog("Could not open checkout: " + err.message);
   }
 }
 
 var sdkAttempts = 0;
 function retrySdk() {
   if (sdkAttempts >= 3) {
-    fsLog("الإخفاق متكرر — محرك الدفع لا يصل من هذا المتصفح. جرّب متصفحاً آخر أو عطّل مانع الإعلانات ثم أعد تحميل الصفحة.");
+    fsLog("Repeated failure — the payment engine cannot be reached from this browser. Try a different browser or disable the ad blocker, then reload the page.");
     return;
   }
   sdkAttempts++;
@@ -772,13 +988,13 @@ function bootstrap() {
   try {
     Paddle.Initialize({ token: "__PADDLE_TOKEN__" });
   } catch (err) {
-    fsLog("فشل تهيئة Paddle: " + err.message);
+    fsLog("Failed to initialize Paddle: " + err.message);
     return;
   }
-  Paddle.Checkout.on('checkout.loaded', function () { watchdog && clearTimeout(watchdog); fsLog("نافذة الدفع مفتوحة."); });
-  Paddle.Checkout.on('checkout.closed', function () { fsLog("أُغلقت النافذة — اضغط الزر للمتابعة."); });
-  Paddle.Checkout.on('error', function (data) { watchdog && clearTimeout(watchdog); fsLog("خطأ Paddle: " + (data && data.error ? data.error : "غير معروف") + " — اضغط الزر للمحاولة."); });
-  Paddle.Checkout.on('transaction.completed', function () { fsLog("اكتمل الدفع — جارٍ التأكيد…"); });
+  Paddle.Checkout.on('checkout.loaded', function () { watchdog && clearTimeout(watchdog); fsLog("The payment window is open."); });
+  Paddle.Checkout.on('checkout.closed', function () { fsLog("The window was closed — press the button to continue."); });
+  Paddle.Checkout.on('error', function (data) { watchdog && clearTimeout(watchdog); fsLog("Paddle error: " + (data && data.error ? data.error : "unknown") + " — press the button to retry."); });
+  Paddle.Checkout.on('transaction.completed', function () { fsLog("Payment completed — confirming…"); });
   window.addEventListener('load', openCheckout);
   setTimeout(openCheckout, 1200);
 }
@@ -812,14 +1028,14 @@ def mock_checkout_page(user_id: int, plan: str):
     if plan not in db.PLANS:
         raise HTTPException(status_code=404, detail="باقة غير صالحة")
     price = db.PLANS[plan]["price"]
-    return f"""<!doctype html><html lang="ar"><head><meta charset="utf-8"><title>FluxSwarm · دفعة تجريبية</title></head>
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><title>FluxSwarm · Simulated payment</title></head>
 <body style="font-family:system-ui;max-width:560px;margin:60px auto;text-align:center;line-height:1.8">
-<h2>دفعة تجريبية (وضع محلي — بلا مال حقيقي)</h2>
-<p>الباقة: <b>{db.PLANS[plan]['name']}</b> · المبلغ: <b>${price}</b> (تجريبي)</p>
+<h2>Simulated payment (local mode — no real money)</h2>
+<p>Plan: <b>{db.PLANS[plan]['name']}</b> · Amount: <b>${price}</b> (simulated)</p>
 <form method="get" action="/api/payments/dev-complete/{user_id}/{plan}">
-<button style="font-size:16px;padding:10px 22px;cursor:pointer">إتمام الدفع تجريبياً</button>
+<button style="font-size:16px;padding:10px 22px;cursor:pointer">Complete payment (simulated)</button>
 </form>
-<p style="color:#888;font-size:13px">تُدار هذه الصفحة بنفس مسار ربط Paddle: تُولَّد حمولة موقّعة بتوقيع صحيح وتُعالج بنقطة webhook نفسها.</p>
+<p style="color:#888;font-size:13px">This page goes through the same Paddle webhook path: a correctly-signed payload is generated and processed by the production webhook handler.</p>
 </body></html>"""
 
 
@@ -860,14 +1076,16 @@ def dev_complete_mock_payment(request: Request, user_id: int, plan: str, aud: st
 
 # ---------- compliance: public legal pages ----------
 _LEGAL_BASE = """<!doctype html><html lang="ar"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>{title}</title>
-<style>body{{font-family:system-ui,sans-serif;max-width:760px;margin:40px auto;padding:0 16px;
-line-height:1.7;color:#222}}h1{{font-size:1.6rem}}a{{color:#0b59c5}}</style></head><body>{body}</body></html>"""
+ <meta name="viewport" content="width=device-width, initial-scale=1"><title>{title}</title>
+ <style>body{{font-family:system-ui,sans-serif;max-width:760px;margin:40px auto;padding:0 16px;
+ line-height:1.7;color:#222}}h1{{font-size:1.6rem}}a{{color:#0b59c5}}</style></head>
+ <body><p style="color:#777;font-size:.85rem">آخر تحديث: 30 أغسطس 2026</p>{body}</body></html>"""
 
 _LEGAL_BASE_EN = '<!doctype html><html lang="en"><head><meta charset="utf-8">\n' \
     '<meta name="viewport" content="width=device-width, initial-scale=1"><title>{title}</title>\n' \
     '<style>body{{font-family:system-ui,sans-serif;max-width:760px;margin:40px auto;padding:0 16px;\n' \
-    'line-height:1.7;color:#222}}h1{{font-size:1.6rem}}a{{color:#0b59c5}}</style></head><body>{body}</body></html>'
+    'line-height:1.7;color:#222}}h1{{font-size:1.6rem}}a{{color:#0b59c5}}</style></head>\n' \
+    '<body><p style="color:#777;font-size:.85rem">Last updated: 30 August 2026</p>{body}</body></html>'
 
 
 def _legal_entity_block(lang: str) -> str:
@@ -896,10 +1114,12 @@ def _legal_entity_block(lang: str) -> str:
 def privacy_page():
     contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
     body = """<h1>سياسة الخصوصية (Privacy Policy)</h1>
-<p>تُجمع البيانات التالية لتشغيل الخدمة فقط: البريد الإلكتروني والاسم وكلمات المرور (مشفّرة Argon2id) ومفاتيح مزوّدي الذكاء الاصطناعي (مشفّرة فورياً بـ Fernet) وسجلُّ الاستخدام والتدقيق.</p>
-<p>لا تُباع البيانات ولا تُشارك مع أطراف ثالثة، ما عدا معالج الدفع Paddle (تاجر السجلّ) لإتمام المعاملات. تُخزَّن البيانات في أمريكا الشمالية.</p>
-<p>حقوقك (CCPA/CPRA): حق الاطلاع على بياناتك عبر <code>GET /api/account/export</code>، وحق الحذف الكامل عبر <code>DELETE /api/account</code>.</p>
-<p>يُستبعد سجلّ التدقيق الأمني (Append-only) من الحذف: يُحتفظ به للأغراض الأمنية والتحقيقية ولا يُستخدم لأي غرض تسويقي. قد تتضمن مدخلاته البريد الإلكتروني وعنوان IP تلقائياً لأغراض التحقيق في إساءة الاستخدام، وهي غير قابلة للمحو.</p>"""
+<p>تُجمع البيانات التالية لتشغيل الخدمة فقط: البريد الإلكتروني والاسم وكلمات المرور (مشفّرة Argon2id) ومفاتيح مزوّدي الذكاء الاصطناعي (مشفّرة فورياً بـ Fernet) وأهداف المشاريع ومخرجاتها وسجلُّ الاستخدام والتدقيق ومعلومات الدفع الأساسية.</p>
+<p>لا تُباع البيانات ولا تُستخدم في الإعلانات. نشاركها فقط: (1) مع معالج الدفع Paddle (تاجر السجلّ) لإتمام المعاملات، و(2) مع مزوّد الذكاء الاصطناعي الذي تختاره أنت عند تشغيل السرب (BYOK) لتنفيذ هدفك، وفق شروط ذلك المزوّد. لا تدرب المنصة على بياناتك.</p>
+<p>حقوقك (CCPA/CPRA): حق الاطلاع على بياناتك عبر <code>GET /api/account/export</code> (أو من لوحة الحساب)، وحق التصحيح والحذف الكامل عبر <code>DELETE /api/account</code> وحذف مفاتيحك فوراً، ولن تمرّ طلبات التصحيح الأخرى وسيلة <a href="mailto:{c}">{c}</a>. سياق بيانات التخزين: عند الإطلاق تُستضاف الخوادم في أمريكا الشمالية؛ اخترنا هذا الموقع لحوسبة الدفع والتشفير — راجع/ي «النقل الدولي» في النسخة الإنجليزية.</p>
+<p>سجلّ التدقيق الأمني (Append-only) مستبعد من الحذف: يُحتفظ به للأغراض الأمنية والتحقيقية فقط ولا يستخدم تسويقياً ولا للتدريب، وقد تتضمن مدخلاته البريد الإلكتروني وعنوان IP تلقائياً لأغراض التحقيق في إساءة الاستخدام، وهي غير قابلة للمحو. الأثاث الناتج عن تشغيل السرب (ملفات المنتج المولّدة على القرص) تُحذف عند حذف الحساب في الإصدارات اللاحقة؛ إلى حينه يمكنك طلب الحذف عبر البريد. تفاصيل الملفات المنقولة وعوامل الاحتفاظ موجودة في صفحة <a href="/cookies">ملفات تعريف الارتباط والتتبّع</a> واسترداد الأموال في <a href="/refund">سياسة الاسترداد والرصيد</a>.</p>
+<p>انات المملكة المتحدة والاتحاد الأوروبي (إضافة بريطانية/أوروبية): الأساس القانوني للمعالجة هو تنفيذ العقد، والمصلحة المشروعة (أمان النظام ومكافحة الاحتيال)، والالتزام القانوني (سجلات الفوترة). حقوقك تشمل الوصول والتصحيح والمحو ونقل البيانات والاعتراض على المعالجة وشكوى لدى سلطة حماية البيانات (في بريطانيا: مكتب مفوّض المعلومات). قد تُنقل بياناتك إلى مزوّدي الذكاء الاصطناعي خارج المملكة/الاتحاد وفق شروطهم؛ ولا ننقلها لأغراض تسويقية.</p>"""
+    body = body.format(c=contact)
     body += _legal_entity_block("ar")
     _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
     body += f'<p>أسئلة: <a href="mailto:{contact}">{contact}</a>'
@@ -911,10 +1131,12 @@ def privacy_page():
 def privacy_page_en():
     contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
     body = """<h1>Privacy Policy</h1>
-<p>We process only the data needed to operate the service: email address, name, password (hashed with Argon2id), user-supplied AI provider keys (encrypted at rest with Fernet), and usage/audit records.</p>
-<p>We do not sell your data and do not share it with third parties except Paddle (the merchant of record) to complete transactions. Data is stored in North America.</p>
-<p>Your rights (CCPA/CPRA): access your data via <code>GET /api/account/export</code>, and request full erasure via <code>DELETE /api/account</code>.</p>
-<p>The security audit log is append-only and is excluded from erasure: it is retained for security and investigation purposes only, is never used for marketing, and its entries may include your email address and IP address automatically.</p>"""
+<p>We process only the data needed to operate the service: email, name, password (Argon2id), user-supplied AI provider keys (Fernet-encrypted), project goals and generated outputs, usage/audit records, and minimal payment metadata.</p>
+<p>We do not sell your data and do not use it for ads. We share it only (1) with Paddle (merchant of record) to complete transactions and (2) with the AI provider of your choice (BYOK) to execute your goal under that provider's terms. We do not train on your data.</p>
+<p>Your rights (CCPA/CPRA): access via <code>GET /api/account/export</code>, rectification and full erasure via <code>DELETE /api/account</code> (including immediate key deletion). Other correction requests: <a href="mailto:{c}">{c}</a>. On launch, data is hosted on servers in North America.</p>
+<p>The security audit log is append-only and excluded from erasure: it is retained for security/investigation purposes only, never for marketing or training; its entries may include your email address and IP address automatically.</p>
+<p>UK/EU addendum: lawful bases are performance of the contract, legitimate interests (system security, fraud prevention) and legal obligation (billing records). Your rights include access, rectification, erasure, portability, objection, and complaint to your supervisory authority (in the UK: the ICO). Your data may be transferred to the AI provider you choose, outside the UK/EU, under that provider's terms; we do not transfer it for marketing. Cookies and tracking are described on <a href="/cookies-en">/cookies</a>; refunds and credits on <a href="/refund-en">/refund</a>.</p>"""
+    body = body.format(c=contact)
     body += _legal_entity_block("en")
     _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
     body += f'<p>Questions: <a href="mailto:{contact}">{contact}</a>'
@@ -926,10 +1148,15 @@ def privacy_page_en():
 def terms_page():
     contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
     body = """<h1>شروط الاستخدام (Terms of Service)</h1>
-<p>تُقدَّم الخدمة «كما هي». الاشتراكات المدفوعة تدار بواسطة Paddle (Merchant of Record) وفق شروطها.</p>
-<p>تُمنح الائتمانات عند تأكيد الدفع فقط. لا تنتهي صلاحية الائتمانات. يُعاد رصيد الائتمانات تلقائياً عند فشل إطلاق السرب. عند استرداد مبلغ من Paddle تُحوَّل الباقة إلى Demo ويبقى الرصيد الحالي بحوزتك.</p>
-<p>تُرفض أنشطة إساءة الاستخدام أو المحتوى غير القانوني أو إشباع السرب بشكل ضار، وقد يوقف الحساب.</p>
-<p>تُطبَّق هذه الشروط بموجب قوانين الولايات المتحدة.</p>"""
+<p>تُقدَّم الخدمة «كما هي». تُعالَج المدفوعات بواسطة Paddle (تاجر السجلّ) وفق شروطها، وتشمل الضرائب وضريبة القيمة المضافة حيثما انطبق.</p>
+<h2>الائتمانات</h2><p>الائتمانات رصيد خدمة مسبق الدفع يُمنح فقط بعد تأكيد الدفع. كل إطلاق مشروع يكلّف رصيداً واحداً ولا تنتهي صلاحية الائتمانات. يُعاد الرصيد تلقائياً عند فشل الإطلاق قبل استهلاك أي عمل، وفي حال استرداد مبلغ من Paddle تُحوَّل الباقة إلى Demo ويبقى الرصيد الحالي.</p>
+<h2>بياناتك ومفاتيحك</h2><p>أنت مسؤول عن الأهداف التي ترسلها وعن مفاتيح المزوّدين التي تخزّنها (راجع سياسة الخصوصية لطريقة حمايتها). تُستخدم المفاتيح فقط لتنفيذ إطلاقك الخاص.</p>
+<h2>المخرجات</h2><p>مخرجات السرب ملكك، وفق شروط مزوّدي الذكاء الاصطناعي المستخدمين وأي مكونات طرف ثالث داخلها. تستخدم الخدمة برمجيات تشغيل ومهارات وكلاء مفتوحة المصدر (Hermes؛ ECC) وتراخيصها تعود لمؤلفيها.</p>
+<h2>الاستخدام المقبول</h2><p>إساءة الاستخدام أو المحتوى غير القانوني أو النشاط الضار ممنوع وقد يؤدي لإيقاف الحساب (انظر <a href="/acceptable-use">سياسة الاستخدام المقبول</a>).</p>
+<h2>التوفر وإنهاء الحساب</h2><p>نعمل على إبقاء الخدمة متاحة دون ضمان استمرارية غير منقطعة. يمكنك حذف حسابك (وكل بياناته ومجالسه) من التطبيق في أي وقت، وقد نعلّق الحسابات المخالفة.</p>
+<h2>تحديد المسؤولية</h2><p>إلى أقصى حد يسمح به القانون، تُقدَّم الخدمة «كما هي» دون ضمانات، وتُحدَّد المسؤولية عن الخدمة ومخرجاتها كما يسمح به القانون؛ ولا يُسقَط ما لا يمكن إسقاطه قانوناً ولا حقوق المستهلك الإلزامية (بما فيها في المملكة المتحدة والاتحاد الأوروبي).</p>
+<h2>القانون الحاكم والاختصاص</h2><p>تخضع هذه الشروط للقانون المعمول به؛ حقوق المستهلك الإلزامية في بلدك لا تتأثر. تُراجع تفاصيل الاختصاص قانونياً مع توسع الخدمة. أسئلة: <a href="mailto:{c}">{c}</a>.</p>"""
+    body = body.format(c=contact)
     body += _legal_entity_block("ar")
     _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
     body += f'<p>اتصل بنا: <a href="mailto:{contact}">{contact}</a>'
@@ -941,15 +1168,310 @@ def terms_page():
 def terms_page_en():
     contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
     body = """<h1>Terms of Service</h1>
-<p>The service is provided &quot;as is&quot;. Paid subscriptions are processed by Paddle (Merchant of Record) under its own terms.</p>
-<p>Credits are granted only after a confirmed payment and never expire. Credits are refunded automatically when a swarm launch fails. If you obtain a refund from Paddle, your plan is downgraded to Demo and your current credit balance is kept.</p>
-<p>Abuse, unlawful content, or harmful swarm activity is prohibited and may result in account suspension.</p>
-<p>These terms are governed by the laws of the United States.</p>"""
+<p>The service is provided &quot;as is&quot;. Paid transactions are processed by
+Paddle (merchant of record) under its own terms; any country-specific tax or VAT
+is handled by Paddle.</p>
+<h2>Credits</h2><p>Credits are a prepaid service balance, granted only after a
+confirmed payment. Each launched project costs 1 credit. Credits never expire.
+A launch that fails before the squad does any work refunds the credit to your
+account automatically. A merchant refund downgrades your plan to Demo and keeps
+your current credit balance.</p>
+<h2>Your data and your keys</h2><p>You remain responsible for the goals you submit
+and for the provider keys you store (see the privacy policy for how they are
+protected). User-supplied API keys are used only to execute your own launches.</p>
+<h2>Output</h2><p>You own the generated output, subject to the terms of the AI
+providers you used and to any third-party components included in it. The service
+uses third-party execution software and open-source agent skill profiles (Hermes;
+ECC); their licences belong to their respective authors.</p>
+<h2>Acceptable use</h2><p>Abuse, unlawful content, or harmful swarm activity is
+prohibited and may result in account suspension. See the <a href="/acceptable-use-en">acceptable-use policy</a>.</p>
+<h2>Availability</h2><p>We work to keep the service available but do not guarantee
+uninterrupted availability.</p>
+<h2>Termination</h2><p>You can delete your account (and its data and boards) at any
+time from the app. We may suspend accounts that violate these terms or the
+acceptable-use policy.</p>
+<h2>Limitation of liability</h2><p>To the maximum extent permitted by applicable
+law, the service is provided &quot;as is&quot; without warranties, and liability
+for the service and the generated output is limited as permitted by law. This does
+not limit or exclude liability that cannot be limited or excluded by law, and
+does not affect any statutory consumer rights you have (including in the UK and
+the EU).</p>
+<h2>Governing law and jurisdiction</h2><p>These terms are governed by applicable
+law. If you are a consumer in the UK, EU or another jurisdiction with mandatory
+consumer protections, your rights under that law are not affected. Jurisdiction
+specifics are kept under legal review as the service expands. Questions: <a href="mailto:{c}">{c}</a>.</p>"""
+    body = body.format(c=contact)
     body += _legal_entity_block("en")
     _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
     body += f'<p>Contact: <a href="mailto:{contact}">{contact}</a>'
     body += f" · {_phone}</p>" if _phone else "</p>"
     return _LEGAL_BASE_EN.format(title="Terms of Service", body=body)
+
+
+# ---------- legal: refund & credits (no-refund absolutes) ----------
+@app.get("/refund", response_class=HTMLResponse)
+def refund_page():
+    contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
+    body = """<h1>سياسة الاسترداد والرصيد</h1>
+<p>الرصيد (الائتمانات) هومنتج عضوياً: لا تنتهي صلاحيته ولا يمكن شحنه خارج الخدمة.</p>
+<p>متى تُسترد الأموال تلقائياً:</p>
+<ul>
+<li>عند فشل إطلاق السرب ولم يُستهلك أي عمل — يُعاد الرصيد تلقائياً إلى حسابك.</li>
+<li>عند استرداد مبلغ من Paddle — تُحوَّل باقتك إلى Demo ويبقى رصيدك الحالي بحوزتك.</li>
+</ul>
+<p>متى يُنظر في استرداد نقدي (استثمارية، خلال 14 يوماً من أول تفعيل لأي باقة مدفوعة، بعد خصم العمل المستهلَك): لا استرداد كامل تلقائياً؛ المتاجر الإلكترونية إن كانت قد حدّت استخدامك. الطلبات خلال 14 يوماً من الشراء تُعالج قبل سحب الرصيد المستهلك. بعد 14 يوماً: لا استرداد نقدي للاستخدام المستهلك، لكن الرصيد غير المستهلَك قابل للاسترداد النقدي حسب <a href="mailto:{c}">{c}</a> وحسب شروط Paddle.</p>
+<p>العمليات تتم حصراً عبر Paddle (تاجر السجلّ) وسياسة الاسترداد التي تفرضها قوانين بلدك (بما فيها حقوق المستهلك في المملكة المتحدة والاتحاد الأوروبي) لا تُسقَط هذه البنود. لمطالبات نزاعات: <a href="mailto:{c}">{c}</a>.</p>"""
+    body = body.format(c=contact)
+    body += _legal_entity_block("ar")
+    _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
+    body += f'<p>استفسارات: <a href="mailto:{contact}">{contact}</a>'
+    body += f" · {_phone}</p>" if _phone else "</p>"
+    return _LEGAL_BASE.format(title="سياسة الاسترداد والرصيد", body=body)
+
+
+@app.get("/refund-en", response_class=HTMLResponse)
+def refund_page_en():
+    contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
+    body = """<h1>Refund &amp; Credit Policy</h1>
+<p>Credits are service credits: they never expire and cannot be withdrawn outside the service.</p>
+<p>Automatic grants:</p>
+<ul>
+<li>If a swarm launch fails and no work was consumed, the credits are returned to your account automatically.</li>
+<li>If you obtain a monetary refund from Paddle, your plan is downgraded to Demo and your current credit balance stays with you.</li>
+</ul>
+<p>Monetary refunds (at our discretion, within 14 days of your first paid activation, net of consumed work): there is no automatic full-refund policy; we review requests individually. Requests within 14 days of purchase are processed before deducting consumed credits. After 14 days, no monetary refund for consumed usage, but any unconsumed credit balance may be refunded via <a href="mailto:{c}">{c}</a> subject to Paddle's process.</p>
+<p>All payments are handled by Paddle (merchant of record). Your statutory consumer rights (including UK and EU) are not waived by any of these terms. Disputes: <a href="mailto:{c}">{c}</a>.</p>"""
+    body = body.format(c=contact)
+    body += _legal_entity_block("en")
+    _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
+    body += f'<p>Questions: <a href="mailto:{contact}">{contact}</a>'
+    body += f" · {_phone}</p>" if _phone else "</p>"
+    return _LEGAL_BASE_EN.format(title="Refund &amp; Credit Policy", body=body)
+
+
+# ---------- legal: cookies & tracking ----------
+@app.get("/cookies", response_class=HTMLResponse)
+def cookies_page():
+    contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
+    body = """<h1>ملفات تعريف الارتباط والتتبّع</h1>
+<p>لا يضع الخادم أي ملفات تعريف ارتباط للتتبع؛ الجلسة تعتمد رمز JWT يُحفظ في <code>localStorage</code> ويتلاشى خلال 7 أيام أو عند خروجك. القيمة المحلية الوحيدة الأخرى هي <code>flux-lang</code> (تفضيل اللغة).</p>
+<p>لا أدوات تحليلات، لا إعلانات، لا بكسل تتبّع، ولا أطراف ثالثة متتبّعة. منذ أن لا نستخدم ملفات تعريف ارتباط للإعلان أو التحليلات، لا يُشترَط لافتة موافقة مسبقة بموجب لوائح الكوكيز البريطانية (PECR) على موقعنا. عند الدفع ينشئ Paddle ملفات تعريف ارتباط على نطاقه الخاص فقط، وليس على نطاقنا.</p>
+<p>لمزيد: <a href="/refund">الاسترداد</a> · <a href="/privacy">الخصوصية</a> · <a href="/acceptable-use">الاستخدام المقبول</a>.</p>"""
+    body = body.format(c=contact)
+    body += _legal_entity_block("ar")
+    _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
+    body += f'<p>استفسارات: <a href="mailto:{contact}">{contact}</a>'
+    body += f" · {_phone}</p>" if _phone else "</p>"
+    return _LEGAL_BASE.format(title="ملفات تعريف الارتباط والتتبّع", body=body)
+
+
+@app.get("/cookies-en", response_class=HTMLResponse)
+def cookies_page_en():
+    contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
+    body = """<h1>Cookies &amp; Tracking</h1>
+<p>The FluxSwarm server sets no tracking cookies. Your session uses a JWT held in browser <code>localStorage</code>; the only other local value is <code>flux-lang</code> (language preference).</p>
+<p>There is no analytics, no advertising, no tracking pixels and no third-party trackers. When you pay, Paddle sets cookies on its own domain only, never ours.</p>
+<p>Because we do not use cookies for advertising or analytics, no prior consent banner is required under UK PECR for our own site. Paid pages are served by Paddle's checkout under its own notice. Contact: <a href="mailto:{c}">{c}</a></p>
+<p>See also <a href="/refund-en">refund policy</a> and <a href="/privacy-en">privacy</a>.</p>"""
+    body = body.format(c=contact)
+    body += _legal_entity_block("en")
+    _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
+    body += f'<p>Questions: <a href="mailto:{contact}">{contact}</a>'
+    body += f" · {_phone}</p>" if _phone else "</p>"
+    return _LEGAL_BASE_EN.format(title="Cookies &amp; Tracking", body=body)
+
+
+# ---------- marketing: public product pages ----------
+_MARKET_CSS = """body{font-family:ui-sans-serif,system-ui,"Segoe UI",Tahoma;margin:0;background:#0a0c11;color:#eef1f6;line-height:1.6}
+.wrap{max-width:980px;margin:0 auto;padding:28px 20px 60px}
+.top{display:flex;align-items:center;gap:14px;padding:14px 20px;border-bottom:1px solid #232837;background:#0e1117}
+.top .logo{font-weight:800;background:linear-gradient(90deg,#6d7cfa,#9d8bff);-webkit-background-clip:text;background-clip:text;color:transparent;font-size:19px}
+.top nav{margin-left:auto;display:flex;gap:16px} .top nav a{color:#98a0af;text-decoration:none;font-size:14px} .top nav a:hover{color:#6d7cfa}
+h1{font-size:30px;margin:18px 0 6px;letter-spacing:-.3px} h2{font-size:20px;margin:26px 0 8px;color:#cdd4e2}
+p{color:#98a0af} a{color:#6d7cfa} li{color:#98a0af;margin:5px 0}
+.plans{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin:20px 0}
+.pl{background:#0e1117;border:1px solid #232837;border-radius:14px;padding:18px}
+.pl.hot{border-color:#6d7cfa;box-shadow:0 0 0 1px #6d7cfa}
+.pl .n{font-size:17px;font-weight:800} .pl .p{font-size:24px;font-weight:800;margin:6px 0}
+.pl .p small{color:#98a0af;font-weight:400;font-size:13px} .pl ul{list-style:none;padding:0;margin:8px 0;font-size:13px}
+.cmp{width:100%;border-collapse:collapse;font-size:14px} .cmp th,.cmp td{border:1px solid #232837;padding:10px 12px;text-align:left}
+.cmp th{color:#cdd4e2} .cmp td{color:#98a0af}
+.foot{border-top:1px solid #232837;padding:16px 0;font-size:13px;color:#7a8699}
+.foot a{color:#6d7cfa}"""
+
+_MARKET_BASE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="{desc}"><title>{title}</title>
+<style>{css}</style></head><body>
+<div class="top"><span class="logo">FluxSwarm</span><nav>
+<a href="/">Go to app</a><a href="/pricing">Pricing</a><a href="/how-it-works">How it works</a><a href="/faq">FAQ</a></nav></div>
+<div class="wrap">{body}<div class="foot">FluxSwarm · <a href="/privacy-en">Privacy</a> ·
+<a href="/terms-en">Terms</a> · <a href="/refund-en">Refund</a> ·
+<a href="/cookies-en">Cookies</a> · <a href="/acceptable-use-en">Acceptable use</a></div></div>
+</body></html>"""
+
+
+@app.get("/pricing", response_class=HTMLResponse)
+def pricing_page():
+    plans = [{"id": pid, **db.PLANS[pid]} for pid in db.PLAN_ORDER]
+    rows = "".join(
+        f'<div class="pl {"hot" if p["name"].lower() == "pro" else ""}">'
+        f'<div class="n">{p["name"]}</div>'
+        f'<div class="p">${p["price"]}<small> /once (credit pack)</small></div>'
+        f'<ul><li>{p["credits"]} credits · 1 credit = 1 swarm launch</li>'
+        f'<li>{p["parallel"]}-agent parallel cap</li>'
+        f'<li>{p["desc"]}</li></ul></div>'
+        for p in plans)
+    body = f"""<h1>Simple pricing, no token meters</h1>
+<p>Every launch costs exactly <strong>1 credit</strong>. Bring your own AI key and
+you pay only your provider's token rate — FluxSwarm charges the flat 1-credit
+coordination fee per launched project and nothing else. No key yet? The default
+free hosted model runs the squad end-to-end too.</p>
+<div class="plans">{rows}</div>
+<p>Credits are prepaid and never expire; a failed launch is refunded automatically.
+Payments are processed by Paddle (merchant of record), which handles sales tax and
+VAT remittance. A merchant refund downgrades you to Demo and keeps your current
+balance. See the <a href="/refund-en">refund policy</a>. Prices are shown in USD;
+GBP pricing is applied by Paddle at checkout for UK customers.</p>"""
+    return _MARKET_BASE.format(title="Pricing — FluxSwarm", desc="1 credit per launch, BYOK AI builders", css=_MARKET_CSS, body=body)
+
+
+@app.get("/how-it-works", response_class=HTMLResponse)
+def how_it_works_page():
+    body = """<h1>How FluxSwarm works</h1>
+<h2>What is FluxSwarm?</h2><p>FluxSwarm is a hosted AI development squad. You
+describe a product you want built; a team of specialized agents plans, builds,
+tests, reviews and assembles it on a live task board while you watch.</p>
+<h2>Who is it for?</h2><p>Solo developers, startups and small teams who want a
+concrete first version built — with a live picture of the work and the generated
+files in your workspace — without wiring up an agent pipeline themselves.</p>
+<h2>1. Type a goal</h2><p>Describe the product in one paragraph. The squad plans
+the rest.</p>
+<h2>2. A 6-agent squad takes over</h2><p>Your goal is broken into work and
+assigned to a real agent crew, watched live on a kanban board:
+<strong>Planner</strong> (breakdown) → <strong>Architect</strong> (structure) →
+<strong>DevOps</strong> (scaffold &amp; CI/CD) → <strong>TDD</strong> (tests) →
+<strong>Reviewer</strong> (verify) → <strong>Builder</strong> (merge to output).
+The agents run inside the Hermes execution runtime using the open-source ECC
+skill profiles — you do not need to install or manage either.</p>
+<h2>3. Pick a model — bring a key or use the free one</h2><p>Bring your own AI
+provider key (Anthropic Claude, OpenAI, Gemini or Kimi) for stronger output; your
+key is Fernet-encrypted at rest, injected into the agent process only at launch,
+and never returned by the API. You pay your provider's token price. Without a key,
+the squad runs on a free hosted model included with the service.</p>
+<h2>4. Pick it up from the workspace</h2><p>Generated files land in your project
+workspace, browsable in the UI on the board, ready to push to your own repository.</p>
+<h2>Billing</h2><p>1 credit per launched project across every plan. Credits are
+prepaid, never expire, and are refunded automatically if a launch fails. There is
+no monthly fee — credit packs set your plan tier (parallel execution cap) and
+credit balance. See <a href="/pricing">pricing</a>.</p>
+<h2>Transparency</h2><p>FluxSwarm is the product. Hermes is the execution runtime
+that drives the board, and ECC is an underlying open-source component (agent skill
+profiles) used inside it. Both are third-party components; FluxSwarm is not Hermes
+and does not own ECC. Their availability is required to run a launch, and their
+licences are their respective authors'.</p>"""
+    return _MARKET_BASE.format(title="How it works — FluxSwarm", desc="A 6-agent AI development squad on a live board, 1 credit per launch", css=_MARKET_CSS, body=body)
+
+
+@app.get("/faq", response_class=HTMLResponse)
+def faq_page():
+    body = """<h1>FAQ</h1>
+<h2>What is FluxSwarm?</h2><p>An AI development squad: type a goal and six
+specialized agents (Planner, Architect, DevOps, TDD, Reviewer, Builder) plan,
+build, test, verify and assemble it on a live task board, with the generated files
+in your workspace.</p>
+<h2>Does the squad need my AI key?</h2><p>No. A free hosted model is the default, so
+the squad runs end-to-end with no key. Bringing your own key (Anthropic Claude,
+OpenAI, Gemini or Kimi) is optional and lifts output quality; your key pays your
+provider&rsquo;s token rate. Keys are Fernet-encrypted at rest, injected only at
+launch, and never returned by the API.</p>
+<h2>What is Hermes? What is ECC?</h2><p>Hermes is the execution runtime that drives
+the board. ECC is an underlying open-source component: the agent skill profiles
+the squad uses. FluxSwarm is the product that orchestrates them; it is not Hermes
+and does not own ECC. Both are required to run a launch.</p>
+<h2>Does running without a key cost me anything?</h2><p>Each launch costs 1 credit.
+The Demo plan starts you with 3 free credits (no card). Credit never pays model
+tokens on the free model — you pay the 1-credit coordination fee only.</p>
+<h2>How much do paid plans cost?</h2><p>Credit packs, not subscriptions. Starter
+$29/25 credits, Pro $99/120 credits, Scale $299/500 credits (USD; GBP applied at
+checkout by Paddle). Credits never expire. Billing runs through Paddle (merchant
+of record).</p>
+<h2>How fast are launches?</h2><p>Swarm duration depends on the goal, the model
+in use and system load. The board streams progress live so you can watch it from
+start to finish rather than guess.</p>
+<h2>Can I cancel a Launch?</h2><p>There is no recurring subscription to cancel —
+you buy credit packs and spend them. You can stop watching a board at any time;
+refunds and unused credits are covered below.</p>
+<h2>What if a Launch fails?</h2><p>If the launch fails before the squad does any
+work, the credit is refunded to your account automatically. The run state stays
+visible on the board for debugging.</p>
+<h2>What if Hermes or the model provider fails?</h2><p>The launch reports a clear
+error (the runtime or a provider key may be unavailable or misconfigured) and
+the credit is refunded automatically. Your stored keys are never consumed by the
+failure.</p>
+<h2>What happens when Credits run out?</h2><p>Launching requires 1 credit. With zero
+credits you keep access to your boards and data; you just cannot start new
+launches until you add credits to the account.</p>
+<h2>Can I sell what the squad builds?</h2><p>You own the generated output (subject
+to the terms of the AI provider you used and any third-party components). You can
+also publish your own squad templates on the marketplace and earn a 50% author
+share on every sale, paid in credits.</p>
+<h2>How do referrals work?</h2><p>Share your referral link; when a referred account
+subscribes to a paid plan you earn 25 credits, once per referred email. Self-referral
+and abusing the program (for example creating fake referrals) is prohibited and
+rewards may be clawed back.</p>
+<h2>Is my API key stored? Can FluxSwarm access my provider account?</h2><p>Keys are
+stored encrypted (Fernet) and used only to execute your own launches. FluxSwarm
+does not hold your provider account credentials, cannot browse your provider
+account, and never shows a stored key back to anyone. You can delete a key or your
+whole account from the app.</p>
+<h2>Is my data private?</h2><p>Projects are namespace-isolated per account
+(cross-user access returns 403). You can export your data and erase your account
+(and its boards) from the app&rsquo;s account section. We do not sell data and do
+not train on it. Details on the <a href="/privacy-en">privacy policy</a>.</p>
+<h2>How long is data retained?</h2><p>Until you delete your account, or per the data
+lifecycle described in the <a href="/privacy-en">privacy policy</a>. A security
+audit log is kept separately for abuse investigation and is excluded from
+deletion. Cookies and local storage are described on the <a href="/cookies-en">cookies</a> page.</p>
+<h2>What about unused credits after I stop paying?</h2><p>Credits never expire and
+are not tied to a recurring payment. Unused credits stay on the account; the
+refund policy covers the rest.</p>
+<h2>What is the refund policy?</h2><p>Failed launches refund the credit
+automatically. Merchant refunds downgrade the plan to Demo and keep your balance.
+Monetary refunds are reviewed case-by-case (see the <a href="/refund-en">refund policy</a>);
+statutory consumer rights are not waived.</p>
+<h2>What support is available?</h2><p>Email support at the contact address on the
+legal pages and in the app footer. Self-serve: this FAQ, the how-it-works guide,
+and the live board you can inspect during every launch.</p>"""
+    return _MARKET_BASE.format(title="FAQ — FluxSwarm", desc="Answers on pricing, credits, BYOK, privacy and the agent squad", css=_MARKET_CSS, body=body)
+@app.get("/acceptable-use", response_class=HTMLResponse)
+def acceptable_use_page():
+    contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
+    body = """<h1>الاستخدام المقبول</h1>
+<p>باستخدامك FluxSwarm تقرّ بأنك: (1) لن تستخدم المنصة في المحتوى غير القانوني أو الخبيث أو الاستغلالي أو انتهاك الحقوق (بما فيها الملكية الفكرية وحقوق الغير)؛ (2) لن تشغّل سرباً يهدف لإحداث ضرر أو أي أنشطة عنيفة أو احتيالية؛ (3) لن تعيد بيع الائتمانات أو تحويلها نقداً خارج سياسة الاسترداد؛ (4) لن تحاول الوصول غير المصرّح به أو تسريب مفاتيح الغير أو كشط الواجهة آلياً بما يتجاوز الحدود؛ (5) ستلتزم بشروط مزوّدي الذكاء الاصطناعي الذين تستخدمهم عبر BYOK.</p>
+<p>قد تُعلّق الحسابات المخالفة وتُحال التفاصيل المشبوهة للجهات المختصة، وقد تُستردّ الائتمانات عبر التحقيق وفق <a href="/refund">سياسة الاسترداد</a>.</p>
+<p>استفسارات: <a href="mailto:{c}">{c}</a></p>"""
+    body = body.format(c=contact)
+    body += _legal_entity_block("ar")
+    _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
+    body += f'<p>أسئلة: <a href="mailto:{contact}">{contact}</a>'
+    body += f" · {_phone}</p>" if _phone else "</p>"
+    return _LEGAL_BASE.format(title="الاستخدام المقبول", body=body)
+
+
+@app.get("/acceptable-use-en", response_class=HTMLResponse)
+def acceptable_use_page_en():
+    contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
+    body = """<h1>Acceptable Use</h1>
+<p>By using FluxSwarm you agree that you will (1) not use the platform for unlawful, malicious, exploitative or infringing content (including intellectual property and others' rights); (2) not run a swarm aimed at harm, violence or fraud; (3) not resell credits or convert them to cash outside the refund policy; (4) not attempt unauthorized access, leak others' keys, or scrape the API beyond stated limits; (5) comply with the terms of the AI providers you use via BYOK.</p>
+<p>Violating accounts may be suspended and suspicious activity may be reported to authorities; credits may be recovered following investigation per the <a href="/refund-en">refund policy</a>.</p>
+<p>Questions: <a href="mailto:{c}">{c}</a></p>"""
+    body = body.format(c=contact)
+    body += _legal_entity_block("en")
+    _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
+    body += f'<p>Questions: <a href="mailto:{contact}">{contact}</a>'
+    body += f" · {_phone}</p>" if _phone else "</p>"
+    return _LEGAL_BASE_EN.format(title="Acceptable Use", body=body)
 
 
 # ---------- compliance: CCPA/CPRA account rights ----------
@@ -963,11 +1485,24 @@ def api_account_export(request: Request, user: dict = Depends(get_current_user))
 @app.delete("/api/account")
 def api_account_delete(request: Request, user: dict = Depends(get_current_user)):
     uid = user["id"]
+    # Collect the user's OWN board slugs BEFORE the DB rows are erased, then
+    # delete their Hermes kanban workspaces from disk too (CCPA right to
+    # erasure). Demo boards (flux-demo-*) are shared/public and never user-owned,
+    # so they are intentionally left intact.
+    own_slugs = [pr["board_slug"] for pr in db.list_user_projects(uid)
+                 if pr["board_slug"].startswith(f"u{uid}-")]
     vault.delete_user_key(uid)
     removed = db.delete_user(uid)
+    boards_deleted = 0
+    if removed:
+        try:
+            boards_deleted = hc.delete_boards(own_slugs)
+        except Exception:
+            boards_deleted = -1  # DB already erased; disk cleanup stays best-effort
     audit.audit("account.delete", uid=uid, email=user["email"], ip=_client_ip(request),
-                outcome="ok" if removed else "missing")
-    return {"ok": removed, "note": "تم حذف الحساب وكل البيانات المرتبطة به"}
+                outcome="ok" if removed else "missing", boards_deleted=boards_deleted)
+    return {"ok": removed, "note": "تم حذف الحساب وكل البيانات المرتبطة به",
+            "boards_deleted": boards_deleted}
 
 
 # ---------- Telegram account linking ----------
@@ -1135,13 +1670,16 @@ def api_buy_template(tid: int, payload: BuyIn, request: Request,
     slug = f"u{user['id']}-t{tid}-{int(time.time())}-{secrets.token_hex(4)}"
     launched = False
     launch_error = None
+    pid = None
     try:
-        db.add_project(user["id"], slug, tpl.get("name", "marketplace-squad"), goal)
+        pid = db.add_project(user["id"], slug, tpl.get("name", "marketplace-squad"), goal)
         hc.ensure_board(slug)
         hc.launch_from_template(slug, goal, tpl.get("agents", []),
                                 provider_keys=_user_provider_keys(user))
-        hc.dispatch(slug, max_spawn=db.PLANS[user["plan"]]["parallel"],
-                    provider_keys=_user_provider_keys(user), blocking=False)
+        # Auto-dispatch through the same background path as projects/demo so the
+        # multi-wave swarm (workers -> verifier -> synthesizer) drives to
+        # completion instead of stalling after the first ready-wave.
+        _fire_dispatch(slug, user["plan"], _user_provider_keys(user), pid=pid)
         launched = True
     except Exception as e:
         launched = False
@@ -1203,6 +1741,11 @@ async def ws_board(websocket: WebSocket, slug: str):
         await websocket.send_json({"type": "error", "detail": "unauthorized"})
         await websocket.close()
         return
+    if not _token_session_ok(user, payload):
+        await websocket.accept()
+        await websocket.send_json({"type": "error", "detail": "unauthorized"})
+        await websocket.close()
+        return
     if not (slug.startswith(f"u{payload['uid']}-") or slug.startswith("flux-demo-")):
         await websocket.accept()
         await websocket.send_json({"type": "error", "detail": "forbidden"})
@@ -1224,6 +1767,17 @@ async def ws_board(websocket: WebSocket, slug: str):
                 await websocket.send_json({"type": "error", "detail": "board poll failed"})
     except WebSocketDisconnect:
         _SUBS.get(slug, set()).discard(websocket)
+
+
+@app.get("/robots.txt", response_class=PlainTextResponse)
+def robots_txt():
+    return (BASE / "static" / "robots.txt").read_text(encoding="utf-8")
+
+
+@app.get("/sitemap.xml", response_class=Response)
+def sitemap_xml():
+    return Response((BASE / "static" / "sitemap.xml").read_text(encoding="utf-8"),
+                    media_type="application/xml")
 
 
 app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")

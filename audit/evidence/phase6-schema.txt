@@ -1,0 +1,86 @@
+﻿PRAGMA foreign_keys: 0
+journal_mode: delete
+page_size: 4096 auto_vacuum: 0
+--TABLES--
+sqlite_autoindex_payment_events_1  sqlite_autoindex_telegram_codes_1  sqlite_autoindex_users_1  sqlite_autoindex_users_2  payment_events  projects  referrals  sqlite_sequence  squad_templates  telegram_codes  telegram_links  template_purchases  users  
+--SCHEMA--
+CREATE TABLE payment_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT UNIQUE NOT NULL,
+            gateway TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            user_id INTEGER,
+            detail TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL
+        )
+
+CREATE TABLE projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            board_slug TEXT NOT NULL,
+            name TEXT NOT NULL,
+            goal TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+
+CREATE TABLE referrals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            referrer_code TEXT NOT NULL,
+            referred_email TEXT NOT NULL,
+            rewarded INTEGER NOT NULL DEFAULT 0,
+            created_at REAL NOT NULL
+        )
+
+CREATE TABLE squad_templates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            author_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL,
+            agents TEXT NOT NULL,
+            price_credits INTEGER NOT NULL DEFAULT 10,
+            created_at REAL NOT NULL,
+            FOREIGN KEY(author_id) REFERENCES users(id)
+        )
+
+CREATE TABLE telegram_codes (
+            code TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            expires_at REAL NOT NULL,
+            used INTEGER NOT NULL DEFAULT 0,
+            created_at REAL NOT NULL
+        )
+
+CREATE TABLE telegram_links (
+            telegram_chat_id INTEGER PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            linked_at REAL NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+
+CREATE TABLE template_purchases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            template_id INTEGER NOT NULL,
+            buyer_id INTEGER NOT NULL,
+            created_at REAL NOT NULL,
+            FOREIGN KEY(template_id) REFERENCES squad_templates(id),
+            FOREIGN KEY(buyer_id) REFERENCES users(id)
+        )
+
+CREATE TABLE users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT UNIQUE NOT NULL,
+            name TEXT NOT NULL,
+            pw_hash TEXT NOT NULL,
+            plan TEXT NOT NULL DEFAULT 'demo',
+            credits INTEGER NOT NULL DEFAULT 3,
+            ref_code TEXT UNIQUE NOT NULL,
+            referred_by TEXT,
+            created_at REAL NOT NULL
+        )
+
+--INDEXES (implicit+explicit)--
+sqlite_autoindex_users_1 users (implicit)
+sqlite_autoindex_users_2 users (implicit)
+sqlite_autoindex_payment_events_1 payment_events (implicit)
+sqlite_autoindex_telegram_codes_1 telegram_codes (implicit)

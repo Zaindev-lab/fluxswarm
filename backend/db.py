@@ -69,7 +69,8 @@ def init_db():
             credits INTEGER NOT NULL DEFAULT 3,
             ref_code TEXT UNIQUE NOT NULL,
             referred_by TEXT,
-            created_at REAL NOT NULL
+            created_at REAL NOT NULL,
+            logged_out_at REAL
         );
         CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -127,6 +128,14 @@ def init_db():
             used INTEGER NOT NULL DEFAULT 0,
             created_at REAL NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS password_resets (
+            token_hash TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            expires_at REAL NOT NULL,
+            used INTEGER NOT NULL DEFAULT 0,
+            created_at REAL NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );
         CREATE TABLE IF NOT EXISTS demo_usage (
             who TEXT NOT NULL,
             day TEXT NOT NULL,
@@ -141,6 +150,39 @@ def init_db():
     )
     c.commit()
     c.close()
+    _migrate()
+
+
+def _migrate():
+    """Bring pre-migration databases up to date.
+
+    Schema additions target databases created by older versions (CREATE IF NOT
+    EXISTS never alters an existing table), so we ALTER in place for the columns
+    that may be missing. New columns are additive — nothing is ever dropped.
+    """
+    c = _conn()
+    try:
+        cols = [r[1] for r in c.execute("PRAGMA table_info(users)")]
+        if "logged_out_at" not in cols:
+            c.execute("ALTER TABLE users ADD COLUMN logged_out_at REAL")
+        pcols = [r[1] for r in c.execute("PRAGMA table_info(projects)")]
+        # Launch-outcome bookkeeping: lets the driver (and UI) distinguish a
+        # converged launch from one cut short by a provider/worker stall, and
+        # tracks whether the single launch credit was already refunded so a
+        # refund can never happen twice for the same project.
+        if "launch_status" not in pcols:
+            c.execute("ALTER TABLE projects ADD COLUMN launch_status TEXT")
+        if "launch_outcome" not in pcols:
+            c.execute("ALTER TABLE projects ADD COLUMN launch_outcome TEXT")
+        if "launch_reason" not in pcols:
+            c.execute("ALTER TABLE projects ADD COLUMN launch_reason TEXT")
+        if "launch_refunded" not in pcols:
+            c.execute("ALTER TABLE projects ADD COLUMN launch_refunded INTEGER NOT NULL DEFAULT 0")
+        if "launch_updated_at" not in pcols:
+            c.execute("ALTER TABLE projects ADD COLUMN launch_updated_at REAL")
+        c.commit()
+    finally:
+        c.close()
 
 
 def _hash_legacy(pw: str, salt: str) -> str:
@@ -268,6 +310,51 @@ def add_project(user_id: int, board_slug: str, name: str, goal: str) -> int:
     c.commit()
     c.close()
     return pid
+
+
+def set_launch_outcome(pid: int, status: str, outcome: str, reason: str = "", refunded: bool = False) -> None:
+    """Persist a project's launch-terminal state.
+
+    ``status`` is the coarse surface state (``ok`` / ``stuck`` / ``error``),
+    ``outcome`` the specific category (``converged`` / ``timeout`` /
+    ``provider_failure`` / ``launch_error``) and ``reason`` an internal category
+    label for diagnostics. ``refunded`` records on this project that its single
+    launch credit was already returned, making a later refund no-op.
+    """
+    c = _conn()
+    try:
+        c.execute(
+            "UPDATE projects SET launch_status=?, launch_outcome=?, "
+            "launch_reason=?, launch_refunded=?, launch_updated_at=? WHERE id=?",
+            (status, outcome, reason, (1 if refunded else 0), time.time(), pid),
+        )
+        c.commit()
+    finally:
+        c.close()
+
+
+def refund_launch_credit(user_id: int) -> bool:
+    """Return exactly one launch credit to a user (idempotent no-op detection).
+
+    Returns True when the credit was actually returned, False when there was
+    nothing to do. The caller is responsible for deciding *whether* the refund
+    is earned (via project outcome + ``board_has_completed_work``); this helper
+    only guarantees the balance change is atomic and never applied twice for
+    the same logical launch (callers gate on the project's ``launch_refunded``
+    flag before invoking).
+    """
+    c = _conn()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        row = c.execute("SELECT credits FROM users WHERE id=?", (user_id,)).fetchone()
+        if row is None:
+            c.rollback()
+            return False
+        c.execute("UPDATE users SET credits = credits + 1 WHERE id=?", (user_id,))
+        c.commit()
+        return True
+    finally:
+        c.close()
 
 
 def bump_demo_usage(who: str, day: str) -> int:
@@ -590,6 +677,8 @@ def delete_user(user_id: int) -> bool:
             "DELETE FROM referrals WHERE referrer_code=?",
             "DELETE FROM payment_events WHERE user_id=?",
             "DELETE FROM telegram_links WHERE user_id=?",
+            "DELETE FROM telegram_codes WHERE user_id=?",
+            "DELETE FROM password_resets WHERE user_id=?",
             "DELETE FROM users WHERE id=?",
         ):
             try:
@@ -598,6 +687,100 @@ def delete_user(user_id: int) -> bool:
                 pass
         c.commit()
         return True
+    finally:
+        c.close()
+
+
+# ---------- session invalidation / password lifecycle ----------
+SESSION_MIN_TIME = 0  # `logged_out_at` compare base for tokens minted pre-`iat`
+
+
+def mark_logged_out(user_id: int) -> None:
+    """Invalidate every currently-issued session token for a user.
+
+    `logged_out_at` is set to now. Any JWT whose `iat` predates this timestamp
+    is rejected by the auth dependency (logout, password change, reset) — all
+    sessions die at once, which is the safe behaviour for a full reset and the
+    simplest correct semantics for logout with a stateless token.
+    """
+    c = _conn()
+    try:
+        # Float (not int): a token minted a fraction of a second after logout
+        # must have iat > logged_out_at even within the same second, while a
+        # pre-logout token keeps iat < logged_out_at. Int seconds would conflate
+        # the two (both floor to the same integer).
+        c.execute("UPDATE users SET logged_out_at=? WHERE id=?", (time.time(), user_id))
+        c.commit()
+    finally:
+        c.close()
+
+
+def get_logged_out_at(user_id: int) -> float:
+    c = _conn()
+    try:
+        row = c.execute("SELECT logged_out_at FROM users WHERE id=?", (user_id,)).fetchone()
+        return float(row["logged_out_at"] or 0) if row else 0.0
+    finally:
+        c.close()
+
+
+def set_password(user_id: int, new_password: str) -> None:
+    """Set a new password hash and invalidate existing sessions."""
+    c = _conn()
+    try:
+        c.execute("UPDATE users SET pw_hash=? WHERE id=?", (_make_pw_hash(new_password), user_id))
+        c.commit()
+    finally:
+        c.close()
+    mark_logged_out(user_id)
+
+
+# ---------- password reset tokens (single-use, expiring, hashed at rest) ----------
+RESET_TTL = 900  # seconds: reset link window
+
+
+def create_password_reset(user_id: int, ttl: int = RESET_TTL) -> str:
+    """Mint a reset token for a user. Returns the RAW token (the caller
+    delivers it out-of-band — a mailer, or the dev/test echo flag). Only the
+    sha256 of the token is ever stored, so a DB leak cannot be replayed.
+    Purging: expired and used rows are cleared on each issuance.
+    """
+    raw = secrets.token_urlsafe(32)
+    th = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    c = _conn()
+    try:
+        now = time.time()
+        c.execute("DELETE FROM password_resets WHERE used=1 OR expires_at < ?", (now,))
+        c.execute(
+            "INSERT INTO password_resets (token_hash,user_id,expires_at,used,created_at) "
+            "VALUES (?,?,?,0,?)",
+            (th, user_id, now + ttl, now),
+        )
+        c.commit()
+    finally:
+        c.close()
+    return raw
+
+
+def consume_password_reset(raw: str) -> int | None:
+    """Redeem a reset token. Returns the user id on success, None otherwise.
+    Expired/used/unknown tokens are rejected; a successful redeem is single-use."""
+    if not raw:
+        return None
+    th = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    c = _conn()
+    try:
+        now = time.time()
+        c.execute("DELETE FROM password_resets WHERE used=1 OR expires_at < ?", (now,))
+        row = c.execute(
+            "SELECT user_id FROM password_resets WHERE token_hash=? AND used=0 AND expires_at >= ?",
+            (th, now),
+        ).fetchone()
+        if not row:
+            return None
+        c.execute("UPDATE password_resets SET used=1 WHERE token_hash=? AND used=0", (th,))
+        c.commit()
+        return row["user_id"]
     finally:
         c.close()
 
