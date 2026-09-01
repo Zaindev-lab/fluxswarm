@@ -26,6 +26,12 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 import audit
+import envguard
+
+# Production fail-fast BEFORE any secret-bearing module load: both required
+# secrets must be present (or the deployment must be explicitly demo mode).
+envguard.assert_production_secrets()
+
 import auth as auth_mod
 import db
 import hermes_client as hc
@@ -459,8 +465,11 @@ def api_demo_launch(request: Request):
     goal = "Build a sample FastAPI notes API with tests and CI/CD (DEMO)"
     slug = "flux-demo-" + str(int(time.time()))
     hc.ensure_board(slug)
-    swarm = hc.launch_swarm(slug, goal)
-    _fire_dispatch(slug, plan)
+    # The Demo surface is the explicit Free opt-in: pin the free hosted runtime
+    # even on a production deployment — the free tier is never a silent default.
+    free_runtime = {hc.PROVIDER_OPENCODE_FREE: "free"}
+    swarm = hc.launch_swarm(slug, goal, provider_keys=free_runtime)
+    _fire_dispatch(slug, plan, free_runtime)
     audit.audit("demo.launch", uid=demo["id"] if demo else None, ip="internal",
                 outcome="ok", slug=slug, plan=plan)
     return {"slug": slug, "root_id": swarm.root_id, "demo": True}

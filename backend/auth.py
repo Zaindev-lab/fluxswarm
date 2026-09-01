@@ -14,17 +14,33 @@ _SECRET_FILE = BASE / "data" / ".jwt_secret"
 ALGO = "HS256"
 EXP_SECONDS = 60 * 60 * 24 * 7  # 7 days
 
+_DEMO_FLAGS = ("1", "true", "yes")
+
+
+def _is_demo_mode() -> bool:
+    return os.environ.get("FLUXSWARM_DEMO_MODE", "").strip().lower() in _DEMO_FLAGS
+
 
 def _load_secret() -> str:
-    """Never keep a hardcoded default.
+    """Never keep a hidden default outside demo mode.
 
-    Priority: FLUXSWARM_JWT_SECRET env var -> persisted secret file ->
-    generate-and-persist. Existing sessions signed with any previous value
-    become invalid (which is exactly what we want after a leak).
+    Demo/dev priority: FLUXSWARM_JWT_SECRET env var -> persisted secret file ->
+    generate-and-persist -> (OSError) ephemeral. Production fail-fast: if
+    FLUXSWARM_JWT_SECRET is missing we refuse to start, because a generated or
+    ephemeral signing secret would invalidate every session after a restart.
+    Existing sessions signed with any previous value become invalid (which is
+    exactly what we want after a leak).
     """
     secret = os.environ.get("FLUXSWARM_JWT_SECRET")
     if secret:
         return secret
+    if not _is_demo_mode():
+        raise RuntimeError(
+            "FLUXSWARM_JWT_SECRET is required outside demo mode. Refusing to "
+            "start with a generated or ephemeral signing secret (no ephemeral "
+            "secrets in production). Set FLUXSWARM_JWT_SECRET, or set "
+            "FLUXSWARM_DEMO_MODE=1 for development/demo only."
+        )
     try:
         _SECRET_FILE.parent.mkdir(exist_ok=True)
         if _SECRET_FILE.exists():

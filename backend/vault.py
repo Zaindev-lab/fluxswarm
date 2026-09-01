@@ -27,11 +27,27 @@ _LEGACY_KEY_FILE = BASE / "data" / ".fernet_key"
 _KEY_HOST = Path.home() / ".fluxswarm"
 _KEY_FILE = _KEY_HOST / "fernet.key"
 
+_DEMO_FLAGS = ("1", "true", "yes")
+
+
+def _is_demo_mode() -> bool:
+    return os.environ.get("FLUXSWARM_DEMO_MODE", "").strip().lower() in _DEMO_FLAGS
+
 
 def _load_key() -> bytes:
-    raw = os.environ.get("FLUXSWARM_FERNET_KEY")
+    raw = os.environ.get("FLUXSWARM_FERNET_KEY", "").strip()
     if raw:
         return raw.encode()
+    if not _is_demo_mode():
+        # Production fail-fast: a missing Fernet key must not silently fall back
+        # to a generated/ephemeral key — that would make every stored BYOK key
+        # undecryptable after a restart. Demo/dev keeps the file-based fallback.
+        raise RuntimeError(
+            "FLUXSWARM_FERNET_KEY is required outside demo mode. Refusing to "
+            "start with a generated or ephemeral Fernet key (no ephemeral "
+            "secrets in production). Set FLUXSWARM_FERNET_KEY, or set "
+            "FLUXSWARM_DEMO_MODE=1 for development/demo only."
+        )
     try:
         _KEY_HOST.mkdir(parents=True, exist_ok=True)
         if _KEY_FILE.exists():

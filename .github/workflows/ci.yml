@@ -7,6 +7,10 @@ on:
 jobs:
   test-backend:
     runs-on: ubuntu-latest
+    env:
+      # CI runs in Demo/dev mode so `import main` and the suite work without
+      # production secrets; production-mode failure paths are unit-tested.
+      FLUXSWARM_DEMO_MODE: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

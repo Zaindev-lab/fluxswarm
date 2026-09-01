@@ -18,6 +18,11 @@ import tempfile
 from pathlib import Path
 
 os.environ.setdefault("FLUXSWARM_ALLOW_MULTI", "1")
+# The test session runs in Demo/dev mode: ephemeral/generated secrets are
+# allowed and the Free hosted runtime is the (explicit) default. Production-mode
+# behaviors (missing-secret failure, unconfigured-runtime failure) are covered
+# by dedicated tests that toggle these env vars via monkeypatch.
+os.environ.setdefault("FLUXSWARM_DEMO_MODE", "1")
 
 BACKEND = Path(__file__).resolve().parent.parent
 if str(BACKEND) not in sys.path:

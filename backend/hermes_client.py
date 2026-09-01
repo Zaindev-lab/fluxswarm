@@ -69,10 +69,27 @@ ENV_MAP = {
     "kimi": "KIMI_API_KEY",
 }
 
+# Paid BYOK providers, in precedence order (see _resolve_runtime).
+_PAID_PROVIDERS = ("anthropic", "openai", "gemini", "kimi")
+
 # Free, no-key provider that Hermes already has configured (OpenCode Free).
-# Used as the default so the squad runs end-to-end without the user supplying a key.
+# It is NOT a production default: it may run only when the operator explicitly
+# opts in (FLUXSWARM_DEMO_MODE=1) or when a user explicitly selects it in the
+# BYOK UI. An unconfigured production launch fails fast instead of silently
+# running on the free tier.
 FREE_PROVIDER = "opencode-free"
 FREE_MODEL = "nemotron-3-ultra-free"
+
+
+class ProviderConfigError(RuntimeError):
+    """Raised when no runtime is deliberately configured (never silently)."""
+
+
+_DEMO_FLAGS = ("1", "true", "yes")
+
+
+def _is_demo_mode() -> bool:
+    return os.environ.get("FLUXSWARM_DEMO_MODE", "").strip().lower() in _DEMO_FLAGS
 
 # Driver-loop ceiling for a swarm launch (seconds). This is the HARD upper
 # bound the background dispatcher waits on a launch before it reports the true
@@ -96,18 +113,87 @@ def _resolve_runtime(provider_keys: Optional[dict]):
       1. User explicitly selected 'opencode-free' in the BYOK UI -> free hosted
          model. This WINS over any other BYOK key so a stray/paid key (e.g. a
          stale OpenAI key) can never hijack an explicitly-chosen free runtime.
-      2. User BYOK key -> use that provider's model (Claude/GPT/...).
-      3. Nothing supplied -> free hosted model (default, no key needed).
+      2. User BYOK key -> use that provider's model (Claude/GPT/...). The model
+         itself is resolved at pin time from the operator's env overrides.
+      3. Nothing supplied -> the DEPLOYMENT default: operator-configured
+         provider/model (FLUXSWARM_DEFAULT_PROVIDER / FLUXSWARM_DEFAULT_MODEL),
+         or the free hosted model only in Demo/dev (FLUXSWARM_DEMO_MODE=1).
+         An unconfigured production raises ProviderConfigError — there is NO
+         silent fallback to opencode-free.
     """
     if provider_keys:
         # Explicitly-enabled free tier takes priority over any paid BYOK key.
         if provider_keys.get("opencode-free"):
             return FREE_MODEL, FREE_PROVIDER
         # Prefer the first paid BYOK provider we have a key for.
-        for prov in ("anthropic", "openai", "gemini", "kimi"):
+        for prov in _PAID_PROVIDERS:
             if provider_keys.get(prov):
-                return None, prov  # model chosen by Hermes for that provider
-    return FREE_MODEL, FREE_PROVIDER
+                return None, prov  # model resolved/bound at pin time
+    return _default_runtime()
+
+
+def _default_runtime() -> tuple[Optional[str], str]:
+    """Production runtime configured by the operator; free only for Demo/dev.
+
+    - FLUXSWARM_DEFAULT_PROVIDER set -> that provider, with a model from
+      FLUXSWARM_DEFAULT_MODEL or FLUXSWARM_MODEL_<PROVIDER>. A provider without
+      a model raises (a provider pin without a model cannot be persisted).
+    - FLUXSWARM_DEMO_MODE=1 -> the free hosted runtime (explicit Demo opt-in).
+    - Otherwise -> ProviderConfigError: a production deployment without a
+      deliberate default must not silently send squad work to the free tier.
+    """
+    prov = os.environ.get("FLUXSWARM_DEFAULT_PROVIDER", "").strip()
+    if prov:
+        model = _operator_model_for(prov)
+        if not model:
+            raise ProviderConfigError(
+                f"FLUXSWARM_DEFAULT_PROVIDER={prov!r} is set without a model: "
+                "set FLUXSWARM_DEFAULT_MODEL or "
+                f"FLUXSWARM_MODEL_{prov.upper().replace('-', '_')} "
+                "(no silent fallback)."
+            )
+        return model, prov
+    if _is_demo_mode():
+        return FREE_MODEL, FREE_PROVIDER
+    raise ProviderConfigError(
+        "no production runtime configured: set FLUXSWARM_DEFAULT_PROVIDER (with "
+        "FLUXSWARM_DEFAULT_MODEL), enable FLUXSWARM_DEMO_MODE=1 only for "
+        "Demo/dev, or provide BYOK keys. Refusing to silently default to "
+        "opencode-free in production."
+    )
+
+
+def _operator_model_for(provider: str) -> Optional[str]:
+    """Optional operator-configured model override for a provider.
+
+    Tries the per-provider override (FLUXSWARM_MODEL_<PROVIDER>) first, then the
+    shared production default (FLUXSWARM_DEFAULT_MODEL). Returns None when no
+    model is declared — the caller must then fail loudly rather than guess.
+    """
+    per_provider = os.environ.get(
+        "FLUXSWARM_MODEL_" + provider.upper().replace("-", "_"), "").strip()
+    if per_provider:
+        return per_provider
+    shared = os.environ.get("FLUXSWARM_DEFAULT_MODEL", "").strip()
+    return shared or None
+
+
+def _resolve_launch_runtime(provider_keys: Optional[dict]) -> tuple[str, str]:
+    """Resolve a concrete, pinnable (model, provider) for a launch.
+
+    BYOK providers get their model from the operator's env overrides; a launch
+    whose runtime cannot be pinned fails fast BEFORE any board/worker exists.
+    """
+    model, provider = _resolve_runtime(provider_keys)
+    if not model:
+        model = _operator_model_for(provider)
+    if not model:
+        raise ProviderConfigError(
+            f"cannot resolve a model for provider={provider!r}: set "
+            "FLUXSWARM_MODEL_<PROVIDER> or FLUXSWARM_DEFAULT_MODEL. "
+            "Refusing to fall back silently (free or paid)."
+        )
+    return model, provider
 
 # Which env vars we should NEVER inject into shared profile .env files.
 # Provider keys stay in the subprocess environment only (never on disk).
@@ -167,15 +253,23 @@ def _run(args: list[str], board: Optional[str] = None, capture=True,
     cmd += args
     env = dict(os.environ)
     env["HERMES_HOME"] = HERMES_HOME
-    # Also inject at process level as a fallback (free default or BYOK).
+    # Also inject at process level as a fallback. The declared default comes
+    # from the operator (or Demo/dev); an unconfigured production gets NO
+    # provider env here — launch paths fail fast in _resolve_launch_runtime.
     if provider_keys:
         for prov, tok in provider_keys.items():
             ev = ENV_MAP.get(prov)
             if ev and tok:
                 env[ev] = tok
     else:
-        env.setdefault("HERMES_DEFAULT_PROVIDER", FREE_PROVIDER)
-        env.setdefault("HERMES_DEFAULT_MODEL", FREE_MODEL)
+        try:
+            model, provider = _default_runtime()
+        except ProviderConfigError:
+            pass  # non-launch command, unconfigured prod: no provider env at all
+        else:
+            if model:
+                env.setdefault("HERMES_DEFAULT_MODEL", model)
+            env.setdefault("HERMES_DEFAULT_PROVIDER", provider)
     return subprocess.run(cmd, capture_output=capture, text=True, env=env, timeout=300)
 
 
@@ -296,6 +390,8 @@ def _ensure_verifier_skill() -> Path:
 
 def launch_swarm(board: str, goal: str, provider_keys: Optional[dict] = None) -> SwarmResult:
     # Keys are passed via subprocess environment only (never written to disk).
+    # Fail fast BEFORE any board/worker exists when no runtime is configured.
+    _resolve_launch_runtime(provider_keys)
     _raise_preflight()
     cleanup_profile_keys()
     # The swarm CLI hard-codes the verifier skill; make sure it resolves under
@@ -328,18 +424,13 @@ def launch_swarm(board: str, goal: str, provider_keys: Optional[dict] = None) ->
 def _pin_runtime(board: str, provider_keys: Optional[dict]):
     """Set --model/--provider on every squad task via `kanban set-model`.
 
-    This is what fixes the 'blocked' issue: the dispatcher spawns workers using
-    the profile's default model, which (without a key) fails and marks the card
-    blocked. Pinning an explicit free model makes the worker run end-to-end.
+    Pinning an explicit model/provider is what fixes the 'blocked' issue: the
+    dispatcher spawns workers using the profile's default model, which (without
+    a key) fails and marks the card blocked. The runtime is resolved deliberately
+    (operator default / Demo free / BYOK) — never a silent fallback — and any
+    `set-model` failure stops the launch loudly.
     """
-    model, provider = _resolve_runtime(provider_keys)
-    if not model:
-        # A provider without a model cannot be persisted by Hermes
-        # (provider_override requires a model_override). Fail loudly rather than
-        # silently leaving the task off the intended runtime.
-        raise RuntimeError(
-            f"cannot pin runtime: provider={provider!r} requires a model_override"
-        )
+    model, provider = _resolve_launch_runtime(provider_keys)
     tasks = list_tasks(board)
     for t in tasks:
         tid = t.get("id")
@@ -360,6 +451,8 @@ def launch_from_template(board: str, goal: str, agents: list[str],
 
     Each name in `agents` is resolved via AGENT_REGISTRY to (profile, skills, role).
     """
+    # Fail fast BEFORE any board/worker exists when no runtime is configured.
+    _resolve_launch_runtime(provider_keys)
     workers, verifier, synthesizer = [], None, None
     for name in agents:
         rec = AGENT_REGISTRY.get(name.strip())
