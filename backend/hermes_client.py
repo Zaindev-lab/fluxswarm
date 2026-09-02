@@ -537,7 +537,15 @@ def _board_activity_sig(board: str) -> tuple:
 
 
 # ---------------------------------------------------------------------------
-# Windows process-tree cleanup for orphaned Hermes workers.
+# Process-tree cleanup for orphaned Hermes workers.
+#
+# Windows:  Win32 snapshot (CreateToolhelp32Snapshot) enumerates descendants
+#           and TerminateProcess hard-kills them, children deepest-first.
+# POSIX:    `ps --ppid` scoped descendant enumeration + graceful SIGTERM (with
+#           a bounded wait) escalating to SIGKILL, children deepest-first.
+# Both platforms ONLY ever touch the PID supplied by the caller (the current
+# board's tracked worker set) and that PID's descendants; unrelated processes
+# are never enumerated or killed.
 # ---------------------------------------------------------------------------
 
 if sys.platform == "win32":
@@ -606,25 +614,101 @@ if sys.platform == "win32":
         except Exception:
             return False
 
-else:
-    def _get_child_pids_win32(pid: int) -> list[int]:  # type: ignore[misc]
-        return []
+    def _get_child_pids(pid: int) -> list[int]:
+        """Return direct child PIDs for the current platform."""
+        return _get_child_pids_win32(pid)
 
-    def _sigterm(pid: int, timeout_s: float = 3.0) -> bool:  # type: ignore[misc]
-        return False
+    def _force_kill(pid: int) -> None:
+        """Hard-kill fallback after a failed graceful terminate (Windows)."""
+        try:
+            h = _kernel32.OpenProcess(_PROCESS_TERMINATE, False, pid)
+            if h:
+                try:
+                    _kernel32.TerminateProcess(h, 1)
+                finally:
+                    _kernel32.CloseHandle(h)
+        except Exception:
+            pass
+
+else:
+    import signal as _signal
+
+    def _get_child_pids_posix(pid: int) -> list[int]:
+        """Return direct child PIDs of *pid* via `ps --ppid` (POSIX, no new deps).
+
+        Only enumerates descendants of the given PID — never a global scan —
+        so it can never turn up unrelated processes to terminate.
+        """
+        try:
+            out = subprocess.run(
+                ["ps", "-o", "pid=", "--ppid", str(pid)],
+                capture_output=True, text=True, timeout=5,
+            )
+        except Exception:
+            return []
+        children: list[int] = []
+        for line in out.stdout.splitlines():
+            line = line.strip()
+            if line.isdigit():
+                children.append(int(line))
+        return children
+
+    def _get_child_pids(pid: int) -> list[int]:
+        """Return direct child PIDs for the current platform."""
+        return _get_child_pids_posix(pid)
+
+    def _pid_alive(pid: int) -> bool:
+        """POSIX existence probe (signal 0). ESRCH => the process is gone."""
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except OSError:
+            return True  # e.g. EPERM: stay conservative and assume it exists
+        except Exception:
+            return True
+
+    def _sigterm(pid: int, timeout_s: float = 3.0) -> bool:
+        """POSIX SIGTERM then a bounded wait; True if the process exited."""
+        try:
+            os.kill(pid, _signal.SIGTERM)
+        except ProcessLookupError:
+            return True  # already gone
+        except OSError:
+            return True  # wrong-user/zombie: treat as done to avoid a hang
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        while time.monotonic() < deadline:
+            if not _pid_alive(pid):
+                return True
+            time.sleep(0.05)
+        return not _pid_alive(pid)
+
+    def _force_kill(pid: int) -> None:
+        """POSIX SIGKILL fallback."""
+        try:
+            os.kill(pid, _signal.SIGKILL)
+        except Exception:
+            pass
 
 
 def kill_process_tree(pid: int, grace_s: float = 3.0) -> None:
     """Terminate a process and its descendants.
 
-    1. Recursively find children via Win32 snapshot (Windows only).
+    1. Recursively find direct children for the current platform.
     2. Kill children deepest-first (leaf processes first).
-    3. Terminate the root with SIGTERM; escalate to SIGKILL after *grace_s*.
+    3. Terminate the root (TerminateProcess on Windows, graceful SIGTERM on
+       POSIX); escalate to a hard kill (TerminateProcess / SIGKILL) if it does
+       not exit within *grace_s*.
+
+    Only the supplied PID and its descendants are ever touched; unrelated
+    processes are never enumerated or terminated. Semantics are idempotent —
+    calling again on an already-dead or recycled-free PID is a safe no-op.
     """
     if pid <= 0:
         return
     try:
-        children = _get_child_pids_win32(pid)
+        children = _get_child_pids(pid)
     except Exception:
         children = []
     for child in children:
@@ -638,12 +722,7 @@ def kill_process_tree(pid: int, grace_s: float = 3.0) -> None:
     except Exception:
         pass
     try:
-        h = _kernel32.OpenProcess(_PROCESS_TERMINATE, False, pid) if sys.platform == "win32" else None
-        if h:
-            try:
-                _kernel32.TerminateProcess(h, 1)
-            finally:
-                _kernel32.CloseHandle(h)
+        _force_kill(pid)
     except Exception:
         pass
 

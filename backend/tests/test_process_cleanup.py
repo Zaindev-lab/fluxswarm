@@ -13,7 +13,10 @@ Covers:
 from __future__ import annotations
 
 import os
+import signal
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -444,3 +447,190 @@ class TestKillProcessTree:
             assert hc_mod.read_worker_pids("nonexistent") == []
         finally:
             hc_mod.HERMES_HOME = old_home
+
+
+# ---------------------------------------------------------------------------
+# J. _cleanup_board_workers only touches the current board's owned worker PIDs
+# ---------------------------------------------------------------------------
+
+class TestCleanupOwnsOnlyBoardPids:
+    def test_cleanup_invokes_kill_for_each_owned_pid_only(self, monkeypatch):
+        """Only running/ready/todo worker_pids are killed; done tasks are not."""
+        tmp = tempfile.mkdtemp()
+        boards_dir = Path(tmp) / "kanban" / "boards" / "board-x"
+        boards_dir.mkdir(parents=True)
+        db_path = boards_dir / "kanban.db"
+        c = sqlite3.connect(str(db_path))
+        c.execute("""CREATE TABLE tasks (
+            id TEXT PRIMARY KEY, title TEXT, status TEXT,
+            worker_pid INTEGER, assignee TEXT
+        )""")
+        # Two live workers to clean up; one already-done task whose pid must NOT
+        # be touched (it is no longer owned by the in-flight board).
+        c.execute("INSERT INTO tasks VALUES ('t1', 'a', 'running', 11111, 'ecc-planner')")
+        c.execute("INSERT INTO tasks VALUES ('t2', 'b', 'todo', 22222, 'ecc-tdd')")
+        c.execute("INSERT INTO tasks VALUES ('t3', 'c', 'done', 33333, 'ecc-devops')")
+        c.commit()
+        c.close()
+
+        killed = []
+        monkeypatch.setattr(hc_mod, "kill_process_tree", lambda pid, grace_s=3.0: killed.append(pid))
+
+        old_home = hc_mod.HERMES_HOME
+        try:
+            hc_mod.HERMES_HOME = tmp
+            hc_mod._cleanup_board_workers("board-x")
+        finally:
+            hc_mod.HERMES_HOME = old_home
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        assert sorted(killed) == [11111, 22222]
+        assert 33333 not in killed
+
+
+# ---------------------------------------------------------------------------
+# K. Real-process end-to-end cleanup (runs on the current platform)
+# ---------------------------------------------------------------------------
+
+_SLEEP = "import time; time.sleep(60)"
+_SLEEP_SRC = "-c"
+
+
+def _wait_gone(pid: float | int, timeout_s: float = 8.0) -> bool:
+    """Cross-platform: is *pid* fully gone within *timeout_s*?"""
+    if sys.platform == "win32":
+        proc = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {int(pid)}", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return str(int(pid)) not in proc.stdout
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            os.kill(int(pid), 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+class TestRealProcessCleanup:
+    def test_owned_worker_process_is_terminated(self):
+        """kill_process_tree must actually terminate a live owned worker."""
+        proc = subprocess.Popen([sys.executable, _SLEEP_SRC, _SLEEP])
+        try:
+            assert proc.poll() is None  # alive
+            hc_mod.kill_process_tree(proc.pid, grace_s=3.0)
+            assert proc.wait(timeout=8) is not None  # terminated
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
+
+    def test_unrelated_process_survives(self):
+        """Killing one owned worker must leave an unrelated process untouched."""
+        owned = subprocess.Popen([sys.executable, _SLEEP_SRC, _SLEEP])
+        unrelated = subprocess.Popen([sys.executable, _SLEEP_SRC, _SLEEP])
+        try:
+            hc_mod.kill_process_tree(owned.pid, grace_s=3.0)
+            assert owned.wait(timeout=8) is not None  # owned gone
+            assert unrelated.poll() is None             # unrelated still alive
+        finally:
+            for p in (owned, unrelated):
+                if p.poll() is None:
+                    p.kill()
+                p.wait(timeout=5)
+
+
+# ---------------------------------------------------------------------------
+# L. POSIX-specific cleanup (skipped on Windows; runs on Linux/POSIX CI)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-tree tests")
+class TestPosixProcessTreeCleanup:
+    # A worker that spawns a long-lived grandchild and reports its PID.
+    _TREE = (
+        "import subprocess, sys, time;"
+        "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']);"
+        "print(g.pid, flush=True);"
+        "time.sleep(60)"
+    )
+
+    def test_owned_parent_and_child_are_terminated(self):
+        """Deepest-first cleanup terminates both the worker and its child."""
+        worker = subprocess.Popen([sys.executable, "-c", self._TREE],
+                                  stdout=subprocess.PIPE, text=True)
+        line = worker.stdout.readline().strip()
+        child_pid = int(line) if line.isdigit() else None
+        try:
+            assert worker.poll() is None            # worker alive
+            assert child_pid is not None
+            assert os.path.exists(f"/proc/{child_pid}")  # grandchild alive
+            hc_mod.kill_process_tree(worker.pid, grace_s=3.0)
+            assert _wait_gone(worker.pid)
+            assert _wait_gone(child_pid)            # grandchild cleaned up too
+        finally:
+            for pid in (worker.pid, child_pid):
+                if pid is not None and not _wait_gone(pid, 2.0):
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+            worker.wait(timeout=5)
+
+    def test_unrelated_process_survives(self):
+        """An unrelated sleep process must survive the owned worker's cleanup."""
+        owned = subprocess.Popen([sys.executable, _SLEEP_SRC, _SLEEP])
+        unrelated = subprocess.Popen([sys.executable, _SLEEP_SRC, _SLEEP])
+        try:
+            hc_mod.kill_process_tree(owned.pid, grace_s=3.0)
+            assert _wait_gone(owned.pid)
+            assert not _wait_gone(unrelated.pid, 2.0)  # still alive
+        finally:
+            for p in (owned, unrelated):
+                if p.poll() is None:
+                    p.kill()
+                p.wait(timeout=5)
+
+    def test_repeated_cleanup_is_idempotent(self):
+        """Calling kill_process_tree twice on a dead worker is a safe no-op."""
+        proc = subprocess.Popen([sys.executable, _SLEEP_SRC, _SLEEP])
+        try:
+            hc_mod.kill_process_tree(proc.pid, grace_s=3.0)
+            _wait_gone(proc.pid)
+            hc_mod.kill_process_tree(proc.pid, grace_s=1.0)  # must not raise
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
+
+    def test_success_path_does_not_perform_destructive_cleanup(self):
+        """Cleanup of an already-terminal worker must not raise or kill others."""
+        unrelated = subprocess.Popen([sys.executable, _SLEEP_SRC, _SLEEP])
+        try:
+            hc_mod.kill_process_tree(99999999, grace_s=1.0)  # nonexistent owned pid
+            assert unrelated.poll() is None                  # untouched
+        finally:
+            if unrelated.poll() is None:
+                unrelated.kill()
+            unrelated.wait(timeout=5)
+
+    def test_child_enumeration_scopes_to_descendants(self):
+        """_get_child_pids must only return direct descendants, never a sibling."""
+        worker = subprocess.Popen([sys.executable, "-c", self._TREE],
+                                  stdout=subprocess.PIPE, text=True)
+        line = worker.stdout.readline().strip()
+        child_pid = int(line) if line.isdigit() else None
+        try:
+            children = hc_mod._get_child_pids_posix(worker.pid)
+            assert child_pid in children
+            assert hc_mod._get_child_pids_posix(999999999) == []
+        finally:
+            for pid in (worker.pid, child_pid):
+                if pid is not None and not _wait_gone(pid, 2.0):
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+            worker.wait(timeout=5)
