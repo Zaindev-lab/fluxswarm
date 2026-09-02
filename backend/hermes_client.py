@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import shutil
 import sqlite3
 import subprocess
@@ -535,6 +536,157 @@ def _board_activity_sig(board: str) -> tuple:
         return ()
 
 
+# ---------------------------------------------------------------------------
+# Windows process-tree cleanup for orphaned Hermes workers.
+# ---------------------------------------------------------------------------
+
+if sys.platform == "win32":
+    import ctypes
+    import ctypes.wintypes as _wt
+
+    _STILL_ACTIVE = 259
+    _PROCESS_TERMINATE = 0x0001
+    _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    _SYNCHRONIZE = 0x00100000
+    _PROCESS_QUERY_INFORMATION = 0x0400
+
+    class _PROCESSENTRY32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", _wt.DWORD),
+            ("cntUsage", _wt.DWORD),
+            ("th32ProcessID", _wt.DWORD),
+            ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+            ("th32ModuleID", _wt.DWORD),
+            ("cntThreads", _wt.DWORD),
+            ("th32ParentProcessID", _wt.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", _wt.DWORD),
+            ("szExeFile", ctypes.c_char * 260),
+        ]
+
+    _kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+
+    def _get_child_pids_win32(pid: int) -> list[int]:
+        """Return direct child PIDs of *pid* using a Win32 process snapshot."""
+        children: list[int] = []
+        snap = _kernel32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+        if snap == _wt.HANDLE(-1).value:
+            return children
+        try:
+            pe = _PROCESSENTRY32()
+            pe.dwSize = ctypes.sizeof(_PROCESSENTRY32)
+            if _kernel32.Process32First(snap, ctypes.byref(pe)):
+                while True:
+                    if pe.th32ParentProcessID == pid:
+                        children.append(pe.th32ProcessID)
+                    if not _kernel32.Process32Next(snap, ctypes.byref(pe)):
+                        break
+        finally:
+            _kernel32.CloseHandle(snap)
+        return children
+
+    def _sigterm(pid: int, timeout_s: float = 3.0) -> bool:
+        """Best-effort graceful termination; returns True if process exited."""
+        try:
+            h = _kernel32.OpenProcess(
+                _PROCESS_TERMINATE | _SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION,
+                False, pid,
+            )
+            if not h:
+                return False
+            try:
+                _kernel32.TerminateProcess(h, 1)
+                wait_ms = int(timeout_s * 1000)
+                _kernel32.WaitForSingleObject(h, wait_ms)
+                ec = _wt.DWORD()
+                _kernel32.GetExitCodeProcess(h, ctypes.byref(ec))
+                return ec.value != _STILL_ACTIVE
+            finally:
+                _kernel32.CloseHandle(h)
+        except Exception:
+            return False
+
+else:
+    def _get_child_pids_win32(pid: int) -> list[int]:  # type: ignore[misc]
+        return []
+
+    def _sigterm(pid: int, timeout_s: float = 3.0) -> bool:  # type: ignore[misc]
+        return False
+
+
+def kill_process_tree(pid: int, grace_s: float = 3.0) -> None:
+    """Terminate a process and its descendants.
+
+    1. Recursively find children via Win32 snapshot (Windows only).
+    2. Kill children deepest-first (leaf processes first).
+    3. Terminate the root with SIGTERM; escalate to SIGKILL after *grace_s*.
+    """
+    if pid <= 0:
+        return
+    try:
+        children = _get_child_pids_win32(pid)
+    except Exception:
+        children = []
+    for child in children:
+        try:
+            kill_process_tree(child, grace_s=grace_s)
+        except Exception:
+            pass
+    try:
+        if _sigterm(pid, timeout_s=grace_s):
+            return
+    except Exception:
+        pass
+    try:
+        h = _kernel32.OpenProcess(_PROCESS_TERMINATE, False, pid) if sys.platform == "win32" else None
+        if h:
+            try:
+                _kernel32.TerminateProcess(h, 1)
+            finally:
+                _kernel32.CloseHandle(h)
+    except Exception:
+        pass
+
+
+def read_worker_pids(board: str) -> list[int]:
+    """Read worker process IDs for *board* from kanban.db (non-destructive)."""
+    db = Path(HERMES_HOME) / "kanban" / "boards" / board / "kanban.db"
+    try:
+        if not db.exists():
+            return []
+        c = sqlite3.connect(str(db))
+        try:
+            rows = c.execute(
+                "SELECT worker_pid FROM tasks "
+                "WHERE worker_pid IS NOT NULL AND worker_pid > 0 "
+                "AND status IN ('running', 'ready', 'todo')",
+            ).fetchall()
+            return [r[0] for r in rows]
+        finally:
+            c.close()
+    except Exception:
+        return []
+
+
+def _cleanup_board_workers(board: str) -> None:
+    """Terminate Hermes worker processes owned by *board*.
+
+    Called on dispatch timeout / stall / exception to prevent orphaned
+    processes from accumulating.  Reads worker PIDs from kanban.db (the
+ authoritative source managed by the Hermes CLI) and kills each
+ process tree.  Already-dead processes are ignored safely.
+    """
+    try:
+        pids = read_worker_pids(board)
+    except Exception:
+        return
+    for pid in pids:
+        try:
+            kill_process_tree(pid)
+        except Exception:
+            pass
+
+
 def dispatch(board: str, max_spawn: int = 8, dry_run: bool = False,
              provider_keys: Optional[dict] = None, blocking: bool = True,
              timeout_s: int = 600, stall_passes: int = 4,
@@ -574,91 +726,106 @@ def dispatch(board: str, max_spawn: int = 8, dry_run: bool = False,
     except json.JSONDecodeError:
         first = {"raw": r.stdout.strip()}
 
-    if blocking:
-        # Keep dispatching in passes until everything is done/blocked or we
-        # conclude the board is stuck (no forward progress).
-        deadline = time.time() + timeout_s
-        start = time.time()
-        last_sig = None
-        unchanged = 0
-        while time.time() < deadline:
+    # Track whether worker cleanup is needed.  Set to False only on successful
+    # convergence; the finally block then skips cleanup.  On stall, timeout, or
+    # any exception the flag stays True and cleanup runs.
+    _needs_cleanup = True
+
+    try:
+        if blocking:
+            # Keep dispatching in passes until everything is done/blocked or we
+            # conclude the board is stuck (no forward progress).
+            deadline = time.time() + timeout_s
+            start = time.time()
+            last_sig = None
+            unchanged = 0
+            while time.time() < deadline:
+                tasks = list_tasks(board)
+                states = [t.get("state") for t in tasks]
+                # Robust progress signature: worker ACTIVITY (heartbeat / task events)
+                # combined with task state. A healthy worker that is steadily calling
+                # the LLM and using tools advances heartbeats/events even while no
+                # task state has changed yet, so it is NOT misclassified as stalled.
+                # A genuinely stalled worker (provider/worker hang) advances neither,
+                # so it is still caught after stall_passes unchanged passes.
+                activity = _board_activity_sig(board)
+                # Heartbeat freshness is the liveness gate. Heartbeats land roughly
+                # every ~60s — far slower than the ~10-15s dispatcher pass cadence —
+                # so the raw activity TUPLE (which only changes on a new heartbeat)
+                # must NOT be the stall signal by itself: that would falsely stall a
+                # healthy long-running worker in the gap between two heartbeats.
+                # Instead, a worker with a RECENT heartbeat is demonstrably alive and
+                # progressing (mid-LLM/tool work), so we only declare a stall once the
+                # board's heartbeat has actually gone STALE (> heartbeat_grace) while
+                # task states stay unchanged for stall_passes passes. `()` (DB
+                # unavailable) counts as stale so the detector still works without
+                # board DB access (and in unit tests).
+                heartbeat_grace = 180
+                stale = (activity == () or (time.time() - activity[0]) > heartbeat_grace)
+                sig = (activity, tuple(sorted(states)))
+                if not states or all(s in ("done", "blocked") for s in states):
+                    _needs_cleanup = False
+                    first["terminal"] = True
+                    first["timed_out"] = False
+                    first["outcome"] = "ok"
+                    first["stuck_tasks"] = []
+                    return first
+                if sig == last_sig:
+                    unchanged += 1
+                else:
+                    unchanged = 0
+                last_sig = sig
+                time.sleep(8)
+                rr = _run(["dispatch", "--max", str(max_spawn)], board=board,
+                          provider_keys=provider_keys)
+                # Early no-progress break: the same non-terminal states for several
+                # consecutive passes means the swarm is stuck (provider/worker hang),
+                # not converging. Give a healthy launch a grace floor so its first
+                # waves have time to start before we ever evaluate the stall.
+                if (unchanged >= stall_passes
+                        and time.time() - start >= min_wait_s
+                        and stale):
+                    _cleanup_board_workers(board)
+                    first["terminal"] = False
+                    first["timed_out"] = True
+                    first["stall"] = True
+                    first["stall_passes"] = unchanged
+                    first["outcome"] = "stuck"
+                    first["stuck_tasks"] = [t for t in tasks
+                                            if t.get("state") in ("running", "queued")]
+                    first["stuck_run_count"] = sum(
+                        1 for t in tasks if t.get("state") == "running")
+                    first["done_count"] = sum(1 for t in tasks if t.get("state") == "done")
+                    first["deadline_s"] = timeout_s
+                    first["early"] = True
+                    _needs_cleanup = False
+                    return first
+            # Wall-clock window expired with non-terminal work still pending.
+            _cleanup_board_workers(board)
             tasks = list_tasks(board)
-            states = [t.get("state") for t in tasks]
-            # Robust progress signature: worker ACTIVITY (heartbeat / task events)
-            # combined with task state. A healthy worker that is steadily calling
-            # the LLM and using tools advances heartbeats/events even while no
-            # task state has changed yet, so it is NOT misclassified as stalled.
-            # A genuinely stalled worker (provider/worker hang) advances neither,
-            # so it is still caught after stall_passes unchanged passes.
-            activity = _board_activity_sig(board)
-            # Heartbeat freshness is the liveness gate. Heartbeats land roughly
-            # every ~60s — far slower than the ~10-15s dispatcher pass cadence —
-            # so the raw activity TUPLE (which only changes on a new heartbeat)
-            # must NOT be the stall signal by itself: that would falsely stall a
-            # healthy long-running worker in the gap between two heartbeats.
-            # Instead, a worker with a RECENT heartbeat is demonstrably alive and
-            # progressing (mid-LLM/tool work), so we only declare a stall once the
-            # board's heartbeat has actually gone STALE (> heartbeat_grace) while
-            # task states stay unchanged for stall_passes passes. `()` (DB
-            # unavailable) counts as stale so the detector still works without
-            # board DB access (and in unit tests).
-            heartbeat_grace = 180
-            stale = (activity == () or (time.time() - activity[0]) > heartbeat_grace)
-            sig = (activity, tuple(sorted(states)))
-            if not states or all(s in ("done", "blocked") for s in states):
-                first["terminal"] = True
-                first["timed_out"] = False
-                first["outcome"] = "ok"
-                first["stuck_tasks"] = []
-                return first
-            if sig == last_sig:
-                unchanged += 1
-            else:
-                unchanged = 0
-            last_sig = sig
-            time.sleep(8)
-            rr = _run(["dispatch", "--max", str(max_spawn)], board=board,
-                      provider_keys=provider_keys)
-            # Early no-progress break: the same non-terminal states for several
-            # consecutive passes means the swarm is stuck (provider/worker hang),
-            # not converging. Give a healthy launch a grace floor so its first
-            # waves have time to start before we ever evaluate the stall.
-            if (unchanged >= stall_passes
-                    and time.time() - start >= min_wait_s
-                    and stale):
-                first["terminal"] = False
-                first["timed_out"] = True
-                first["stall"] = True
-                first["stall_passes"] = unchanged
-                first["outcome"] = "stuck"
-                first["stuck_tasks"] = [t for t in tasks
-                                        if t.get("state") in ("running", "queued")]
-                first["stuck_run_count"] = sum(
-                    1 for t in tasks if t.get("state") == "running")
-                first["done_count"] = sum(1 for t in tasks if t.get("state") == "done")
-                first["deadline_s"] = timeout_s
-                first["early"] = True
-                return first
-        # Wall-clock window expired with non-terminal work still pending.
-        tasks = list_tasks(board)
-        stuck = [t for t in tasks if t.get("state") in ("running", "queued")]
-        first["terminal"] = False
-        first["timed_out"] = True
-        first["outcome"] = "stuck"
-        first["stuck_tasks"] = stuck
-        first["stuck_run_count"] = sum(
-            1 for t in stuck if t.get("state") == "running")
-        first["done_count"] = sum(1 for t in list_tasks(board) if t.get("state") == "done")
-        first["deadline_s"] = timeout_s
-    else:
-        # Non-blocking single pass: we deliberately do NOT stamp `terminal` —
-        # the caller must treat a non-blocking dispatch as an in-flight launch
-        # that may still have work pending (see pragmatics/contract pinned by
-        # test_dispatch_completion.py). Provide an outcome label for callers
-        # that want one, but leave terminality untouched.
-        first.setdefault("timed_out", False)
-        first.setdefault("outcome", "pending")
-    return first
+            stuck = [t for t in tasks if t.get("state") in ("running", "queued")]
+            first["terminal"] = False
+            first["timed_out"] = True
+            first["outcome"] = "stuck"
+            first["stuck_tasks"] = stuck
+            first["stuck_run_count"] = sum(
+                1 for t in stuck if t.get("state") == "running")
+            first["done_count"] = sum(1 for t in list_tasks(board) if t.get("state") == "done")
+            first["deadline_s"] = timeout_s
+            _needs_cleanup = False
+        else:
+            # Non-blocking single pass: we deliberately do NOT stamp `terminal` —
+            # the caller must treat a non-blocking dispatch as an in-flight launch
+            # that may still have work pending (see pragmatics/contract pinned by
+            # test_dispatch_completion.py). Provide an outcome label for callers
+            # that want one, but leave terminality untouched.
+            first.setdefault("timed_out", False)
+            first.setdefault("outcome", "pending")
+            _needs_cleanup = False
+        return first
+    finally:
+        if _needs_cleanup:
+            _cleanup_board_workers(board)
 
 
 def list_tasks(board: str) -> list[dict]:

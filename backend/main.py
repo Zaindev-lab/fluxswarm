@@ -723,7 +723,7 @@ def api_dispatch(slug: str, dry_run: bool = False, user: dict = Depends(get_curr
     if slug.startswith("flux-demo-") and db.bump_demo_usage(f"u{user['id']}", _today()) > _DEMO_DAILY_CAP:
         raise HTTPException(status_code=429, detail="تجاوزت حد الاستخدام التجريبي اليومي")
     try:
-        return hc.dispatch(slug, max_spawn=db.PLANS[user["plan"]]["parallel"], dry_run=dry_run)
+        return hc.dispatch(slug, max_spawn=db.PLANS[user["plan"]]["parallel"], dry_run=dry_run, timeout_s=hc.DISPATCH_TIMEOUT_S)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
