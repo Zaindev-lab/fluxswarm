@@ -34,10 +34,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && python -m pip install --upgrade pip \
     && pip install uv
 
-# --- Hermes Agent v0.21.0 (pinned) installed on Linux from the pinned source.
-#     Editable install with --no-deps, then the curated minimal runtime deps.
-COPY deploy/docker/hermes-src/ /usr/local/lib/hermes-agent/
+# --- Hermes Agent v0.21.0 (pinned commit 87ad7aa) fetched from the upstream
+#     repository at build time instead of vendored in this repo. The pinned
+#     SHA makes the archive immutable and reproducible; HTTPS only. curl
+#     --retry tolerates flaky builders (Render, CI). To update upstream: bump
+#     the SHA below to the new commit AND rebuild. The editable install stays
+#     --no-deps, then the curated minimal runtime deps are installed.
 COPY deploy/docker/hermes-minimal-requirements.txt /app/hermes-minimal-requirements.txt
+RUN curl --retry 8 --retry-all-errors --fail --location --silent --show-error \
+        -o /tmp/hermes-src.tar.gz \
+        https://codeload.github.com/NousResearch/hermes-agent/tar.gz/87ad7aa0b072e621c5d4e437b7345471e66f395d \
+    && mkdir -p /usr/local/lib \
+    && tar -xzf /tmp/hermes-src.tar.gz -C /usr/local/lib \
+    && mv /usr/local/lib/hermes-agent-* /usr/local/lib/hermes-agent \
+    && rm /tmp/hermes-src.tar.gz \
+    && test -f /usr/local/lib/hermes-agent/pyproject.toml
 WORKDIR /usr/local/lib/hermes-agent
 RUN uv venv venv \
     && . ./venv/bin/activate \

@@ -54,9 +54,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends wget unzip \
     && apt-get remove -y wget unzip && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
-# --- Hermes Agent (pinned source, minimal curated deps) ---
-COPY deploy/docker/hermes-src/ /usr/local/lib/hermes-agent/
+# --- Hermes Agent (pinned commit 87ad7aa) fetched from the upstream repository
+#     at build time instead of vendored in this repo. Immutable SHA; HTTPS
+#     only; curl --retry for flaky builders. Bump the SHA to update upstream.
 COPY deploy/docker/hermes-minimal-requirements.txt /app/hermes-minimal-requirements.txt
+RUN curl --retry 8 --retry-all-errors --fail --location --silent --show-error \
+        -o /tmp/hermes-src.tar.gz \
+        https://codeload.github.com/NousResearch/hermes-agent/tar.gz/87ad7aa0b072e621c5d4e437b7345471e66f395d \
+    && mkdir -p /usr/local/lib \
+    && tar -xzf /tmp/hermes-src.tar.gz -C /usr/local/lib \
+    && mv /usr/local/lib/hermes-agent-* /usr/local/lib/hermes-agent \
+    && rm /tmp/hermes-src.tar.gz \
+    && test -f /usr/local/lib/hermes-agent/pyproject.toml
 WORKDIR /usr/local/lib/hermes-agent
 RUN uv venv venv \
     && . ./venv/bin/activate \
