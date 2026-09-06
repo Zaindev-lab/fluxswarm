@@ -12,6 +12,9 @@ mocked Hermes CLI.
 """
 from __future__ import annotations
 
+import os
+from unittest.mock import patch
+
 import pytest
 
 import hermes_client as hc_mod
@@ -171,15 +174,20 @@ def test_genuinely_stalled_worker_still_stuck(monkeypatch):
 
 
 def test_pinning_unchanged_by_stall_fix(monkeypatch):
-    """The stall fix must not regress runtime pinning: a stale paid key still
-    cannot hijack an explicitly-selected opencode-free runtime, and the new
-    activity-signal helper degrades gracefully (to ()) for an absent board."""
-    assert hc_mod._resolve_runtime({"openai": "sk-fake", "opencode-free": "free"}) == (
-        "nemotron-3-ultra-free", "opencode-free")
-    assert hc_mod._resolve_runtime({"opencode-free": "free"}) == (
-        "nemotron-3-ultra-free", "opencode-free")
-    assert hc_mod._resolve_runtime(None) == (
-        "nemotron-3-ultra-free", "opencode-free")
+    """The stall fix must not regress runtime pinning: BYOK precedence holds,
+    unknown 'opencode-free' keys are ignored (never a silent free fallback), an
+    unconfigured runtime fails fast, and the activity-signal helper degrades
+    gracefully (to ()) for an absent board."""
+    with patch.dict(os.environ, {
+        "FLUXSWARM_DEFAULT_PROVIDER": "openai",
+        "FLUXSWARM_DEFAULT_MODEL": "gpt-4",
+    }, clear=False):
+        assert hc_mod._resolve_runtime({"openai": "sk-fake", "opencode-free": "free"}) == (
+            None, "openai")
+        assert hc_mod._resolve_runtime({"opencode-free": "free"}) == ("gpt-4", "openai")
+        assert hc_mod._resolve_runtime(None) == ("gpt-4", "openai")
+    with pytest.raises(hc_mod.ProviderConfigError):
+        hc_mod._resolve_runtime(None)
     # Not a real board => no DB => () -> the caller falls back to state-only sig.
     assert hc_mod._board_activity_sig("u-no-such-board-xyz") == ()
 

@@ -1,0 +1,49 @@
+services:
+  # Linux dev instance: gives Windows developers the exact production runtime
+  # (POSIX flock, os.killpg-equivalent process-tree cleanup, run.sh supervisor,
+  # PostgreSQL + Alembic, Redis rate limiting) instead of the Windows fallbacks.
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      # Demo/dev: imports + tests work without production secrets; production
+      # failure paths are covered by dedicated tests that flip these vars.
+      FLUXSWARM_DEMO_MODE: "1"
+      FLUXSWARM_ALLOW_MULTI: "1"
+      FLUXSWARM_DB: /tmp/fluxswarm_dev/users.db
+      FLUXSWARM_KMS_BACKEND: file
+      FLUXSWARM_KMS_FILE_KEY: dev-container-test-passphrase-not-secret
+      FLUXSWARM_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/fluxswarm_test
+      REDIS_URL: redis://redis:6379/0
+      FLUXSWARM_REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ..:/workspace:cached
+    working_dir: /workspace
+    command: sleep infinity
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: fluxswarm_test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d fluxswarm_test"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

@@ -1,0 +1,12 @@
+description: ECC ecc-reviewer bot (Everything Claude Code integration)
+description_auto: false
+ui_meta:
+  hermes-bots:
+    shape: hexagon
+    color: hsl(141 68% 58%)
+    imageKind: shape
+    title: ECC-Reviewer  يراجع جودة الكود وأسلوبه ويكتشف العلل بلغة المشروع ويقدّم
+      تعديلات مقترحة
+    custom: true
+_ui_meta_revisions:
+  hermes-bots: 1

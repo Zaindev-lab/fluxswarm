@@ -88,14 +88,34 @@ For development/demo only (NEVER set in production): `FLUXSWARM_DEMO_MODE=1`.
 
 ## 6. Provider setup
 
-- Choose one of the supported paid providers: `anthropic`, `openai`, `gemini`,
+- Choose one of the supported providers: `anthropic`, `openai`, `gemini`,
   `kimi`.
 - Set `FLUXSWARM_DEFAULT_PROVIDER` and the corresponding `FLUXSWARM_MODEL_*`.
 - If no real credentials are present, do NOT set a placeholder and do NOT fall
-  back to `opencode-free` — mark **OPERATOR ACTION REQUIRED** until a paid
-  provider + key is configured.
-- `opencode-free` / `nemotron-3-ultra-free` is **demo-only** and runs only via
-  `FLUXSWARM_DEMO_MODE=1` or an explicit user BYOK opt-in.
+  back to any free provider — **OPERATOR ACTION REQUIRED** until a provider +
+  key is configured. An unconfigured runtime refuses to launch (asserts fail
+  fast with `ProviderConfigError`).
+- Phase 3 removed the free hosted tier (`opencode-free` / `big-pickle` no longer
+  exist anywhere in the app). Users can bring their own keys; each BYOK provider
+  is used only after the user accepts its agreement (`POST /api/agreements/{provider}`).
+
+## 6a. BYOK key encryption (KMS envelope)
+
+- Phase 3 seals every BYOK key with envelope encryption: a fresh per-blob DEK
+  (AES-256-GCM) is wrapped by a KEK owned by the configured KMS, so the store
+  alone yields nothing. Backend chosen by `FLUXSWARM_KMS_BACKEND` (default
+  `file` — acceptable for single-node only; use a real KMS in production):
+  - `file` — KEK from `FLUXSWARM_KMS_FILE_KEY` (falls back to `FLUXSWARM_FERNET_KEY`);
+    never rely on the demo-generated `~/.fluxswarm/kms_file.key` in production
+    (FileKms refuses to generate ephemeral keys outside demo mode).
+  - `aws_kms` — `FLUXSWARM_AWS_KMS_KEY_ID` + AWS credentials (boto3).
+  - `azure_keyvault` — `FLUXSWARM_AZURE_KEYVAULT_URL` + `FLUXSWARM_AZURE_KEYVAULT_KEY`
+    + DefaultAzureCredential.
+  - `hashicorp_vault` — `FLUXSWARM_VAULT_ADDR` + `FLUXSWARM_VAULT_TOKEN` +
+    `FLUXSWARM_VAULT_TRANSIT_KEY` (Transit secrets engine).
+- Rollover: re-setting the KEK changes future envelopes only; legacy blobs stay
+  readable until re-saved. Corrupt/unreadable blobs are logged (`vault.decrypt
+  failed ...`) and never surfaced as empty keys upstream.
 
 ## 7. Startup
 

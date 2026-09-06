@@ -42,8 +42,11 @@ def test_preflight_reports_missing_profiles(monkeypatch, tmp_path):
 
 def test_launch_swarm_fails_fast_with_clear_message(monkeypatch):
     monkeypatch.setattr(hc_mod, "HERMES_BIN", Path("Z:/nope/hermes.exe"))
+    # Phase 3: no free fallback — provide an explicit BYOK runtime so the test
+    # reaches the runtime-preflight gate rather than the config error.
+    monkeypatch.setenv("FLUXSWARM_MODEL_OPENAI", "gpt-preflight")
     with pytest.raises(RuntimeError) as ei:
-        hc_mod.launch_swarm("u1-proj", "goal")
+        hc_mod.launch_swarm("u1-proj", "goal", provider_keys={"openai": "sk-x"})
     assert "Hermes runtime not ready" in str(ei.value)
 
 

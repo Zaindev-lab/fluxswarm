@@ -1,0 +1,51 @@
+# FluxSwarm — Render Blueprint (0$/month free plan)
+#
+# Implements the report's "الجزء الثالث: خطة الاستضافة المجانية":
+#   Render (free Docker web service) + Neon Postgres (scale-to-zero) +
+#   Upstash Redis (multi-worker rate limiting) + Cloudflare Free (CDN/SSL).
+#
+# Free-tier constraints you accept by using `plan: free`:
+#   - 512 MB RAM / 0.1 CPU. The memory-derived concurrency cap
+#     (FLUXSWARM_MEM_TOTAL_MB / MEMORY_GUARD_MB_PER_WORKER) is shrunk to 512 MB
+#     so MAX_IN_PROGRESS = clamp(512/384, 2..16) = **2** concurrent agent spawns.
+#   - No persistent disk: SQLite volumes from docker-compose.beta.yml do NOT
+#     survive restarts. Set FLUXSWARM_DATABASE_URL (Neon) for real persistence
+#     and REDIS_URL (Upstash) for cross-restart rate-limit state.
+#   - Sleeps after 15 min of inactivity; cold start on first request.
+#
+# Deploy steps (one-time, needs your accounts):
+#   1. Neon  -> CREATE DB, copy connection string (sslmode=require)
+#   2. Upstash -> CREATE Redis DB, copy REST URL
+#   3. This file: Render "New Blueprint" from your GitHub repo (auto-detected).
+#   4. Fill the two `sync: false` secrets in the Render dashboard.
+#   5. Cloudflare: Always Use HTTPS + cache static assets (/static/*).
+# See deploy/RENDER_FREE_DEPLOY.md for the full walkthrough.
+
+services:
+  - type: web
+    name: fluxswarm
+    runtime: docker
+    plan: free
+    rootDir: .
+    dockerfilePath: deploy/docker/Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: FLUXSWARM_DEMO_MODE
+        value: "1"
+      - key: PORT
+        value: "10000"
+      - key: HERMES_HOME
+        value: /app/hermes_home
+      - key: FLUXSWARM_HERMES_BIN
+        value: /usr/local/bin/hermes
+      # Free-tier memory budget -> MAX_IN_PROGRESS=2 (see deploy/docker/docker-compose.beta.yml).
+      - key: FLUXSWARM_MEM_TOTAL_MB
+        value: "512"
+      - key: MEMORY_GUARD_MB_PER_WORKER
+        value: "384"
+      # Set both secrets in the Render dashboard (sync: false = manual only).
+      - key: FLUXSWARM_DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false

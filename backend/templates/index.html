@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="description" content="FluxSwarm — type a goal and a squad of 6 AI agents plans, builds, tests and reviews it on a live board. 1 credit per launch. BYOK optional." />
 <meta property="og:title" content="FluxSwarm — AI development squad" />
-<meta property="og:description" content="Type a goal. A 6-agent squad builds it on a live board. 1 credit per launch. Bring your own key or use the free hosted model." />
+<meta property="og:description" content="Type a goal. A 6-agent squad builds it on a live board. 1 credit per launch. Bring your own provider key or use the account demo." />
 <meta property="og:type" content="website" />
 <meta name="twitter:card" content="summary" />
 {% if canonical %}<link rel="canonical" href="{{ canonical }}" />{% endif %}
@@ -27,6 +27,7 @@
   header button.nav:hover,header a.nav:hover{border-color:var(--accent);color:var(--accent)}
   main{padding:26px 20px;max-width:1100px;margin:0 auto}
   .card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:22px;margin-bottom:18px}
+  .badge{display:inline-block;font-size:12px;color:var(--muted);border:1px solid var(--border);border-radius:999px;padding:5px 11px;background:var(--panel2);white-space:nowrap}
   label{display:block;font-size:13px;color:var(--muted);margin-bottom:6px}
   input,textarea{width:100%;background:var(--panel2);border:1px solid var(--border);color:var(--fg);border-radius:var(--radius-sm);padding:11px 13px;font-size:14px;font-family:inherit;transition:border-color .15s}
   input:focus,textarea:focus{border-color:var(--accent);outline:none}
@@ -55,6 +56,17 @@
   .row{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end}
   .hint{font-size:12px;color:var(--muted);margin-top:8px}
   .empty{color:var(--muted);font-size:13px;padding:10px 0}
+  .task{align-items:flex-start}
+  .task .t-desc{font-size:11.5px;color:var(--muted);margin-top:2px;line-height:1.35}
+  .task .t-activity{display:none;margin-top:8px;padding-top:8px;border-top:1px solid var(--border);max-width:100%}
+  .task .t-activity.open{display:block}
+  .task .act{display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:12px;padding:3px 0;color:var(--fg)}
+  .task .act-state{flex:1;min-width:0;overflow-wrap:anywhere}
+  .task .act-time{font-size:11px;color:var(--muted);white-space:nowrap}
+  .task .act-empty{font-size:12px;color:var(--muted);padding:3px 0}
+  .task .act-result{margin-top:8px;padding-top:8px;border-top:1px solid var(--border);font-size:12px;color:var(--fg);overflow-wrap:anywhere}
+  .task .act-result strong{display:block;margin-bottom:3px}
+  .task .act-btn{flex:0 0 auto;font-size:12px}
   .plan{background:var(--panel2);border:1px solid var(--border);border-radius:var(--radius);padding:20px;display:flex;flex-direction:column;transition:border-color .15s}
   .plan.best{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
   .plan .pname{font-size:18px;font-weight:800}
@@ -100,16 +112,16 @@
   <span class="spacer"></span>
   <a class="nav" href="/how-it-works" data-i18n="nav_how">How it works</a>
   <a class="nav" href="/faq" data-i18n="nav_faq">FAQ</a>
-  <button class="nav" id="navPricing" onclick="gotoSection('pricing')" data-i18n="nav_pricing">Pricing</button>
-  <button class="nav" id="navRef" onclick="gotoSection('referrals')" data-i18n="nav_ref">Referrals</button>
-  <button class="nav" id="navByok" onclick="gotoSection('byok')" data-i18n="nav_byok">My keys</button>
-  <button class="nav" id="navMarket" onclick="gotoSection('market')" data-i18n="nav_market">Marketplace</button>
-  <button class="nav" id="navProjects" onclick="gotoSection('projects')" data-i18n="nav_projects">History</button>
-  <button class="nav" id="navSettings" onclick="gotoSection('settings')" data-i18n="nav_settings">Account</button>
-  <button class="nav" onclick="setLang('ar')" aria-label="العربية">🇸🇦 ع</button>
-  <button class="nav" onclick="setLang('en')" aria-label="English">🇬🇧 EN</button>
+  <button class="nav" id="navPricing" data-onclick="gotoSection" data-arg="pricing" data-i18n="nav_pricing">Pricing</button>
+  <button class="nav" id="navRef" data-onclick="gotoSection" data-arg="referrals" data-i18n="nav_ref">Referrals</button>
+  <button class="nav" id="navByok" data-onclick="gotoSection" data-arg="byok" data-i18n="nav_byok">My keys</button>
+  <button class="nav" id="navMarket" data-onclick="gotoSection" data-arg="market" data-i18n="nav_market">Marketplace</button>
+  <button class="nav" id="navProjects" data-onclick="gotoSection" data-arg="projects" data-i18n="nav_projects">History</button>
+  <button class="nav" id="navSettings" data-onclick="gotoSection" data-arg="settings" data-i18n="nav_settings">Account</button>
+  <button class="nav" data-onclick="setLang" data-arg="ar" aria-label="العربية">🇸🇦 ع</button>
+  <button class="nav" data-onclick="setLang" data-arg="en" aria-label="English">🇬🇧 EN</button>
   <span id="userPill" class="pill hidden"></span>
-  <button class="nav" id="navLogin" onclick="openAuth()" data-i18n="nav_login">Log in / Sign up</button>
+  <button class="nav" id="navLogin" data-onclick="openAuth" data-i18n="nav_login">Log in / Sign up</button>
 </header>
 <main id="main" role="main">
 
@@ -126,8 +138,14 @@
         <textarea id="pgoal" placeholder="Build a FastAPI app with auth, tests and CI/CD"></textarea>
       </div>
     </div>
-    <button class="primary" id="createBtn" onclick="createProject()" data-i18n="btn_launch">🚀 Launch squad</button>
-    <button class="ghost" onclick="launchDemo()" data-i18n="btn_demo">▶ Free Demo</button>
+    <button class="primary" id="createBtn" data-onclick="createProject" data-i18n="btn_launch">🚀 Launch squad</button>
+    <button class="ghost" data-onclick="launchDemo" data-i18n="btn_demo">▶ Free Demo</button>
+    <div class="row" style="gap:8px;margin-top:12px">
+      <span class="badge">✅ 400+ automated tests</span>
+      <span class="badge">🔒 GDPR &amp; CCPA aligned</span>
+      <span class="badge">🛡️ Prompt-injection hardened</span>
+      <span class="badge">BYOK — your keys, your calls</span>
+    </div>
     <div class="hint" id="heroHint" data-i18n="hero_hint">Each launch uses 1 credit. Sign in to launch — the Demo plan starts with 3 free credits (no card).</div>
   </div>
 
@@ -138,7 +156,8 @@
       Type a goal and a squad of 6 specialized agents — Planner, Architect, DevOps, TDD,
       Reviewer, Builder — plans, builds, tests, reviews and assembles it on a live task
       board you can watch. Generated files land in your project workspace, ready to use.
-      Use a free hosted model, or bring your own provider key for stronger output.
+Bring your own provider key for the strongest output — or a free OpenRouter key to trial free.
+      Each launch is still a single credit.
       1 credit per launch, credits never expire, no monthly fee.
     </p>
   </div>
@@ -160,7 +179,7 @@
     <div class="card" style="margin-top:16px;padding:16px">
       <h2 style="margin-top:0;font-size:16px" id="secTitle">🔒 Security Report (AgentShield)</h2>
       <div class="hint" id="secHint">Automated security scan of the swarm's output: leaked secrets, prompt injection, common vulnerabilities.</div>
-      <button class="ghost" id="secBtn" onclick="runSecurity()">Run security scan</button>
+      <button class="ghost" id="secBtn" data-onclick="runSecurity">Run security scan</button>
     </div>
   </div>
 
@@ -193,23 +212,27 @@
   <!-- BYOK -->
   <div class="card hidden" id="byok">
     <h2 style="margin-top:0;font-size:18px" data-i18n="byok_title">🔑 Your keys (BYOK)</h2>
-    <div class="hint" data-i18n="byok_hint">Optional. Without a key the squad runs on the free hosted model. Add your own Claude/GPT/Gemini/Kimi key for stronger output — it pays your provider's token rate; FluxSwarm still only charges the 1-credit launch fee. Keys are encrypted at rest and never shown back.</div>
+    <div class="hint" data-i18n="byok_hint">Add a Claude/GPT/Gemini/Kimi key for stronger output, or a free OpenRouter key (GLM-5.2) to trial it at zero cost — it pays your provider's token rate; FluxSwarm still only charges the 1-credit launch fee. A provider is only used after you accept its terms below. Keys are encrypted at rest and never shown back.</div>
     <div class="row" style="margin-top:10px">
       <div style="flex:1;min-width:160px"><label for="byok_provider" data-i18n="lbl_provider">Provider</label>
         <select id="byok_provider" style="width:100%;background:var(--panel2);border:1px solid var(--border);color:var(--fg);border-radius:10px;padding:10px">
+          <option value="openrouter">OpenRouter (free)</option>
           <option value="anthropic">Anthropic (Claude)</option>
           <option value="openai">OpenAI</option>
           <option value="gemini">Gemini</option>
           <option value="kimi">Kimi</option>
-          <option value="opencode-free">Free hosted model</option>
         </select>
       </div>
       <div style="flex:3;min-width:260px"><label for="byok_token" data-i18n="lbl_key">API key</label>
-        <input id="byok_token" placeholder="sk-... or leave empty for the free model" />
+        <input id="byok_token" placeholder="sk-..." />
       </div>
     </div>
-    <button class="primary" onclick="saveKey()">Save key</button>
+    <div class="hint" style="margin-top:8px">
+      <label><input type="checkbox" id="byok_agree" checked /> <span data-i18n="byok_agree">I accept this provider's terms (required before launch).</span></label>
+    </div>
+    <button class="primary" data-onclick="saveKey">Save key</button>
     <div id="byokList" style="margin-top:10px"></div>
+    <div data-i18n="byok_agg_hint" style="font-size:12px;color:var(--muted)">Saved keys are locked to the current provider terms version; accepting a new version refreshes it.</div>
   </div>
 
   <!-- SQUAD MARKETPLACE -->
@@ -222,7 +245,7 @@
     </div>
     <label for="tpl_desc" data-i18n="tpl_desc">Description</label><textarea id="tpl_desc" placeholder="What does this squad build?"></textarea>
     <label for="tpl_agents" data-i18n="tpl_agents">Agents (display names, comma separated)</label><input id="tpl_agents" placeholder="Planner, Architect, DevOps, TDD, Reviewer, Builder" />
-    <button class="primary" onclick="publishTpl()">📦 Publish template</button>
+    <button class="primary" data-onclick="publishTpl">📦 Publish template</button>
     <h3 style="font-size:15px;margin-top:16px" data-i18n="market_list">Available templates</h3>
     <div class="grid" id="tplGrid"></div>
   </div>
@@ -232,15 +255,20 @@
     <h2 style="margin-top:0;font-size:18px" data-i18n="settings_title">Account &amp; data</h2>
     <div id="settInfo" class="empty" data-i18n="settings_login_empty">Sign in to manage your account.</div>
     <div class="hidden" id="settBody">
+      <h3 style="font-size:15px;margin-top:14px" data-i18n="sett_account">Account</h3>
+      <div class="row">
+        <div style="flex:1;min-width:180px"><label for="acc_name" data-i18n="lbl_account_name">Display name</label><input id="acc_name" maxlength="80" autocomplete="name" /></div>
+      </div>
+      <button class="ghost" data-onclick="saveProfile" id="nameBtn" data-i18n="btn_save_name">Save</button>
       <h3 style="font-size:15px;margin-top:14px" data-i18n="sett_security">Security</h3>
       <div class="row">
         <div style="flex:1;min-width:180px"><label for="pw_current" data-i18n="lbl_pw_current">Current password</label><input id="pw_current" type="password" /></div>
         <div style="flex:1;min-width:180px"><label for="pw_new" data-i18n="lbl_pw_new">New password</label><input id="pw_new" type="password" /></div>
       </div>
-      <button class="ghost" onclick="changePassword()" id="pwBtn" data-i18n="pw_change_btn">Change password</button>
+      <button class="ghost" data-onclick="changePassword" id="pwBtn" data-i18n="pw_change_btn">Change password</button>
       <h3 style="font-size:15px;margin-top:18px" data-i18n="sett_data">Your data</h3>
-      <button class="ghost" onclick="exportData()" id="exportBtn" data-i18n="data_export_btn">Download my data (JSON)</button>
-      <button class="danger" onclick="deleteAccount()" id="deleteBtn" data-i18n="data_delete_btn">Delete my account and data</button>
+      <button class="ghost" data-onclick="exportData" id="exportBtn" data-i18n="data_export_btn">Download my data (JSON)</button>
+      <button class="danger" data-onclick="deleteAccount" id="deleteBtn" data-i18n="data_delete_btn">Delete my account and data</button>
       <div class="hint" data-i18n="data_delete_hint">Deletion removes your account, projects and their generated boards. Type DELETE to confirm.</div>
     </div>
   </div>
@@ -256,32 +284,44 @@
 <div class="modal" id="authModal" role="dialog" aria-modal="true" aria-label="Sign in or create an account">
   <div class="box">
     <div class="tabs">
-      <button id="tabLogin" class="active" onclick="switchTab('login')" data-i18n="tab_login">Log in</button>
-      <button id="tabReg" onclick="switchTab('reg')" data-i18n="tab_reg">Sign up</button>
+      <button id="tabLogin" class="active" data-onclick="switchTab" data-arg="login" data-i18n="tab_login">Log in</button>
+      <button id="tabReg" data-onclick="switchTab" data-arg="reg" data-i18n="tab_reg">Sign up</button>
     </div>
     <div id="loginForm">
       <label for="l_email" data-i18n="lbl_email">Email</label><input id="l_email" placeholder="you@example.com" autocomplete="email" />
       <label for="l_pw" data-i18n="lbl_pw">Password</label><input id="l_pw" type="password" placeholder="••••••••" autocomplete="current-password" />
-      <button class="primary" id="loginBtn" onclick="doLogin()" data-i18n="btn_login">Log in</button>
+      <button class="primary" id="loginBtn" data-onclick="doLogin" data-i18n="btn_login">Log in</button>
     </div>
     <div id="regForm" class="hidden">
       <label for="r_name" data-i18n="lbl_name">Name</label><input id="r_name" placeholder="Your name" autocomplete="name" />
       <label for="r_email" data-i18n="lbl_email">Email</label><input id="r_email" placeholder="you@example.com" autocomplete="email" />
       <label for="r_pw" data-i18n="lbl_pw">Password</label><input id="r_pw" type="password" placeholder="———" autocomplete="new-password" />
       <label for="r_ref" data-i18n="lbl_ref">Referral code (optional)</label><input id="r_ref" placeholder="FLX-XXXXXXXX" />
-      <button class="primary" id="regBtn" onclick="doRegister()" data-i18n="btn_register">Create account</button>
+      <button class="primary" id="regBtn" data-onclick="doRegister" data-i18n="btn_register">Create account</button>
     </div>
   </div>
 </div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-<script>
+<script nonce="{{ csp_nonce }}">
 const API="";
 let token=null, currentUser=null, currentSlug=null, ws=null;
 const params=new URLSearchParams(location.search);
 if(params.get("ref")) document.getElementById("r_ref").value=params.get("ref");
 document.addEventListener("keydown",e=>{if(e.key==="Escape")document.getElementById("authModal").classList.remove("open");});
+
+/* CSP-strict event delegation: no inline onclick= attributes allowed under a
+   nonce-only script-src. Buttons carry data-onclick="fnName" [+ data-arg]. */
+document.addEventListener("click",ev=>{
+  const el=ev.target.closest("[data-onclick]");
+  if(!el)return;
+  const fn=window[el.getAttribute("data-onclick")];
+  if(typeof fn!=="function")return;
+  const arg=el.getAttribute("data-arg");
+  if(arg===null)fn.call(el);
+  else{let a=arg;try{a=JSON.parse(arg);}catch(e){}fn(a);}
+});
 
 function toast(m){const t=document.getElementById("toast");t.textContent=m;t.classList.add("show");setTimeout(()=>t.classList.remove("show"),3000);}
 function esc(s){return String(s??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));}
@@ -317,7 +357,7 @@ function openAuth(){document.getElementById("authModal").classList.add("open");d
 function switchTab(t){document.getElementById("tabLogin").classList.toggle("active",t==="login");document.getElementById("tabReg").classList.toggle("active",t==="reg");document.getElementById("loginForm").classList.toggle("hidden",t!=="login");document.getElementById("regForm").classList.toggle("hidden",t!=="reg");}
 
 async function loadSquad(){const r=await fetch(API+"/api/squad");const d=await r.json();const g=document.getElementById("squadGrid");g.innerHTML="";[...d.workers,d.verifier,d.synthesizer].forEach(a=>{const div=document.createElement("div");div.className="agent";div.innerHTML=`<div class="role">${esc(a.role)}</div><div class="name">${esc(a.display||a.profile)}</div><div class="skills">${t("skills_lbl")} ${esc(a.skills.join(", "))}</div>`;g.appendChild(div);});}
-async function loadPlans(){const r=await fetch(API+"/api/plans");const d=await r.json();const g=document.getElementById("plansGrid");g.innerHTML="";d.forEach(p=>{const div=document.createElement("div");div.className="plan"+(p.id==="pro"?" best":"");div.innerHTML=`<div class="pname">${esc(p.name)}</div><div class="price">$${p.price}<small>${t("per_pack")}</small></div><div class="credit">${fmt("credits_line",p.credits,p.parallel)}</div><ul><li>${t("desc_"+p.id)}</li><li>${t("feat_full")}</li><li>${t("feat_credit")}</li><li>${t("feat_live")}</li><li>${t("feat_tg")}</li></ul><button class="ghost" onclick="subscribe('${p.id}')">${p.price==0?t("use_free"):t("subscribe_btn")}</button>`;g.appendChild(div);});}
+async function loadPlans(){const r=await fetch(API+"/api/plans");const d=await r.json();const g=document.getElementById("plansGrid");g.innerHTML="";d.forEach(p=>{const div=document.createElement("div");div.className="plan"+(p.id==="pro"?" best":"");div.innerHTML=`<div class="pname">${esc(p.name)}</div><div class="price">$${p.price}<small>${t("per_pack")}</small></div><div class="credit">${fmt("credits_line",p.credits,p.parallel)}</div><ul><li>${t("desc_"+p.id)}</li><li>${t("feat_full")}</li><li>${t("feat_credit")}</li><li>${t("feat_live")}</li><li>${t("feat_tg")}</li></ul><button class="ghost" data-onclick="subscribe" data-arg="${p.id}">${p.price==0?t("use_free"):t("subscribe_btn")}</button>`;g.appendChild(div);});}
 
 function setUser(u){currentUser=u;document.getElementById("userPill").classList.remove("hidden");document.getElementById("userPill").textContent=`${esc(u.name)} · ${u.plan} · ${u.credits} ${t("creds")}`;document.getElementById("navLogin").textContent=t("logout");document.getElementById("heroHint").textContent=t("loggedin_hint");loadReferrals();loadByok();loadTelegram();loadProjects();loadSettings();}
 function clearUser(){currentUser=null;token=null;document.getElementById("userPill").classList.add("hidden");document.getElementById("navLogin").textContent=t("nav_login");document.getElementById("heroHint").textContent=t("hero_hint");document.getElementById("projectsList").innerHTML='<div class="empty">'+t("projects_login_empty")+'</div>';document.getElementById("settInfo").classList.remove("hidden");document.getElementById("settInfo").textContent=t("settings_login_empty");document.getElementById("settBody").classList.add("hidden");loadTelegram();}
@@ -329,9 +369,11 @@ document.getElementById("navLogin").onclick=()=>{if(currentUser){clearUser();toa
 async function subscribe(plan){if(!token){openAuth();return;}const r=await fetch(API+`/api/subscribe/${plan}`,{method:"POST",headers:{Authorization:"Bearer "+token}});if(!r.ok){let msg=t("sub_fail");try{msg=(await r.json()).detail||msg;}catch(e){}toast(errt(msg));return;}const u=await r.json();setUser(u);toast(t("sub_ok_prefix")+" "+plan);}
 
 async function loadReferrals(){if(!token){document.getElementById("refContent").innerHTML='<div class="empty">'+t("ref_login_empty")+'</div>';return;}const r=await fetch(API+"/api/referrals",{headers:{Authorization:"Bearer "+token}});const d=await r.json();document.getElementById("refContent").innerHTML=`<div class="refbox">${t("ref_your_link")}<br><b>${esc(location.origin)}/?ref=${esc(d.ref_code)}</b><br>${fmt("ref_reward",d.reward_credits)}</div>`;}
+async function loadByok(){if(!token){document.getElementById("byokList").innerHTML='<div class="empty">'+t("byok_login_empty")+'</div>';return;}const r=await fetch(API+"/api/keys",{headers:{Authorization:"Bearer "+token}});const d=await r.json();const ks=Object.keys(d.keys||{});document.getElementById("byokList").innerHTML=ks.length?ks.map(k=>`<span class="pill">${esc(k)}: ${esc(d.keys[k])}</span>`).join(" "):'<div class="empty">'+t("byok_empty_none")+'</div>';loadAgreements();}
 
-async function loadByok(){if(!token){document.getElementById("byokList").innerHTML='<div class="empty">'+t("byok_login_empty")+'</div>';return;}const r=await fetch(API+"/api/keys",{headers:{Authorization:"Bearer "+token}});const d=await r.json();const ks=Object.keys(d.keys||{});document.getElementById("byokList").innerHTML=ks.length?ks.map(k=>`<span class="pill">${esc(k)}: ${esc(d.keys[k])}</span>`).join(" "):'<div class="empty">'+t("byok_empty_none")+'</div>';}
-async function saveKey(){if(!token){openAuth();return;}const provider=document.getElementById("byok_provider").value;const tok=document.getElementById("byok_token").value.trim();if(provider!=="opencode-free"&&!tok){toast(t("key_required"));return;}const r=await fetch(API+"/api/keys",{method:"POST",headers:{Authorization:"Bearer "+token,"Content-Type":"application/json"},body:JSON.stringify({provider,token:tok})});if(!r.ok){let d=null;try{d=await r.json();}catch(e){}toast(d&&d.detail?errt(d.detail):t("key_save_fail"));return;}document.getElementById("byok_token").value="";toast(t("key_saved"));loadByok();}
+async function loadAgreements(){if(!token)return;const r=await fetch(API+"/api/agreements",{headers:{Authorization:"Bearer "+token}});if(!r.ok)return;const d=await r.json();for(const p of Object.keys(d.required_versions||{})){const el=document.getElementById("agreed_"+p);if(!el)continue;const acc=!!(d.accepted||{})[p];el.textContent=acc?t("byok_agreed_yes"):t("byok_agreed_no");}}
+
+async function saveKey(){if(!token){openAuth();return;}const provider=document.getElementById("byok_provider").value;const tok=document.getElementById("byok_token").value.trim();if(!tok){toast(t("key_required"));return;}let r=await fetch(API+"/api/agreements/"+provider,{method:"POST",headers:{Authorization:"Bearer "+token}});if(!r.ok){let d=null;try{d=await r.json();}catch(e){}toast(d&&d.detail?errt(d.detail):t("key_save_fail"));return;}r=await fetch(API+"/api/keys",{method:"POST",headers:{Authorization:"Bearer "+token,"Content-Type":"application/json"},body:JSON.stringify({provider,token:tok})});if(!r.ok){let d=null;try{d=await r.json();}catch(e){}toast(d&&d.detail?errt(d.detail):t("key_save_fail"));return;}document.getElementById("byok_token").value="";toast(t("key_saved"));loadByok();}
 
 async function loadTelegram(){
   const body=document.getElementById("tgBody");
@@ -341,9 +383,9 @@ async function loadTelegram(){
   if(r.ok)st=await r.json();
   body.className="";
   if(st.linked){
-    body.innerHTML=`<div class="refbox">${I18N[LANG].tg_linked}: <b>${esc(String(st.telegram_chat_id))}</b><br><button class="ghost" style="margin-top:10px" onclick="unlinkTelegram()">${I18N[LANG].tg_unlink}</button></div>`;
+    body.innerHTML=`<div class="refbox">${I18N[LANG].tg_linked}: <b>${esc(String(st.telegram_chat_id))}</b><br><button class="ghost" style="margin-top:10px" data-onclick="unlinkTelegram">${I18N[LANG].tg_unlink}</button></div>`;
   }else{
-    body.innerHTML=`<button class="ghost" onclick="linkTelegram()">${I18N[LANG].tg_link}</button>`;
+    body.innerHTML=`<button class="ghost" data-onclick="linkTelegram">${I18N[LANG].tg_link}</button>`;
   }
 }
 async function linkTelegram(){
@@ -387,7 +429,7 @@ async function loadProjects(){
   const list=await r.json();
   el.className="";
   if(!list.length){el.className="empty";el.innerHTML='<div class="empty">'+t("projects_empty")+'</div>';return;}
-  el.innerHTML=list.map(p=>`<div class="proj"><div class="p-title"><b>${esc(p.name||p.board_slug)}</b><div class="p-sub">${esc(p.board_slug)}</div>${launchStatusHtml(p)}</div><button class="ghost" onclick="openProject('${esc(p.board_slug)}')">${t("open_btn")}</button></div>`).join("");
+  el.innerHTML=list.map(p=>`<div class="proj"><div class="p-title"><b>${esc(p.name||p.board_slug)}</b><div class="p-sub">${esc(p.board_slug)}</div>${launchStatusHtml(p)}</div><button class="ghost" data-onclick="openProject" data-arg="${esc(p.board_slug)}">${t("open_btn")}</button></div>`).join("");
 }
 function launchStatusHtml(p){
   // Surfaces a truthful terminal launch state WITHOUT exposing raw provider
@@ -418,13 +460,28 @@ async function loadWorkspace(slug){
 
 function connectWS(slug){if(ws)ws.close();ws=new WebSocket((location.protocol==="https:"?"wss":"ws")+"://"+location.host+"/ws/"+encodeURIComponent(slug)+(token?"?token="+encodeURIComponent(token):""));ws.onopen=()=>{document.getElementById("liveCounter").textContent=t("ws_live");};ws.onclose=()=>{document.getElementById("liveCounter").textContent=t("ws_disconnected");};ws.onmessage=(ev)=>{const msg=JSON.parse(ev.data);if(msg.type==="snapshot"||msg.type==="update")renderTasks(msg.tasks);if(msg.type==="error")document.getElementById("liveCounter").textContent="⚠ "+errt(msg.detail);};}
 async function pollTasks(slug){const r=await fetch(API+`/api/projects/${encodeURIComponent(slug)}/tasks`,{headers:token?{Authorization:"Bearer "+token}:{}});if(!r.ok){toast(t("login_first"));return;}const d=await r.json();renderTasks(d);}
-function renderTasks(tasks){const el=document.getElementById("taskList");if(!tasks||!tasks.length){el.innerHTML='<div class="empty">'+t("no_tasks")+'</div>';return;}el.innerHTML="";const cls={done:"s-done",running:"s-running",queued:"s-queued",blocked:"s-blocked",unknown:"s-unknown"};for(const t of tasks){const div=document.createElement("div");div.className="task";const name=t.assignee_display||t.assignee||"";div.innerHTML=`<span class="dot ${cls[t.state]||'s-unknown'}"></span><span class="t-title">${esc(t.title)}</span><span class="t-assign">${esc(name)} · ${esc(t.state)}</span>`;el.appendChild(div);}document.getElementById("liveCounter").textContent=fmt("tasks_n",tasks.length);}
+function fmtClock(epoch){if(!epoch)return "";const d=new Date(epoch*1000);const p=n=>String(n).padStart(2,"0");return p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds());}
+function toggleActivity(id){const b=document.getElementById("actBody_"+id);if(!b)return;const open=b.classList.toggle("open");document.getElementById("actBtn_"+id).textContent=open?"Hide":"Activity";}
+function renderTasks(tasks){const el=document.getElementById("taskList");if(!tasks||!tasks.length){el.innerHTML='<div class="empty">'+t("no_tasks")+'</div>';return;}el.innerHTML="";const cls={done:"s-done",running:"s-running",queued:"s-queued",blocked:"s-blocked",unknown:"s-unknown"};for(const t of tasks){const div=document.createElement("div");div.className="task";const name=t.role_name||t.assignee_display||t.assignee||"Agent";const sub=t.current_action||t.state||"—";const log=(t.activity_log||[]);let actHtml='<div class="act-empty">No activity yet</div>';if(log.length){actHtml=log.map(e=>`<div class="act"><span class="act-state">${esc(e.label)}</span><span class="act-time">${fmtClock(e.at)}</span></div>`).join("");}let resultHtml="";if(t.state==="done"&&t.result_preview){resultHtml=`<div class="act-result"><strong>Result</strong><div>${esc(t.result_preview)}</div></div>`;}div.innerHTML=`<span class="dot ${cls[t.state]||'s-unknown'}"></span><div style="flex:1;min-width:0"><div class="t-title">${esc(t.title)}</div><div class="t-assign"><b>${esc(name)}</b> · ${esc(sub)}</div>${t.role_description?'<div class="t-desc">'+esc(t.role_description)+'</div>':''}<div class="t-activity" id="actBody_${esc(t.id)}">${actHtml}${resultHtml}</div></div>${(log.length||t.result_preview)?'<button class="ghost act-btn" id="actBtn_'+esc(t.id)+'" data-onclick="toggleActivity" data-arg="'+esc(t.id)+'" >Activity</button>':''}`;el.appendChild(div);}document.getElementById("liveCounter").textContent=fmt("tasks_n",tasks.length);}
 
 async function loadSettings(){
   const info=document.getElementById("settInfo");
   if(!token){info.classList.remove("hidden");info.textContent=t("settings_login_empty");document.getElementById("settBody").classList.add("hidden");return;}
   info.classList.add("hidden");
   document.getElementById("settBody").classList.remove("hidden");
+  document.getElementById("acc_name").value=currentUser?currentUser.name:"";
+}
+async function saveProfile(){
+  if(!token){openAuth();return;}
+  const name=document.getElementById("acc_name").value.trim();
+  if(!name){toast(t("name_empty"));return;}
+  const btn=document.getElementById("nameBtn");btn.disabled=true;
+  try{
+    const r=await fetch(API+"/api/account",{method:"PATCH",headers:{Authorization:"Bearer "+token,"Content-Type":"application/json"},body:JSON.stringify({name})});
+    if(!r.ok){let d=null;try{d=await r.json();}catch(e){}toast(d&&d.detail?errt(d.detail):t("name_fail"));return;}
+    setUser(r.json().user);toast(t("name_ok"));
+  }catch(e){toast(t("name_fail"));}
+  finally{btn.disabled=false;}
 }
 async function changePassword(){
   if(!token){openAuth();return;}
@@ -470,7 +527,7 @@ async function publishTpl(){if(!token){openAuth();return;}
   toast(t("tpl_published"));loadTemplates();}
 
 async function loadTemplates(){const r=await fetch(API+"/api/templates");const d=await r.json();const g=document.getElementById("tplGrid");g.innerHTML="";
-  d.forEach(tpl=>{const div=document.createElement("div");div.className="plan";div.innerHTML=`<div class="pname">${esc(tpl.name)}</div><div class="credit">${fmt("tpl_credits_line",tpl.price_credits,tpl.agents.length)}</div><div class="hint">${esc(tpl.description||"")}</div><button class="ghost" onclick="buyTpl(${tpl.id})">${t("buy_btn")}</button>`;g.appendChild(div);});}
+  d.forEach(tpl=>{const div=document.createElement("div");div.className="plan";div.innerHTML=`<div class="pname">${esc(tpl.name)}</div><div class="credit">${fmt("tpl_credits_line",tpl.price_credits,tpl.agents.length)}</div><div class="hint">${esc(tpl.description||"")}</div><button class="ghost" data-onclick="buyTpl" data-arg="${tpl.id}">${t("buy_btn")}</button>`;g.appendChild(div);});}
 
 async function buyTpl(id){if(!token){openAuth();return;}
   const goal=prompt(t("tpl_goal_prompt"),"");
@@ -493,13 +550,14 @@ const I18N = {
     hero_hint:"كل إطلاق يستهلك رصيداً واحداً. سجّل الدخول للإطلاق — باقة Demo تبدأ بـ 3 ائتمانات مجانية (بدون بطاقة).",
     about_title:"ما هي FluxSwarm؟",
     about_body:
-      "اكتب هدفاً وسرب من 6 وكلاء متخصصين — Planner وArchitect وDevOps وTDD وReviewer وBuilder — يخطط ويبني ويختبر ويراجع ويجمّع على لوحة مهام مباشرة تشاهدها. الملفات المولّدة تصل إلى مساحة مشروعك جاهزة للاستخدام. استخدم النموذج المجاني المضاف، أو اجلب مفتاح مزوّدك لمخرجات أقوى. رصيد واحد لكل إطلاق، لا تنتهي صلاحية الائتمانات، ولا رسوم شهرية.",
+      "اكتب هدفاً وسرب من 6 وكلاء متخصصين — Planner وArchitect وDevOps وTDD وReviewer وBuilder — يخطط ويبني ويختبر ويراجع ويجمّع على لوحة مهام مباشرة تشاهدها. الملفات المولّدة تصل إلى مساحة مشروعك جاهزة للاستخدام. اجلب مفتاح مزوّدك لمخرجات أقوى — كل إطلاق ما زال برصيد واحد. لا تنتهي صلاحية الائتمانات ولا رسوم شهرية.",
     squad_title:"السرب (Squad)", board_title:"لوحة المهام الحية",
     board_empty:"لم يُبدأ أي سرب بعد. أنشئ مشروعاً أو جرّب Demo.",
     res_hint:"الملفات المولّدة من مساحة عمل هذه اللوحة.",
     projects_title:"السجلّ والنتائج", projects_login_empty:"سجّل الدخول لعرض مشاريعك.", projects_empty:"لا مشاريع بعد — أطلق مشروعك الأول.", projects_fail:"تعذّر تحميل المشاريع", open_btn:"فتح",
     ws_fail:"تعذّر تحميل الملفات", ws_empty:"لا ملفات مولّدة بعد.",
     settings_title:"الحساب والبيانات", settings_login_empty:"سجّل الدخول لإدارة حسابك.",
+    sett_account:"الحساب", lbl_account_name:"الاسم المعروض", btn_save_name:"حفظ", name_ok:"تم تحديث الاسم", name_fail:"فشل تحديث الاسم", name_empty:"الاسم فارغ",
     sett_security:"الأمان", lbl_pw_current:"كلمة المرور الحالية", lbl_pw_new:"كلمة المرور الجديدة",
     pw_change_btn:"تغيير كلمة المرور", pw_fields:"أدخل كلمتي المرور", pw_fail:"فشل تغيير كلمة المرور",
     pw_ok:"تغيّرت كلمة المرور — سجّل الدخول من جديد",
@@ -512,8 +570,8 @@ const I18N = {
     ref_title:"برنامج الإحالات", ref_login_empty:"سجّل الدخول لعرض رابط الإحالة.",
     ref_your_link:"رابط الإحالة الخاص بك:", ref_reward:"تكسب {c} رصيد عن كل صديق يشترك بباقة مدفوعة.",
     byok_title:"🔑 مفاتيحك (BYOK)",
-    byok_hint:"اختياري. بدون مفتاح يعمل السرب على النموذج المجاني المضاف. أضف مفتاح Claude/GPT/Gemini/Kimi لمخرجات أقوى — مفتاحك يدفع سعر توكنات مزوّدك، وFluxSwarm لا تتقاضى سوى رصيد الإطلاق الواحد. المفاتيح مشفّرة ولا تُعرض أبداً.",
-    byok_login_empty:"سجّل الدخول لإدارة مفاتيحك.", byok_empty_none:"لا مفاتيح بعد — أضف مفتاحاً أو فعّل النموذج المجاني.",
+    byok_hint:"أضف مفتاح Claude/GPT/Gemini/Kimi لمخرجات أقوى، أو مفتاح OpenRouter مجاني (GLM-5.2) للتجربة بلا تكلفة — مفتاحك يدفع سعر توكنات مزوّدك، وFluxSwarm لا تتقاضى سوى رصيد الإطلاق الواحد. لا يُستخدم المزوّد إلا بعد موافقتك على شروطه أدناه. المفاتيح مشفّرة ولا تُعرض أبداً.",
+    byok_login_empty:"سجّل الدخول لإدارة مفاتيحك.", byok_empty_none:"لا مفاتيح بعد — أضف مفتاح مزوّد مدعوم.", byok_agree:"أوافق على شروط هذا المزوّد (مطلوب قبل الإطلاق).", byok_agg_hint:"المفاتيح المحفوظة مرتبطة بنسخة الشروط الحالية للمزوّد؛ الموافقة على نسخة جديدة تُحدّثها.", byok_agreed_yes:"✓ تمت الموافقة", byok_agreed_no:"لم تتم الموافقة",
     key_required:"أدخل المفتاح", key_save_fail:"فشل الحفظ", key_saved:"تم حفظ المفتاح (مشفّر)", lbl_provider:"المزوّد", lbl_key:"مفتاح API",
     sec_title:"🔒 تقرير الأمان (AgentShield)", sec_run:"فحص الأمان", sec_score:"درجة الأمان", sec_first:"ابدأ سرباً أولاً", sec_failed:"فشل الفحص",
     market_title:"🛒 متجر السرب (Squad Marketplace)",
@@ -553,13 +611,14 @@ const I18N = {
     hero_hint:"Each launch uses 1 credit. Sign in to launch — the Demo plan starts with 3 free credits (no card).",
     about_title:"What is FluxSwarm?",
     about_body:
-      "Type a goal and a squad of 6 specialized agents — Planner, Architect, DevOps, TDD, Reviewer, Builder — plans, builds, tests, reviews and assembles it on a live task board you can watch. Generated files land in your project workspace, ready to use. Use a free hosted model, or bring your own provider key for stronger output. 1 credit per launch, credits never expire, no monthly fee.",
+      "Type a goal and a squad of 6 specialized agents — Planner, Architect, DevOps, TDD, Reviewer, Builder — plans, builds, tests, reviews and assembles it on a live task board you can watch. Generated files land in your project workspace, ready to use. Bring your own provider key for the strongest output — each launch is still a single credit. 1 credit per launch, credits never expire, no monthly fee.",
     squad_title:"The Squad", board_title:"Live task board",
     board_empty:"No swarm started yet. Create a project or try Demo.",
     res_hint:"Generated files from this board's workspace.",
     projects_title:"History & results", projects_login_empty:"Sign in to see your projects.", projects_empty:"No projects yet — launch your first one.", projects_fail:"Could not load projects", open_btn:"Open",
     ws_fail:"Could not load files", ws_empty:"No generated files yet.",
     settings_title:"Account & data", settings_login_empty:"Sign in to manage your account.",
+    sett_account:"Account", lbl_account_name:"Display name", btn_save_name:"Save", name_ok:"Name updated", name_fail:"Could not update name", name_empty:"Name is empty",
     sett_security:"Security", lbl_pw_current:"Current password", lbl_pw_new:"New password",
     pw_change_btn:"Change password", pw_fields:"Enter both passwords", pw_fail:"Password change failed",
     pw_ok:"Password changed — please sign in again",
@@ -572,8 +631,8 @@ const I18N = {
     ref_title:"Referral Program", ref_login_empty:"Sign in to see your referral link.",
     ref_your_link:"Your referral link:", ref_reward:"You earn {c} credits for each friend who subscribes to a paid plan.",
     byok_title:"🔑 Your keys (BYOK)",
-    byok_hint:"Optional. Without a key the squad runs on the free hosted model. Add your own Claude/GPT/Gemini/Kimi key for stronger output — it pays your provider's token rate; FluxSwarm still only charges the 1-credit launch fee. Keys are encrypted at rest and never shown back.",
-    byok_login_empty:"Sign in to manage your keys.", byok_empty_none:"No keys yet — add a key or use the free hosted model.",
+    byok_hint:"Add a Claude/GPT/Gemini/Kimi key for stronger output, or a free OpenRouter key (GLM-5.2) to trial it at zero cost — it pays your provider's token rate; FluxSwarm still only charges the 1-credit launch fee. A provider is only used after you accept its terms below. Keys are encrypted at rest and never shown back.",
+    byok_login_empty:"Sign in to manage your keys.", byok_empty_none:"No keys yet — add a supported provider key.", byok_agree:"I accept this provider's terms (required before launch).", byok_agg_hint:"Saved keys are locked to the current provider terms version; accepting a new version refreshes it.", byok_agreed_yes:"✓ agreed", byok_agreed_no:"not agreed",
     key_required:"Enter a key", key_save_fail:"Save failed", key_saved:"Key saved (encrypted)", lbl_provider:"Provider", lbl_key:"API key",
     sec_title:"🔒 Security Report (AgentShield)", sec_run:"Run security scan", sec_score:"Security score", sec_first:"Start a swarm first", sec_failed:"Scan failed",
     market_title:"🛒 Squad Marketplace",

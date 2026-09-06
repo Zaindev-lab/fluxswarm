@@ -1,0 +1,12 @@
+description: ECC ecc-tdd bot (Everything Claude Code integration)
+description_auto: false
+ui_meta:
+  hermes-bots:
+    shape: hexagon
+    color: hsl(204 68% 58%)
+    imageKind: shape
+    title: 'ECC-TDD  يقود التطوير الموجّه بالاختبارات: يكتب الاختبار أولاً ثم ينفّذه
+      أخضر ويرفع التغطية.'
+    custom: true
+_ui_meta_revisions:
+  hermes-bots: 1

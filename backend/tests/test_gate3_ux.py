@@ -4,10 +4,10 @@ Covers (a) every public page a US/UK customer reaches returns 200 in English
 without mojibake; (b) the landing defaults to English and carries no marketing
 claims the product cannot honour; (c) legal pages keep the operator entity and
 mandatory consumer rights; (d) /pricing and /faq are accurate to db.PLANS and to
-the real product (free hosted model default, Hermes + ECC attribution, 25-credit
-referrals, 50% template author share, workspace browsing); (e) the workspace
-endpoint applies board ownership rules; (f) the full customer journey works over
-HTTP against a stubbed Hermes runtime.
+the real product (BYOK + operator-configured default runtime, Hermes + ECC
+attribution, 25-credit referrals, 50% template author share, workspace browsing);
+(e) the workspace endpoint applies board ownership rules; (f) the full customer
+journey works over HTTP against a stubbed Hermes runtime.
 
 Nothing here invokes a real Hermes/agent subprocess or the real limiter (same
 permissive-limiter convention used by every auth-bearing test module).
@@ -33,8 +33,12 @@ PUBLIC_PAGES = [
 ]
 
 # Claims the previous copy made that the product cannot honestly honour.
+# Note: "openrouter" used to be banned as a false promise of a free provider;
+# it is now the deliberately supported free-tier BYOK runtime (Qwen3 Coder 480B),
+# so marketing mentioning it is factual — and the marketing copy never promises
+# unlimited/free tokens or an anonymous tier (that still requires a key).
 BANNED_CLAIMS = [
-    "unlimited", "/month", "hourly", "openrouter", "infallible", "guaranteed",
+    "unlimited", "/month", "hourly", "infallible", "guaranteed",
     "enterprise-grade", "enterprise grade", "100% accurate",
     "zero data retention", "fully compliant", "best-in-class",
 ]
@@ -149,8 +153,9 @@ def test_api_plans_match_db():
 def test_faq_believes_product_claims():
     r = client.get("/faq")
     assert r.status_code == 200
-    # default is a free hosted model — no key required
-    assert "No. A free hosted model is the default" in r.text
+    # default is the operator-configured runtime — a key is optional, never free-silent
+    assert "Does the squad need my AI key?" in r.text
+    assert "operator-configured model" in r.text
     # honest about the credit/plan model
     assert "Credit packs, not subscriptions" in r.text
     assert "$29/25 credits, Pro $99/120 credits, Scale $299/500 credits" in r.text
@@ -177,7 +182,7 @@ def test_how_it_works_honest_about_scope():
     assert "browsable in the UI" in r.text          # workspace reader exists now
     assert "Hermes" in r.text and "ECC" in r.text
     assert "is not Hermes" in r.text and "does not own ECC" in r.text
-    assert "free hosted model included with the service" in r.text
+    assert "bring a key or use the deployment default" in r.text
     assert "no monthly fee" in r.text.lower()
 
 
@@ -212,7 +217,12 @@ def test_squad_api_shape():
     assert profiles == [p[0] for p in main_mod.hc.SQUAD]
     assert data["verifier"]["profile"] == main_mod.hc.VERIFIER[0]
     assert data["synthesizer"]["profile"] == main_mod.hc.SYNTHESIZER[0]
-    assert main_mod.hc.FREE_PROVIDER == "opencode-free"
+    # Phase 3: real BYOK providers only — OpenRouter free tier is the sole
+    # zero-cost option and still requires a key + agreement (no anonymous tier).
+    assert main_mod.hc.SUPPORTED_PROVIDERS == (
+        "anthropic", "openai", "gemini", "kimi", "openrouter")
+    assert main_mod.hc.PROVIDER_AGREEMENT_VERSION == "1.0"
+    assert not hasattr(main_mod.hc, "PROVIDER_OPENCODE_FREE")
 
 
 # ---------- workspace endpoint ----------

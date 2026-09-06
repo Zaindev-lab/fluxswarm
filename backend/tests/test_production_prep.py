@@ -1,10 +1,10 @@
 """Production Preparation regression tests.
 
-Locks in the operator-configurable runtime contract:
-  * production MUST NOT silently default to opencode-free — an unconfigured
-    production launch fails fast (ProviderConfigError) instead;
-  * opencode-free / nemotron-3-ultra-free runs ONLY as an explicit Demo opt-in
-    (FLUXSWARM_DEMO_MODE=1) or an explicit user BYOK free selection;
+Locks in the operator-configurable runtime contract (Phase 3: no free tier):
+  * production MUST NOT silently default to any model — an unconfigured
+    launch fails fast (ProviderConfigError) instead;
+  * there is NO free provider ("opencode-free"/"big-pickle" were removed);
+    demo mode also requires a configured operator runtime;
   * BYOK providers stay supported (provider precedence, operator model overrides);
   * runtime pinning (`kanban set-model`) stays intact and loud;
 and the fail-fast secrets contract:
@@ -30,7 +30,7 @@ import vault
 def _clear_runtime_env(monkeypatch) -> None:
     monkeypatch.delenv("FLUXSWARM_DEFAULT_PROVIDER", raising=False)
     monkeypatch.delenv("FLUXSWARM_DEFAULT_MODEL", raising=False)
-    for prov in ("anthropic", "openai", "gemini", "kimi"):
+    for prov in ("anthropic", "openai", "gemini", "kimi", "openrouter"):
         monkeypatch.delenv("FLUXSWARM_MODEL_" + prov.upper(), raising=False)
 
 
@@ -60,12 +60,20 @@ class TestOperatorDefaultProvider:
         assert hc._resolve_runtime(None) == ("gemini-prod-9", "gemini")
 
 
-class TestDemoFreeProvider:
-    def test_demo_mode_defaults_to_free(self, monkeypatch):
+class TestNoFreeTier:
+    def test_demo_mode_without_configured_runtime_raises(self, monkeypatch):
+        # Phase 3 removed the anonymous free model entirely: even Demo mode must
+        # have a real operator-configured runtime (or BYOK). No silent fallback.
+        # The one zero-cost exception is an explicit OpenRouter free model — that
+        # still requires a key; see TestOpenRouterFreeTier.
         monkeypatch.setenv("FLUXSWARM_DEMO_MODE", "1")
         _clear_runtime_env(monkeypatch)
-        assert hc._resolve_runtime(None) == (hc.FREE_MODEL, hc.FREE_PROVIDER)
-        assert hc._resolve_runtime({}) == (hc.FREE_MODEL, hc.FREE_PROVIDER)
+        with pytest.raises(hc.ProviderConfigError):
+            hc._resolve_runtime(None)
+        with pytest.raises(hc.ProviderConfigError):
+            hc._resolve_runtime({})
+        with pytest.raises(hc.ProviderConfigError):
+            hc._resolve_runtime({"opencode-free": "free"})
 
     def test_unconfigured_production_never_defaults_to_free(self, monkeypatch):
         monkeypatch.delenv("FLUXSWARM_DEMO_MODE", raising=False)
@@ -75,11 +83,16 @@ class TestDemoFreeProvider:
         with pytest.raises(hc.ProviderConfigError):
             hc._resolve_runtime({})
 
-    def test_explicit_free_selection_still_wins_over_default(self, monkeypatch):
+    def test_free_key_never_wins_over_byok(self, monkeypatch):
+        # A stale/unknown "opencode-free" key is ignored — BYOK precedence holds.
+        _clear_runtime_env(monkeypatch)
+        assert hc._resolve_runtime({"openai": "sk-fake", "opencode-free": "free"}) == (
+            None, "openai")
+
+    def test_free_key_only_uses_operator_default(self, monkeypatch):
         monkeypatch.setenv("FLUXSWARM_DEFAULT_PROVIDER", "anthropic")
         monkeypatch.setenv("FLUXSWARM_DEFAULT_MODEL", "claude-prod-x")
-        assert hc._resolve_runtime({"openai": "sk-fake", "opencode-free": "free"}) == (
-            hc.FREE_MODEL, hc.FREE_PROVIDER)
+        assert hc._resolve_runtime({"opencode-free": "free"}) == ("claude-prod-x", "anthropic")
 
 
 class TestByok:
@@ -111,6 +124,52 @@ class TestByok:
         assert hc._resolve_launch_runtime({"kimi": "sk-kim"}) == ("shared-model-1", "kimi")
 
 
+class TestOpenRouterFreeTier:
+    """OpenRouter free tier = the supported zero-cost runtime.
+
+    It is deliberately explicit: it only kicks in once openrouter has been
+    chosen (operator default or a real BYOK key), never silently elsewhere.
+    """
+
+    def test_operator_default_openrouter_pins_free_model_without_model_env(self, monkeypatch):
+        _clear_runtime_env(monkeypatch)
+        monkeypatch.setenv("FLUXSWARM_DEFAULT_PROVIDER", "openrouter")
+        assert hc._resolve_runtime(None) == (hc.OPENROUTER_DEFAULT_MODEL, "openrouter")
+        assert hc._resolve_launch_runtime(None) == (hc.OPENROUTER_DEFAULT_MODEL, "openrouter")
+
+    def test_operator_default_openrouter_respects_model_override(self, monkeypatch):
+        _clear_runtime_env(monkeypatch)
+        monkeypatch.setenv("FLUXSWARM_DEFAULT_PROVIDER", "openrouter")
+        monkeypatch.setenv("FLUXSWARM_MODEL_OPENROUTER", "deepseek/deepseek-r1:free")
+        assert hc._resolve_runtime(None) == ("deepseek/deepseek-r1:free", "openrouter")
+
+    def test_byok_openrouter_resolves_without_operator_model(self, monkeypatch):
+        _clear_runtime_env(monkeypatch)
+        model, prov = hc._resolve_runtime({"openrouter": "sk-or-free"})
+        assert model is None
+        assert prov == "openrouter"
+
+    def test_byok_openrouter_launch_pins_free_model(self, monkeypatch):
+        _clear_runtime_env(monkeypatch)
+        assert hc._resolve_launch_runtime({"openrouter": "sk-or-free"}) == (
+            hc.OPENROUTER_DEFAULT_MODEL, "openrouter")
+
+    def test_openrouter_loses_to_paid_byok_precedence(self, monkeypatch):
+        _clear_runtime_env(monkeypatch)
+        assert hc._resolve_runtime({"openrouter": "sk-or", "openai": "sk-o"}) == (None, "openai")
+        assert hc._resolve_runtime({"openrouter": "sk-or", "opencode-free": "free"}) == (
+            None, "openrouter")
+
+    def test_free_model_default_never_leaks_to_other_providers(self, monkeypatch):
+        # No provider chosen at all -> still fails fast, never defaults to the
+        # openrouter free model.
+        _clear_runtime_env(monkeypatch)
+        with pytest.raises(hc.ProviderConfigError):
+            hc._resolve_runtime(None)
+        with pytest.raises(hc.ProviderConfigError):
+            hc._resolve_runtime({})
+
+
 class TestNoSilentFallback:
     def test_launch_swarm_fails_fast_before_any_run(self, monkeypatch):
         monkeypatch.delenv("FLUXSWARM_DEMO_MODE", raising=False)
@@ -140,7 +199,25 @@ class TestNoSilentFallback:
         assert "HERMES_DEFAULT_PROVIDER" not in captured["env"]
         assert "HERMES_DEFAULT_MODEL" not in captured["env"]
 
-    def test_run_in_demo_mode_declares_free(self, monkeypatch):
+    def test_run_in_demo_mode_only_declares_operator_runtime(self, monkeypatch):
+        monkeypatch.setenv("FLUXSWARM_DEMO_MODE", "1")
+        _clear_runtime_env(monkeypatch)
+        monkeypatch.setenv("FLUXSWARM_DEFAULT_PROVIDER", "openai")
+        monkeypatch.setenv("FLUXSWARM_DEFAULT_MODEL", "gpt-demo-1")
+        captured = {}
+
+        def fake_subprocess_run(cmd, **kw):
+            captured["env"] = dict(kw.get("env", {}))
+            return type("R", (), {"returncode": 0, "stdout": "{}", "stderr": ""})()
+
+        monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+        hc._run(["boards", "ls"], capture=False)
+        assert captured["env"].get("HERMES_DEFAULT_PROVIDER") == "openai"
+        assert captured["env"].get("HERMES_DEFAULT_MODEL") == "gpt-demo-1"
+
+    def test_run_in_demo_mode_without_runtime_declares_nothing(self, monkeypatch):
+        # No free declaration in Phase 3: unconfigured demo _run passes no
+        # provider env (launch paths fail fast earlier, in _resolve_launch_runtime).
         monkeypatch.setenv("FLUXSWARM_DEMO_MODE", "1")
         _clear_runtime_env(monkeypatch)
         captured = {}
@@ -151,7 +228,8 @@ class TestNoSilentFallback:
 
         monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
         hc._run(["boards", "ls"], capture=False)
-        assert captured["env"].get("HERMES_DEFAULT_PROVIDER") == hc.FREE_PROVIDER
+        assert "HERMES_DEFAULT_PROVIDER" not in captured["env"]
+        assert "HERMES_DEFAULT_MODEL" not in captured["env"]
 
 
 class TestRuntimePinningIntact:
@@ -184,14 +262,22 @@ class TestRuntimePinningIntact:
         hc._pin_runtime("b", {"anthropic": "sk-ant-x"})
         assert rec["args"] == ["set-model", "t7", "claude-byok-2", "--provider", "anthropic"]
 
-    def test_pins_free_when_explicitly_selected(self, monkeypatch):
-        monkeypatch.setenv("FLUXSWARM_DEMO_MODE", "1")
+    def test_pins_byok_ignoring_free_key(self, monkeypatch):
+        _clear_runtime_env(monkeypatch)
+        monkeypatch.setenv("FLUXSWARM_MODEL_ANTHROPIC", "claude-byok-2")
+        rec = self._set_up(monkeypatch, ["t7"])
+        hc._pin_runtime("b", {"anthropic": "sk-ant-x", "opencode-free": "free"})
+        assert rec["args"] == ["set-model", "t7", "claude-byok-2", "--provider", "anthropic"]
+
+    def test_pins_operator_default_from_env(self, monkeypatch):
+        monkeypatch.setenv("FLUXSWARM_DEFAULT_PROVIDER", "anthropic")
+        monkeypatch.setenv("FLUXSWARM_DEFAULT_MODEL", "claude-prod-1")
         rec = self._set_up(monkeypatch, ["t9"])
-        hc._pin_runtime("b", {"opencode-free": "free"})
-        assert rec["args"] == ["set-model", "t9", hc.FREE_MODEL, "--provider", hc.FREE_PROVIDER]
+        hc._pin_runtime("b", None)
+        assert rec["args"] == ["set-model", "t9", "claude-prod-1", "--provider", "anthropic"]
 
     def test_failed_set_model_still_raises_loudly(self, monkeypatch):
-        monkeypatch.setenv("FLUXSWARM_DEMO_MODE", "1")
+        monkeypatch.setenv("FLUXSWARM_MODEL_OPENAI", "gpt-pin-1")
 
         def fake_run(args, board=None, capture=True, provider_keys=None):
             return type("R", (), {"returncode": 1, "stdout": "{}", "stderr": "boom"})()
@@ -199,11 +285,14 @@ class TestRuntimePinningIntact:
         monkeypatch.setattr(hc, "list_tasks", lambda b: [{"id": "t1"}])
         monkeypatch.setattr(hc, "_run", fake_run)
         with pytest.raises(RuntimeError, match="set-model"):
-            hc._pin_runtime("b", {"opencode-free": "free"})
+            hc._pin_runtime("b", {"openai": "sk-openai"})
 
 
-class TestDemoLaunchFreeOptIn:
-    def test_demo_launch_explicitly_pins_free(self, monkeypatch):
+class TestDemoLaunchRuntime:
+    def test_demo_launch_uses_operator_runtime(self, monkeypatch):
+        """Phase 3: the public demo no longer pins a free runtime — it passes
+        provider_keys=None so the operator-configured default is used, and it
+        never references a free provider sentinel."""
         import main as main_mod
         seen = {}
 
@@ -223,8 +312,8 @@ class TestDemoLaunchFreeOptIn:
 
         resp = main_mod.api_demo_launch(None)
         assert resp["demo"] is True
-        assert seen["keys"] == {hc.PROVIDER_OPENCODE_FREE: "free"}
-        assert seen["fire_k"] == {hc.PROVIDER_OPENCODE_FREE: "free"}
+        assert seen["keys"] is None
+        assert seen["fire_k"] is None
 
 
 class TestVaultSecretFailFast:
@@ -283,6 +372,54 @@ class TestEnvGuardStartup:
         monkeypatch.delenv("FLUXSWARM_DEMO_MODE", raising=False)
         monkeypatch.setenv("FLUXSWARM_FERNET_KEY", "a")
         monkeypatch.setenv("FLUXSWARM_JWT_SECRET", "b")
+        # Phase 1: FLUXSWARM_DATABASE_URL is also mandatory in production.
+        monkeypatch.setenv("FLUXSWARM_DATABASE_URL", "postgresql://u:p@h/db")
+        # Hardening: production must name a real KMS backend (never 'file').
+        monkeypatch.setenv("FLUXSWARM_KMS_BACKEND", "aws_kms")
+        # Session 2: production also requires at least one PAID provider key.
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-prod-test")
+        assert envguard.assert_production_secrets() is None
+
+    def test_production_missing_kms_backend_raises(self, monkeypatch):
+        monkeypatch.delenv("FLUXSWARM_DEMO_MODE", raising=False)
+        monkeypatch.setenv("FLUXSWARM_FERNET_KEY", "a")
+        monkeypatch.setenv("FLUXSWARM_JWT_SECRET", "b")
+        monkeypatch.setenv("FLUXSWARM_DATABASE_URL", "postgresql://u:p@h/db")
+        monkeypatch.delenv("FLUXSWARM_KMS_BACKEND", raising=False)
+        with pytest.raises(RuntimeError) as ei:
+            envguard.assert_production_secrets()
+        assert "FLUXSWARM_KMS_BACKEND" in str(ei.value)
+
+    def test_production_file_kms_forbidden(self, monkeypatch):
+        monkeypatch.delenv("FLUXSWARM_DEMO_MODE", raising=False)
+        monkeypatch.setenv("FLUXSWARM_FERNET_KEY", "a")
+        monkeypatch.setenv("FLUXSWARM_JWT_SECRET", "b")
+        monkeypatch.setenv("FLUXSWARM_DATABASE_URL", "postgresql://u:p@h/db")
+        monkeypatch.setenv("FLUXSWARM_KMS_BACKEND", "file")
+        with pytest.raises(RuntimeError) as ei:
+            envguard.assert_production_secrets()
+        assert "forbidden" in str(ei.value).lower()
+
+    def test_production_missing_paid_provider_raises(self, monkeypatch):
+        monkeypatch.delenv("FLUXSWARM_DEMO_MODE", raising=False)
+        monkeypatch.setenv("FLUXSWARM_FERNET_KEY", "a")
+        monkeypatch.setenv("FLUXSWARM_JWT_SECRET", "b")
+        monkeypatch.setenv("FLUXSWARM_DATABASE_URL", "postgresql://u:p@h/db")
+        monkeypatch.setenv("FLUXSWARM_KMS_BACKEND", "aws_kms")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        with pytest.raises(RuntimeError) as ei:
+            envguard.assert_production_secrets()
+        assert "paid AI provider" in str(ei.value)
+
+    def test_production_paid_provider_only_ok(self, monkeypatch):
+        monkeypatch.delenv("FLUXSWARM_DEMO_MODE", raising=False)
+        monkeypatch.setenv("FLUXSWARM_FERNET_KEY", "a")
+        monkeypatch.setenv("FLUXSWARM_JWT_SECRET", "b")
+        monkeypatch.setenv("FLUXSWARM_DATABASE_URL", "postgresql://u:p@h/db")
+        monkeypatch.setenv("FLUXSWARM_KMS_BACKEND", "aws_kms")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-prod-test")
         assert envguard.assert_production_secrets() is None
 
     def test_demo_mode_never_required(self, monkeypatch):

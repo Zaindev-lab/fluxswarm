@@ -634,3 +634,56 @@ class TestPosixProcessTreeCleanup:
                     except OSError:
                         pass
             worker.wait(timeout=5)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX flock tests")
+class TestPosixServerLock:
+    """fcntl.flock single-instance guard: exclusion now + auto-release on exit."""
+
+    @pytest.fixture
+    def lockfile(self, tmp_path):
+        return tmp_path / ".server.lock"
+
+    def _spawn(self, code: str, lockfile) -> subprocess.Popen:
+        env = dict(os.environ)
+        env["FLUXSWARM_LOCK_FILE"] = str(lockfile)
+        env.pop("FLUXSWARM_ALLOW_MULTI", None)
+        return subprocess.Popen(
+            [sys.executable, "-c", code],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=env,
+        )
+
+    def test_second_instance_is_refused(self, lockfile):
+        holder = self._spawn(
+            "import serverlock,time; serverlock.acquire(); print('held', flush=True); time.sleep(30)",
+            lockfile,
+        )
+        assert holder.stdout.readline().strip() == "held"
+        try:
+            second = self._spawn(
+                "import serverlock; serverlock.acquire()", lockfile)
+            out, err = second.communicate(timeout=15)
+            assert second.returncode != 0
+            assert "already running" in err
+        finally:
+            holder.kill()
+            holder.wait(timeout=5)
+
+    def test_lock_auto_releases_and_reacquires(self, lockfile, monkeypatch):
+        holder = self._spawn(
+            "import serverlock,time; serverlock.acquire(); print('held', flush=True); time.sleep(30)",
+            lockfile,
+        )
+        assert holder.stdout.readline().strip() == "held"
+        holder.kill()
+        holder.wait(timeout=5)
+        # The flock died with the holder; a fresh acquire must succeed.
+        monkeypatch.delenv("FLUXSWARM_ALLOW_MULTI", raising=False)
+        import serverlock as sl
+        monkeypatch.setattr(sl, "LOCK", lockfile)
+        try:
+            sl.acquire()
+            assert lockfile.exists()
+        finally:
+            sl.release()

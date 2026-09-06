@@ -20,6 +20,7 @@ htmlcov/
 
 # runtime / backups
 backups/
+backup/
 hermes_home/
 *.log
 pyerr.txt

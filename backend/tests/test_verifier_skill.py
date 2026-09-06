@@ -21,8 +21,9 @@ Test matrix (A-I from the authorization):
   D. Missing bundled source fails safely with a clear error; no fake skill created.
   E. The real reviewer launch env resolves ``requesting-code-review`` after provision.
   F. The real preload path does NOT die with "Unknown skill(s): requesting-code-review".
-  G. Runtime pinning stays provider=opencode-free / model=nemotron-3-ultra-free.
-  H. No fallback to openrouter / z-ai / glm-5.2 / any paid provider.
+  G. Runtime pinning stays intact (BYOK provider pinned with the operator model).
+  H. No silent fallback to a stale/free provider (Phase 3): opencode-free is gone; the
+     only free-tier runtime is an explicit OpenRouter BYOK key (z-ai/glm-5.2:free).
   I. Existing watchdog regression tests remain green (healthy slow worker != stuck;
      genuinely stalled worker = stuck). Covered by running the full suite.
 
@@ -253,13 +254,13 @@ class TestRealReviewerResolution:
         assert "MISSING=[]" in out
 
 
-# --- G/H: pinning + no paid fallback --------------------------------------
+# --- G/H: pinning + no paid/free fallback ----------------------------------
 
 
 class TestPinningIntact:
-    """G/H — runtime pinning and free-tier provider must be unchanged."""
+    """G/H — runtime pinning and provider resolution must be unchanged."""
 
-    def test_g_free_runtime_pins(self, monkeypatch):
+    def test_g_byok_runtime_pins(self, monkeypatch):
         fake = type("_Proc", (), {"returncode": 0, "stdout": "{}", "stderr": ""})()
         calls = {"args": None, "keys": None}
 
@@ -273,12 +274,16 @@ class TestPinningIntact:
 
         monkeypatch.setattr(hc_mod, "list_tasks", fake_list)
         monkeypatch.setattr(hc_mod, "_run", fake_run)
-        hc_mod._pin_runtime("u1-proj", {"opencode-free": "free"})
+        monkeypatch.setenv("FLUXSWARM_MODEL_OPENAI", "gpt-byok-1")
+        hc_mod._pin_runtime("u1-proj", {"openai": "sk-openai"})
         assert calls["args"][:2] == ["set-model", "t3"]
-        assert calls["args"][2] == "nemotron-3-ultra-free"
-        assert calls["args"][3:] == ["--provider", "opencode-free"]
+        assert calls["args"][2] == "gpt-byok-1"
+        assert calls["args"][3:] == ["--provider", "openai"]
 
-    def test_h_no_paid_fallback(self):
+    def test_h_no_paid_or_free_fallback(self):
+        # opencode-free is NOT a provider in Phase 3 — ignored. Openrouter is the
+        # free-tier BYOK provider but sits LAST in precedence.
+        # Precedence: anthropic > openai > gemini > kimi > openrouter (dict order irrelevant).
         keys = {
             "openrouter": "sk-x",
             "anthropic": "sk-ant",
@@ -288,10 +293,8 @@ class TestPinningIntact:
             "opencode-free": "free",
         }
         model, provider = hc_mod._resolve_runtime(keys)
-        assert provider == "opencode-free"
-        assert model == "nemotron-3-ultra-free"
-        assert hc_mod.FREE_PROVIDER == "opencode-free"
-        assert hc_mod.FREE_MODEL == "nemotron-3-ultra-free"
+        assert provider == "anthropic"
+        assert model is None
 
 
 # --- I: watchdog/stall semantics are covered in the existing suite ---------
@@ -331,8 +334,10 @@ def test_launch_functions_call_verifier_provisioning(monkeypatch, tmp_path):
 
     monkeypatch.setattr(hc_mod, "_run", fake_run)
     monkeypatch.setattr(hc_mod, "_pin_runtime", lambda board, keys=None: None)
+    # Phase 3 has no free fallback: supply an explicit BYOK runtime.
+    monkeypatch.setenv("FLUXSWARM_MODEL_OPENAI", "gpt-verifier-test")
 
-    hc_mod.launch_swarm("u1-proj", "goal")
+    hc_mod.launch_swarm("u1-proj", "goal", provider_keys={"openai": "sk-openai"})
     assert "target" in provisioned
     assert provisioned["target"].is_dir()
     assert (provisioned["target"] / "SKILL.md").exists()

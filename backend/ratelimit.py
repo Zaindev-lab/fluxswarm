@@ -43,6 +43,36 @@ class _Limiter:  # in-process memory backend
         self._ip_hits: dict[str, list[float]] = {}
         self._reg_hits: dict[str, list[float]] = {}
         self._purchase_hits: dict[int, list[float]] = {}
+        # Generic fixed-window counters (demo quotas etc.); keyed like the other
+        # tables and expired by sliding-window pruning in `count`.
+        self._generic: dict[str, list[float]] = {}
+
+    def reset(self) -> None:
+        """Clear all counters (tests only)."""
+        with self._lock:
+            self._login_fail.clear()
+            self._ip_hits.clear()
+            self._reg_hits.clear()
+            self._purchase_hits.clear()
+            self._generic.clear()
+
+    def check(self, key: str, max_calls: int, window: int) -> bool:
+        """Record one hit for `key` over `window` seconds; True while allowed.
+
+        Max-calls inclusive: the 1st..max_calls-th hits pass, the (max+1)-th
+        (and any further hit in the window) is denied.
+        """
+        with self._lock:
+            cutoff = time.time() - window
+            arr = self._prune(self._generic.get(key, []), cutoff)
+            arr.append(time.time())
+            self._generic[key] = arr
+            return len(arr) <= max_calls
+
+    def count(self, key: str, window: int) -> int:
+        """Current hit count for `key` (pruned, non-destructive)."""
+        with self._lock:
+            return len(self._prune(self._generic.get(key, []), time.time() - window))
 
     @staticmethod
     def _prune(items: list[float], cutoff: float) -> list[float]:
@@ -164,6 +194,21 @@ class _RedisLimiter:  # multi-worker backend (fixed-window counters)
 
     def record_purchase(self, user_id: int) -> None:
         self._incr(f"fs:buy:{user_id}", _PURCHASE_WINDOW)
+
+    def check(self, key: str, max_calls: int, window: int) -> bool:
+        try:
+            v = self._r.incr(f"fs:generic:{key}")
+            if v == 1:
+                self._r.expire(f"fs:generic:{key}", window)
+            return v <= max_calls
+        except Exception:
+            return False
+
+    def count(self, key: str, window: int) -> int:
+        try:
+            return int(self._r.get(f"fs:generic:{key}") or 0)
+        except Exception:
+            return 0
 
 
 _MEMORY = None

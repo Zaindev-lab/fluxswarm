@@ -9,10 +9,12 @@ from __future__ import annotations
 import asyncio
 import sys
 import atexit
+from contextlib import asynccontextmanager
 import datetime
 import ipaddress
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -20,7 +22,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, PlainTextResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
@@ -39,11 +41,39 @@ import serverlock
 import vault
 import security
 import payments as payments_mod
+import provider_pool
 from ratelimit import limiter
 
 BASE = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE / "templates"))
-app = FastAPI(title="FluxSwarm", version="0.2.0")
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    # Start the persistent reconciliation reaper once the server is up (NOT at
+    # import, so a pytest import of this module never launches the loop).
+    threading.Thread(target=_reaper_loop, daemon=True).start()
+    yield
+
+
+app = FastAPI(title="FluxSwarm", version="3.0.0", lifespan=_lifespan)
+
+
+# ---------- Structured rate-limit errors (UX report §2.3) ----------
+# Demo-limit 429s carry a rich body: {error, message:{en,ar}, retry_after_seconds,
+# upgrade_url}. A dict `detail` on any 429 is lifted to the top-level JSON (with a
+# matching Retry-After header) so the frontend shows the right message + CTA.
+# String detail (legacy/auth attempts/template caps) is serialized unchanged.
+@app.exception_handler(HTTPException)
+async def _rate_limit_exception_handler(request: Request, exc: HTTPException):
+    if exc.status_code == 429 and isinstance(exc.detail, dict):
+        body = dict(exc.detail)
+        headers = {}
+        if "retry_after_seconds" in body:
+            headers["Retry-After"] = str(body["retry_after_seconds"])
+        return JSONResponse(status_code=exc.status_code, content=body, headers=headers)
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail},
+                        headers=getattr(exc, "headers", None))
 
 # ---------- CORS (strict allow-list; never a wildcard) ----------
 # Origins come from FLUXSWARM_CORS_ORIGINS (comma/whitespace-separated). If unset
@@ -171,6 +201,36 @@ def _operator_maintenance() -> bool:
 
 
 _DEMO_DAILY_CAP = int(os.environ.get("FLUXSWARM_DEMO_DAILY_CAP", "25"))
+# Session 2 demo quotas (sliding-window ratelimit keys; see ratelimit.check).
+_DEMO_IP_MAX = 1
+_DEMO_IP_WINDOW = 3600
+_DEMO_GLOBAL_MAX = 20
+_DEMO_GLOBAL_WINDOW = 86400
+_DEMO_MICRO_IP_MAX = 5
+_DEMO_MICRO_GLOBAL_MAX = 200
+# Session 3 demo lifecycle (auto-close + workspace recycle).
+_DEMO_MAX_RUNTIME_S = int(os.getenv("FLUXSWARM_DEMO_MAX_RUNTIME_S", "600"))
+_DEMO_WORKSPACE_TTL_S = int(os.getenv("FLUXSWARM_DEMO_WORKSPACE_TTL_S", "86400"))
+_DEMO_LIMIT_DETAILS = {
+    "ip": {
+        "error": "demo_ip_limit",
+        "message": {
+            "en": "Demo limit: 1 launch per hour. Sign up for unlimited access.",
+            "ar": "الحد: تجربة واحدة في الساعة. سجّل للوصول غير المحدود.",
+        },
+        "retry_after_seconds": _DEMO_IP_WINDOW,
+        "upgrade_url": "/pricing",
+    },
+    "global": {
+        "error": "demo_global_limit",
+        "message": {
+            "en": "Daily demo quota exhausted. Try tomorrow or sign up.",
+            "ar": "الحصة اليومية انتهت. جرّب غداً أو سجّل.",
+        },
+        "retry_after_seconds": _DEMO_GLOBAL_WINDOW,
+        "upgrade_url": "/pricing",
+    },
+}
 
 
 def _today() -> str:
@@ -178,53 +238,249 @@ def _today() -> str:
     return datetime.date.today().isoformat()
 
 
+def _next_utc_midnight() -> str:
+    """ISO-8601 timestamp (UTC, Z) of the next quota reset."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    nxt = (now + datetime.timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    return nxt.isoformat().replace("+00:00", "Z")
+
+
+# Goal strings are forwarded verbatim to third-party AI providers, so they are
+# the natural injection surface for prompt-injection / jailbreak attempts.
+# Sanitize before any provider call: redact classic override directives and cap
+# length. Redaction (not hard rejection) keeps legitimate business prose that
+# merely *mentions* these phrases usable while stripping the attack payload.
+_PROMPT_INJECTION_PATTERNS = (
+    re.compile(r"ignore\s+(all\s+)?(previous|prior|earlier)\s+instructions", re.IGNORECASE),
+    re.compile(r"disregard\s+(the\s+)?(above|previous|prior)\s+(instructions|context|prompt)", re.IGNORECASE),
+    re.compile(r"\bsystem\s+prompt\b", re.IGNORECASE),
+    re.compile(r"\byou\s+are\s+now\b", re.IGNORECASE),
+    re.compile(r"\bdo\s+anything\s+now\b|\bjailbreak\b", re.IGNORECASE),
+    re.compile(r"reveal\s+(your\s+)?(system|hidden|internal)\s+(prompt|instructions|directives)", re.IGNORECASE),
+    re.compile(r"\bignore\s+(the\s+)?(system|developer)\s+(prompt|instructions|message)\b", re.IGNORECASE),
+)
+_GOAL_MAX_LEN = 4000
+
+
+def sanitize_goal(goal: str | None) -> str:
+    """Neutralize prompt-injection directives and bound length for provider input."""
+    text = (goal or "").strip()
+    for pat in _PROMPT_INJECTION_PATTERNS:
+        text = pat.sub("[REDACTED]", text)
+    return text[:_GOAL_MAX_LEN]
+
+
+def _demo_user(request: Request):
+    """Resolve the optional bearer user for demo endpoints (never raises).
+
+    Demo endpoints are anonymous by default; when a logged-in user calls them
+    their ADMT opt-out status is honoured. ``request`` may be None in tests
+    that invoke the handler directly.
+    """
+    if request is None:
+        return None
+    ah = request.headers.get("Authorization") or ""
+    token = ah[7:] if ah.startswith("Bearer ") else ""
+    if not token:
+        return None
+    try:
+        payload = auth_mod.decode_token(token)
+    except Exception:
+        return None
+    return db.get_user_by_id(payload.get("uid"))
+
+
 # ---------- security headers ----------
 # Paddle Checkout overlay needs: SDK script (cdn.paddle.com), its iframe
 # (checkout / sandbox-checkout), and API calls (api.paddle.com).
 _PADDLE_ORIGINS = "https://cdn.paddle.com https://*.paddle.com"
-_CSP = ("default-src 'self'; "
-        "script-src 'self' 'unsafe-inline' https://cdn.paddle.com; "
-        "style-src 'self' 'unsafe-inline' https://*.paddle.com; "
-        "img-src 'self' data: https://*.paddle.com; "
-        "font-src 'self' data: https://*.paddle.com; "
-        "connect-src 'self' ws: wss: https://*.paddle.com wss://checkout.paddle.com; "
-        "frame-src https://checkout.paddle.com https://sandbox-checkout.paddle.com "
-        "https://buy.paddle.com https://sandbox-buy.paddle.com; "
-        "object-src 'none'; "
-        "frame-ancestors 'none'; "
-        "base-uri 'self'; "
-        "form-action 'self'")
+# Responsive webpages serve inline scripts/styles signed by a per-request nonce
+# (see _new_csp). '{nonce}' is replaced at request time; no 'unsafe-inline'.
+_CSP_TEMPLATE = ("default-src 'self'; "
+                 "script-src 'self' 'nonce-{nonce}' https://cdn.paddle.com; "
+                 # style-src intentionally uses 'unsafe-inline' (no nonce):
+                 # the dashboard sets many layout details via style="" attributes,
+                 # and per CSP3 a nonce would force CSP to IGNORE 'unsafe-inline',
+                 # breaking the rendered UI. Style injection is presentational-only
+                 # and is NOT an XSS vector; scripts stay strict nonce-only.
+                 "style-src 'self' 'unsafe-inline' https://*.paddle.com; "
+                 "img-src 'self' data: https://*.paddle.com; "
+                 "font-src 'self' data: https://*.paddle.com; "
+                 "connect-src 'self' ws: wss: https://*.paddle.com wss://checkout.paddle.com; "
+                 "frame-src https://checkout.paddle.com https://sandbox-checkout.paddle.com "
+                 "https://buy.paddle.com https://sandbox-buy.paddle.com; "
+                 "object-src 'none'; "
+                 "frame-ancestors 'none'; "
+                 "base-uri 'self'; "
+                 "form-action 'self'")
+
+
+def _csp_for(nonce: str) -> str:
+    """Build the Content-Security-Policy from the per-request nonce."""
+    return _CSP_TEMPLATE.format(nonce=nonce)
 
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
+    # Per-request CSP nonce so inline scripts run under a signed nonce instead
+    # of 'unsafe-inline'. Stored on request.state for template rendering.
+    nonce = secrets.token_urlsafe(16)
+    request.state.csp_nonce = nonce
     resp = await call_next(request)
-    resp.headers["Content-Security-Policy"] = _CSP
+    resp.headers["Content-Security-Policy"] = _csp_for(nonce)
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["X-Frame-Options"] = "DENY"
-    resp.headers["Referrer-Policy"] = "no-referrer"
+    resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     resp.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if request.url.scheme == "https":
+        resp.headers["Strict-Transport-Security"] = \
+            "max-age=31536000; includeSubDomains; preload"
     if request.url.path.startswith("/api"):
         resp.headers["Cache-Control"] = "no-store"
     return resp
 
 
-@app.get("/health")
-def api_health():
+# Small TTL cache so the /health endpoint never pays a filesystem sweep per hit.
+_board_stats_cache: dict = {"ts": 0.0, "active": 0, "sealed": 0}
+
+
+def _board_stats_cached() -> dict:
+    """Cached {active, sealed} board counts (10s TTL). Result is degraded to
+    zeros when the boards root is unreachable — /health must never 500."""
+    now = time.time()
+    if now - _board_stats_cache["ts"] < 10:
+        return _board_stats_cache
+    active = sealed = 0
+    try:
+        roots = Path(hc.HERMES_HOME) / "kanban" / "boards"
+        for entry in roots.iterdir():
+            if not entry.is_dir():
+                continue
+            if hc.board_is_sealed(entry.name):
+                sealed += 1
+            else:
+                active += 1
+    except Exception:
+        pass
+    _board_stats_cache.update(ts=now, active=active, sealed=sealed)
+    return _board_stats_cache
+
+
+def snapshot_health() -> dict:
+    """Build the enhanced /health payload (Task 4 session 3).
+
+    Every section degrades under error — a failed probe must not turn the
+    whole payload into a 500. Pool statistics are only reported when a
+    PostgreSQL pool actually exists (SQLite mode reports None).
+    """
     db_ok = True
     try:
         db.get_user_by_id(1)
     except Exception:
         db_ok = False
+    db_kind = "postgresql" if (os.getenv("FLUXSWARM_DATABASE_URL") or "").startswith("postgres") else "sqlite"
+    pool_available = pool_total = None
+    if db_kind == "postgresql":
+        try:
+            import db_postgres as pg
+            pool = pg._await(pg.get_pool())
+            if pool is not None:
+                pool_total = pool.get_size()
+                pool_available = pool.get_idle_size()
+        except Exception:
+            pool_available = pool_total = None
+    hermes_docker_ok = True
+    try:
+        if os.getenv("FLUXSWARM_DOCKER_DISPATCH", "0") == "1":
+            import shutil
+            hermes_docker_ok = shutil.which("docker") is not None
+    except Exception:
+        hermes_docker_ok = False
+    prov = []
+    for entry in provider_pool.DEMO_PROVIDERS:
+        key_env = entry.get("key_env")
+        needs = entry.get("requires_key", False)
+        if needs and key_env and not os.getenv(key_env):
+            status = "needs_key"
+        else:
+            status = "configured"
+        prov.append({
+            "provider": entry.get("provider"),
+            "model": entry.get("model"),
+            "status": status,
+            # A live quota figure requires a per-provider usage API; without
+            # one we advertise "unknown" instead of inventing a number.
+            "quota_remaining": "unknown",
+        })
+    g_total = _DEMO_GLOBAL_MAX
+    g_used = limiter.count("demo:global", _DEMO_GLOBAL_WINDOW)
+    bstats = _board_stats_cached()
     return {
         "ok": db_ok and hc.HERMES_BIN.exists(),
         "version": app.version,
-        "pid": os.getpid(),
-        "uptime_s": round(time.time() - _START_TS, 1),
-        "db": db_ok,
+        "db": db_kind,
+        "db_ok": db_ok,
+        "db_pool_available": pool_available,
+        "db_pool_total": pool_total,
+        "hermes_docker_ok": hermes_docker_ok,
         "hermes_bin": str(hc.HERMES_BIN),
         "hermes_bin_ok": hc.HERMES_BIN.exists(),
+        "hermes_image": os.getenv("FLUXSWARM_RUNNER_IMAGE", "fluxswarm/hermes-runner:latest"),
         "limiter_backend": getattr(limiter, "backend", "memory"),
+        "provider_pool": {"demo_providers": prov},
+        "demo_quota_remaining": max(0, g_total - g_used),
+        "demo_quota_total": g_total,
+        "active_boards": bstats["active"],
+        "sealed_boards": bstats["sealed"],
+        "max_in_progress": hc.MAX_IN_PROGRESS,
+        "pid": os.getpid(),
+        "uptime_seconds": round(time.time() - _START_TS, 1),
+    }
+
+
+@app.get("/health")
+def api_health():
+    return snapshot_health()
+
+
+@app.get("/api/provider/health")
+def api_provider_health(provider: str = "", model: str = ""):
+    """Lightweight provider health-check endpoint.
+
+    Returns {status, provider, model, detail, latency_ms} without
+    consuming credits or starting swarm work.
+    """
+    from provider import ProviderHealth, ProviderStatus
+
+    if not provider:
+        # Infer from operator config / demo mode
+        try:
+            resolved_model, resolved_provider = hc._default_runtime()
+        except hc.ProviderConfigError:
+            resolved_provider = "none"
+            resolved_model = None
+        provider = resolved_provider
+        model = model or resolved_model or ""
+
+    cred = None
+    env_key = {
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "gemini": "GEMINI_API_KEY",
+        "kimi": "KIMI_API_KEY",
+        "openrouter": "OPENROUTER_API_KEY",
+    }.get(provider)
+    if env_key:
+        cred = os.environ.get(env_key)
+
+    health = hc.preflight_provider({provider: cred} if provider and cred else None)
+    return {
+        "status": health.status.value,
+        "provider": health.provider,
+        "model": health.model,
+        "detail": health.detail,
+        "latency_ms": round(health.latency_ms, 1),
     }
 
 
@@ -270,6 +526,15 @@ def _bg_dispatch(slug: str, plan: str, provider_keys=None, pid: int | None = Non
                         timed_out=bool(res.get("timed_out")))
         except Exception:
             pass
+        if not res.get("converged") and (res.get("outcome") != "ok"
+                                         or res.get("timed_out")):
+            # Demo launches carry no project row (``_board_finalized`` can't
+            # catch them), so seal the board directly — otherwise the reaper
+            # revives the stranded workers and holds the host cap forever.
+            try:
+                hc.seal_board(slug, reason="demo launch finalized")
+            except Exception:
+                pass
         return
     res_outcome = res.get("outcome", "ok")
     if res_outcome == "ok" or res.get("timed_out") is False:
@@ -310,6 +575,26 @@ def _finalize_launch(slug: str, pid: int, *, status: str, outcome: str, reason: 
                         except Exception:
                             pass
         db.set_launch_outcome(pid, status, outcome, reason, refunded=refunded)
+        if outcome != "converged":
+            # Seal the board NOW: kill any leftover workers and park its non-
+            # terminal tasks as blocked, so the abandoned board stops holding
+            # the host-level kanban concurrency cap and can never be re-armed
+            # by the reconciliation reaper (which respects the seal marker).
+            # Without this, a stuck board's 'running' corpses poison the cap
+            # forever and every subsequent launch gets refunded as no_progress.
+            try:
+                seal = hc.seal_board(slug, reason=reason)
+                audit.audit(
+                    "dispatch.fire", outcome="board_sealed", slug=slug,
+                    project_id=pid, reason=reason,
+                    killed=seal.get("killed"), blocked=seal.get("blocked"),
+                )
+            except Exception:
+                try:
+                    audit.audit("dispatch.fire", outcome="board_seal_error",
+                                slug=slug, project_id=pid)
+                except Exception:
+                    pass
     except Exception:
         # Never let bookkeeping failure crash the daemon thread.
         try:
@@ -334,6 +619,207 @@ def _project_by_pid(pid: int) -> dict | None:
 def _fire_dispatch(slug: str, plan: str, provider_keys=None, pid: int | None = None) -> None:
     threading.Thread(target=_bg_dispatch, args=(slug, plan),
                      kwargs={"provider_keys": provider_keys, "pid": pid}, daemon=True).start()
+
+
+# ---------- persistent reconciliation reaper ----------
+# The bounded ``_bg_dispatch`` loop drives a launch toward a terminal state
+# (or the wall-clock window) and then stops. Left as-is, a worker that dies
+# AFTER that window leaves its task stuck in ``running`` forever — nothing
+# ever runs ``release_stale_claims``/``detect_crashed_workers`` for the board
+# again, so the board freezes (the "agent stays RUNNING" symptom) until a
+# human manually triggers another dispatch. This reaper re-runs the existing
+# single, non-blocking, capability-respecting dispatch pass for any board that
+# still has unfinished agent work, so a dead worker is reclaimed/requeued and
+# the swarm keeps advancing to convergence instead of freezing. The pass is
+# idempotent (reclaim/promote/spawn, all memory & concurrency caps honoured)
+# and crowns out once the board is terminal.
+_REAPER_INTERVAL_S = int(os.getenv("FLUXSWARM_REAPER_INTERVAL_S", "30"))
+_REAPER_ENABLED = os.getenv("FLUXSWARM_REAPER_ENABLED", "1") == "1"
+_REAPER_ERROR_BACKOFF_S = int(os.getenv("FLUXSWARM_REAPER_ERROR_BACKOFF_S", "300"))
+_REAPER_MIN_GAP_S = 2  # minimum seconds between passes for the SAME board.
+# Per-board concurrency for the recovery pass. Defaults to the memory-derived
+# host budget (MAX_IN_PROGRESS, 16 on the 8GB single-app image) so the reaper
+# can saturate whatever the fleet allows; operators cap via
+# FLUXSWARM_REAPER_MAX_SPAWN.
+_REAPER_MAX_SPAWN = max(
+    1,
+    min(int(os.getenv("FLUXSWARM_REAPER_MAX_SPAWN", str(hc.MAX_IN_PROGRESS))),
+        hc.MAX_IN_PROGRESS),
+)
+_REAPER_TERMINAL_STATUSES = {"stuck", "ok", "error"}
+_reaper_last: dict[str, float] = {}
+# Circuit-breaker state (Task 2 session 3): consecutive uncompensated failures
+# back off for _REAPER_ERROR_BACKOFF_S before retrying, so a bad provider/KMS
+# outage doesn't hammer the fleet every 30s.
+_reaper_consecutive_errors = 0
+_reaper_last_sweep_monitored = 0.0
+
+
+def _project_by_board_slug(slug: str) -> dict | None:
+    """Project row owned by *slug*, or None when there is none / DB unreachable."""
+    try:
+        c = db._conn()
+        try:
+            row = c.execute(
+                "SELECT * FROM projects WHERE board_slug=? ORDER BY id DESC LIMIT 1",
+                (slug,),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            c.close()
+    except Exception:
+        return None
+
+
+def _board_finalized(slug: str) -> bool:
+    """True when a project row for *slug* reached a launch-terminal state.
+
+    A finalized launch is over (its credit was kept or refunded, the worker
+    swarm was sealed) — the reaper must NOT keep re-dispatching it. The stale
+    ``running`` corpses of a finalized board hold the host-level kanban cap
+    forever (``kanban.max_in_progress``) and starve every subsequent launch.
+    """
+    proj = _project_by_board_slug(slug)
+    if proj is None:
+        return False
+    if proj.get("launch_refunded"):
+        return True
+    return (proj.get("launch_status") or "").strip() in _REAPER_TERMINAL_STATUSES
+
+
+def _demo_lifecycle_sweep() -> None:
+    """Auto-close and recycle the throwaway ``flux-demo-*`` boards.
+
+    Session 3 demo hygiene:
+      * a demo board still running past ``_DEMO_MAX_RUNTIME_S`` (10 min) is
+        sealed (kills its workers, drops the durable seal marker) — a stuck or
+        hung demo must not hold the kanban concurrency budget;
+      * a sealed demo board aged past ``_DEMO_WORKSPACE_TTL_S`` (24 h) has its
+        workspaces deleted to reclaim disk.
+
+    Both are idempotent (seal marker + age checks) and audited. Best-effort:
+    a single board's failure never raises out of the reaper loop.
+    """
+    now = time.time()
+    boards_root = Path(hc.HERMES_HOME) / "kanban" / "boards"
+    try:
+        if not boards_root.is_dir():
+            return
+        for entry in boards_root.iterdir():
+            if not (entry.is_dir() and entry.name.startswith("flux-demo-")):
+                continue
+            slug = entry.name
+            try:
+                age_s = now - entry.stat().st_mtime
+                if age_s < 0:
+                    age_s = 0
+                if not hc.board_is_sealed(slug) and age_s > _DEMO_MAX_RUNTIME_S:
+                    hc.seal_board(slug, reason="demo max runtime")
+                    audit.audit("demo.autoseal", slug=slug, age=int(age_s), outcome="ok")
+                if age_s > _DEMO_WORKSPACE_TTL_S:
+                    if hc.delete_demo_board(slug):
+                        audit.audit("demo.cleanup", slug=slug, age=int(age_s), outcome="ok")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _reconcile_boards_once() -> None:
+    try:
+        boards = hc.list_boards()
+    except Exception:
+        return
+    now = time.time()
+    for b in boards or []:
+        slug = (b or {}).get("slug")
+        if not slug:
+            continue
+        if now - _reaper_last.get(slug, 0.0) < _REAPER_MIN_GAP_S:
+            continue
+        # A project-finalized board (stuck/refunded/errored) or a board sealed
+        # at launch finalization is operator-FINAL: it must never be re-armed.
+        # Re-dispatching it would resurrect dead workers, keep its 'running'
+        # rows inside the host concurrency budget forever, and starve every new
+        # launch (the endless "waiting for dependency" -> no_progress -> refund
+        # loop observed on stuck boards).
+        if _board_finalized(slug) or hc.board_is_sealed(slug):
+            continue
+        # Stale-worker sweep: a dead worker's PID can linger beyond the claim
+        # TTL, so proactively kill quiet runners and park their tasks as
+        # blocked before the dispatch pass re-spawns them.
+        try:
+            hc.kill_stale_workers(slug)
+        except Exception:
+            pass
+        # Transient-block recovery: a dead worker (provider 429 / outage) parks
+        # its task as blocked, which is otherwise terminal.  Re-promote blocked
+        # tasks on EVERY board first (including one whose agents are ALL
+        # blocked — otherwise ``board_has_unfinished_work`` skips it forever),
+        # so the dispatch pass can re-spawn workers once the provider recovers.
+        # Bounded and idempotent; Hermes' own parent-gating (``recompute_ready``)
+        # still prevents anything from running before its dependencies complete.
+        try:
+            hc.bump_blocked_to_ready(slug)
+        except Exception:
+            pass
+        # Only boards that still have unfinished AGENT work need a tick.
+        if not hc.board_has_unfinished_work(slug):
+            continue
+        try:
+            hc.dispatch(slug, max_spawn=_REAPER_MAX_SPAWN, blocking=False)
+            _reaper_last[slug] = time.time()
+        except Exception:
+            # Tolerate a transient board error; retry next sweep.
+            pass
+
+
+def _reaper_loop() -> None:
+    """Circuit-broken reaper: reconcile boards + demo lifecycle + alerting.
+
+    Consecutive unfiltered exceptions trip a 300s cooldown (audited) instead
+    of retrying every 30s, so a systemic outage (KMS/provider) doesn't churn
+    the fleet. A healthy sweep resets the breaker.
+    """
+    global _reaper_consecutive_errors
+    while _REAPER_ENABLED:
+        try:
+            _reconcile_boards_once()
+            _reaper_consecutive_errors = 0
+        except Exception as exc:
+            _reaper_consecutive_errors += 1
+            try:
+                audit.audit("reaper.error", outcome="error",
+                            error=str(exc)[:1024],
+                            consecutive=_reaper_consecutive_errors)
+            except Exception:
+                pass
+            if _reaper_consecutive_errors >= 3:
+                time.sleep(_REAPER_ERROR_BACKOFF_S)
+                _reaper_consecutive_errors = 0
+        try:
+            _demo_lifecycle_sweep()
+        except Exception:
+            pass
+        try:
+            _reaper_monitor_tick()
+        except Exception:
+            pass
+        time.sleep(_REAPER_INTERVAL_S)
+
+
+def _reaper_monitor_tick() -> None:
+    """Throttled health-snapshot alerting wired into the reaper cadence."""
+    global _reaper_last_sweep_monitored
+    now = time.time()
+    if now - _reaper_last_sweep_monitored < 60:
+        return
+    _reaper_last_sweep_monitored = now
+    try:
+        from monitoring import alert_if_unhealthy
+        alert_if_unhealthy()
+    except Exception:
+        pass
 
 
 # ---------- auth dependency ----------
@@ -400,6 +886,23 @@ class PasswordChangeIn(BaseModel):
     new: str = Field(max_length=4096)
 
 
+class AccountUpdateIn(BaseModel):
+    """CCPA/CPRA rectification: edit the display name on the account."""
+    name: str = Field(min_length=1, max_length=80)
+
+
+class AdmtOptInIn(BaseModel):
+    """ADMT opt-in body: the user re-read the current pre-use notice."""
+    acknowledge: bool = False
+    last_updated: str = Field(default="", max_length=40)
+
+
+class HumanReviewUpdateIn(BaseModel):
+    """Admin resolution of a human-review request."""
+    status: str = Field(min_length=1, max_length=20)
+    reviewer_notes: str = Field(default="", max_length=2000)
+
+
 class ResetRequestIn(BaseModel):
     email: str
 
@@ -420,7 +923,8 @@ class ProjectCreate(BaseModel):
 def index(request: Request):
     base = os.environ.get("FLUXSWARM_PUBLIC_BASE_URL", "").strip().rstrip("/")
     return templates.TemplateResponse(request=request, name="index.html",
-                                      context={"title": "FluxSwarm", "canonical": base + "/" if base else ""})
+                                      context={"title": "FluxSwarm", "canonical": base + "/" if base else "",
+                                               "csp_nonce": request.state.csp_nonce})
 
 
 @app.get("/api/plans")
@@ -439,7 +943,7 @@ def api_squad():
 
 
 @app.get("/api/demo/launch")
-def api_demo_launch(request: Request):
+def api_demo_launch(request: Request, goal: str = "Build a sample FastAPI notes API with tests and CI/CD (DEMO)"):
     """Pre-seeded instant demo: launches a sample swarm under the demo user.
 
     Returns immediately; the dispatcher pass runs in a background thread so the
@@ -449,30 +953,215 @@ def api_demo_launch(request: Request):
     A per-IP burst cap prevents anonymous abuse (each launch runs a real,
     compute-costly Hermes swarm); a durable daily cap bounds total cost per
     bucket and an operator kill-switch can halt ALL demo/cost-bearing surfaces.
+
+    Session 2 hardening: the demo surface is ALSO bounded by (a) 1 launch per
+    IP per hour and (b) 20 launches/day globally (AR/EN 429 details), and the
+    runtime comes from the demo provider pool (free-tier) — OpenRouter free is
+    no longer a production default. An opted-out (ADMT) user is refused.
     """
     if _operator_maintenance():
         raise HTTPException(status_code=503, detail="الخدمة في صيانة مؤقتة — حاول لاحقاً")
-    if not limiter.ip_allowed(_client_ip(request)):
+    demo_user = _demo_user(request)
+    if demo_user and db.get_admt_opt_out(demo_user["id"]):
+        raise HTTPException(status_code=403,
+                            detail="ADMT opt-out active. Human review required.")
+    ip = _client_ip(request)
+    if not limiter.ip_allowed(ip):
         raise HTTPException(status_code=429, detail="محاولات كثيرة جداً — انتظر قليلاً")
+    if not limiter.check(f"demo:ip:{ip}", _DEMO_IP_MAX, _DEMO_IP_WINDOW):
+        raise HTTPException(status_code=429, detail=_DEMO_LIMIT_DETAILS["ip"])
+    if not limiter.check("demo:global", _DEMO_GLOBAL_MAX, _DEMO_GLOBAL_WINDOW):
+        raise HTTPException(status_code=429, detail=_DEMO_LIMIT_DETAILS["global"])
     if db.bump_demo_usage("anon", _today()) > _DEMO_DAILY_CAP:
-        raise HTTPException(status_code=429, detail="تجاوزت حد الاستخدام التجريبي اليومي")
+        raise HTTPException(status_code=429, detail={
+            "error": "demo_daily_limit",
+            "message": {
+                "en": "Daily demo allowance used up. Sign up for unlimited access.",
+                "ar": "استهلكت حصتك اليومية من التجارب. سجّل للوصول غير المحدود.",
+            },
+            "retry_after_seconds": 86400,
+            "upgrade_url": "/pricing",
+        })
     demo = db.get_user_by_id(1) or db.get_user_by_ref("demo")
     if demo is None:
         # db.seed_demo() runs at import, but guard anyway: a missing demo user
         # must not crash the endpoint (it would 500 on `demo.get(...)`).
         return {"error": "demo_user_missing", "demo": True}
     plan = demo.get("plan", "demo")
-    goal = "Build a sample FastAPI notes API with tests and CI/CD (DEMO)"
+    goal = (goal or "").strip() or "Build a sample FastAPI notes API with tests and CI/CD (DEMO)"
+    goal = sanitize_goal(goal)
     slug = "flux-demo-" + str(int(time.time()))
     hc.ensure_board(slug)
-    # The Demo surface is the explicit Free opt-in: pin the free hosted runtime
-    # even on a production deployment — the free tier is never a silent default.
-    free_runtime = {hc.PROVIDER_OPENCODE_FREE: "free"}
-    swarm = hc.launch_swarm(slug, goal, provider_keys=free_runtime)
-    _fire_dispatch(slug, plan, free_runtime)
+    # Session 2: pick a healthy demo provider (free pool) first; fall back to
+    # the operator-configured runtime. The pool result is applied as an
+    # ephemeral launch-pin on this request's process env, exactly like an
+    # operator default would be, then restored.
+    pool_pick = provider_pool.pick_demo_provider()
+    prev_provider = os.environ.get("FLUXSWARM_DEFAULT_PROVIDER")
+    prev_model = os.environ.get("FLUXSWARM_DEFAULT_MODEL")
+    if pool_pick:
+        os.environ["FLUXSWARM_DEFAULT_PROVIDER"] = provider_pool.resolve_provider_key(pool_pick["provider"])
+        os.environ["FLUXSWARM_DEFAULT_MODEL"] = pool_pick["model"]
+    try:
+        swarm = hc.launch_swarm(slug, goal, provider_keys=None)
+        _fire_dispatch(slug, plan, None)
+    finally:
+        if pool_pick:
+            for name, saved in (("FLUXSWARM_DEFAULT_PROVIDER", prev_provider),
+                                ("FLUXSWARM_DEFAULT_MODEL", prev_model)):
+                if saved is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = saved
     audit.audit("demo.launch", uid=demo["id"] if demo else None, ip="internal",
-                outcome="ok", slug=slug, plan=plan)
+                outcome="ok", slug=slug, plan=plan,
+                provider=pool_pick["provider"] if pool_pick else None)
     return {"slug": slug, "root_id": swarm.root_id, "demo": True}
+
+
+@app.get("/api/demo/status")
+def api_demo_status(request: Request):
+    """Demo quota spender-facing status (per-IP 1/hour + global 20/day)."""
+    ip = _client_ip(request)
+    g_total = _DEMO_GLOBAL_MAX
+    g_used = limiter.count("demo:global", _DEMO_GLOBAL_WINDOW)
+    ip_used = limiter.count(f"demo:ip:{ip}", _DEMO_IP_WINDOW)
+    return {
+        "daily_quota_remaining": max(0, g_total - g_used),
+        "daily_quota_total": g_total,
+        "your_ip_limit_remaining": max(0, _DEMO_IP_MAX - ip_used),
+        "your_ip_limit_window": f"{_DEMO_IP_WINDOW}s",
+        "next_reset": _next_utc_midnight(),
+    }
+
+
+@app.get("/api/demo/micro")
+def api_demo_micro(request: Request, goal: str = "Build a todo app"):
+    """Planner-only micro demo: 1 agent, 1-2 calls' worth of work, ~seconds.
+
+    Cheap by design so many IPs can try it; still bounded per IP (5/hour) and
+    globally (200/day). Returns a deterministic plan locally — the actual demo
+    launch consumes the provider pool.
+    """
+    demo_user = _demo_user(request)
+    if demo_user and db.get_admt_opt_out(demo_user["id"]):
+        raise HTTPException(status_code=403,
+                            detail="ADMT opt-out active. Human review required.")
+    ip = _client_ip(request)
+    if not limiter.check(f"demo:micro:ip:{ip}", _DEMO_MICRO_IP_MAX, _DEMO_IP_WINDOW):
+        raise HTTPException(status_code=429, detail=_DEMO_LIMIT_DETAILS["ip"])
+    if not limiter.check("demo:micro:global", _DEMO_MICRO_GLOBAL_MAX, _DEMO_GLOBAL_WINDOW):
+        raise HTTPException(status_code=429, detail=_DEMO_LIMIT_DETAILS["global"])
+    audit.audit("demo.micro", ip=ip, outcome="ok")
+    return _micro_plan(goal)
+
+
+def _micro_plan(goal: str) -> dict:
+    """Deterministic planner-only output (no provider call; stays < 1 API cost)."""
+    g = (goal or "").lower()
+    if any(k in g for k in ("api", "web", "site", "saas", "dashboard", "billing",
+                            "panel", "analytics", "تطبيق", "خدمة")):
+        stack = "FastAPI + PostgreSQL"
+    elif any(k in g for k in ("data", "sql", "database", "postgres", "بيانات", "قاعدة")):
+        stack = "FastAPI + SQLite + Task queue"
+    elif any(k in g for k in ("todo", "script", "cli", "سكربت")):
+        stack = "Flask + SQLite"
+    else:
+        stack = "Flask + SQLite"
+    snippet = (goal or "your goal").strip()[:80]
+    return {
+        "plan": (
+            f"1. Model the {snippet} domain and API surface. "
+            "2. Build the CRUD/steps with tests first (TDD). "
+            "3. Containerize with a hardened runner. "
+            "4. Iterate via the swarm review pass."
+        ),
+        "tech_stack": stack,
+        "estimated_time": "2 hours",
+    }
+
+
+@app.get("/api/demo/progress/{board_slug}")
+def api_demo_progress(request: Request, board_slug: str):
+    """Live per-board demo progress (agents, estimated time, logs links).
+
+    Demo (``flux-demo-*``) boards are public (shared showcase); any other slug
+    must belong to the caller (403/401 otherwise). Returns an agent array
+    derived from the board's REAL persisted task states — statuses are
+    ``done/running/pending/blocked`` and ``progress`` is 100 only for a
+    terminal task; nothing is fabricated.
+    """
+    user = get_current_user_optional(request)
+    if not board_slug.startswith("flux-demo-") and not (
+            user and board_slug.startswith(f"u{user['id']}-")):
+        raise HTTPException(status_code=403, detail="غير مصرّح بالوصول لهذه اللوحة")
+    try:
+        tasks = hc.list_tasks(board_slug)
+    except Exception:
+        raise HTTPException(status_code=404, detail="اللوحة غير موجودة")
+    agents = []
+    for t in tasks or []:
+        assignee = (t.get("assignee") or "").strip().lower()
+        if not assignee or assignee == "fluxswarm":
+            continue
+        state = (t.get("state") or "").strip()
+        if state in ("done", "blocked"):
+            status, progress = state, 100
+        elif state == "running":
+            status, progress = "running", 0
+        else:
+            status, progress = "pending", 0
+        agents.append({
+            "name": t.get("role_name") or t.get("assignee_display") or assignee,
+            "status": status,
+            "progress": progress,
+            "task_id": t.get("id"),
+            "logs_url": f"/api/demo/logs/{board_slug}/{t.get('id')}",
+        })
+    unfinished = [a for a in agents if a["status"] not in ("done", "blocked")]
+    board_dir = Path(hc.HERMES_HOME) / "kanban" / "boards" / board_slug
+    age_s = 0
+    try:
+        if board_dir.is_dir():
+            age_s = max(0, time.time() - board_dir.stat().st_mtime)
+    except Exception:
+        age_s = 0
+    estimated = 0 if not unfinished else max(0, _DEMO_MAX_RUNTIME_S - int(age_s))
+    return {
+        "status": "running" if unfinished else ("sealed" if hc.board_is_sealed(board_slug) else "done"),
+        "agents": agents,
+        "estimated_remaining_seconds": estimated,
+    }
+
+
+@app.get("/api/demo/logs/{board_slug}/{task_id}")
+def api_demo_logs(request: Request, board_slug: str, task_id: str):
+    """Operational event log for one board task (heartbeats/state changes).
+
+    Demo boards public; owned boards require the owner. Returns [] for a
+    private/unknown task — never crashes on a missing DB row.
+    """
+    user = get_current_user_optional(request)
+    if not board_slug.startswith("flux-demo-") and not (
+            user and board_slug.startswith(f"u{user['id']}-")):
+        raise HTTPException(status_code=403, detail="غير مصرّح بالوصول لهذه اللوحة")
+    try:
+        logs = hc._task_activity_events(board_slug, task_id)
+    except Exception:
+        logs = []
+    return {"board": board_slug, "task_id": task_id,
+            "status": "ok", "logs": logs}
+
+
+@app.get("/demo", response_class=HTMLResponse)
+def demo_landing(request: Request):
+    """Public demo landing page (AR-first, mirrors /): project description ->
+    free launch (1/hour) -> live progress via /api/demo/progress/{slug}."""
+    base = os.environ.get("FLUXSWARM_PUBLIC_BASE_URL", "").strip().rstrip("/")
+    return templates.TemplateResponse(
+        request=request, name="demo.html",
+        context={"title": "جرب FluxSwarm مجاناً", "canonical": base + "/demo" if base else "",
+                 "csp_nonce": request.state.csp_nonce})
 
 
 # ---------- auth ----------
@@ -660,11 +1349,21 @@ def api_projects(user: dict = Depends(get_current_user)):
 def api_create_project(payload: ProjectCreate, request: Request,
                        user: dict = Depends(get_current_user)):
     # Basic input validation (goal drives a subprocess launch).
-    goal = (payload.goal or "").strip()
+    goal = sanitize_goal(payload.goal)
     if not goal:
         raise HTTPException(status_code=400, detail="اكتب هدف البناء")
-    if len(goal) > 4000:
+    if len(payload.goal or "") > 4000:
         raise HTTPException(status_code=400, detail="الهدف أطول من الحد المسموح")
+    # CCPA/CPRA ADMT opt-out: manual project creation ONLY — no AI agents are
+    # spawned, no credit is debited, and dispatch stays blocked for the user.
+    if db.get_admt_opt_out(user["id"]):
+        slug = make_project_slug(user["id"])
+        pid = db.add_project(user["id"], slug, payload.name or "مشروع", goal)
+        audit.audit("project.create", uid=user["id"], email=user["email"],
+                    ip=_client_ip(request), outcome="ok", slug=slug,
+                    plan=user["plan"], mode="manual_no_ai")
+        return {"slug": slug, "project_id": pid, "manual": True,
+                "note": "ADMT opt-out active: project created manually (no AI agents)."}
     # Credit gating: each launch costs 1 credit.
     if not db.deduct_credit(user["id"]):
         raise HTTPException(status_code=402, detail="نفدت الرصيد — حدّث باقتك أو استخدم رمز إحالة")
@@ -720,8 +1419,24 @@ def api_dispatch(slug: str, dry_run: bool = False, user: dict = Depends(get_curr
         raise HTTPException(status_code=403, detail="غير مصرّح")
     if _operator_maintenance():
         raise HTTPException(status_code=503, detail="الخدمة في صيانة مؤقتة — حاول لاحقاً")
+    # CCPA/CPRA ADMT opt-out: the user forfeits AI-assisted dispatch.
+    if db.get_admt_opt_out(user["id"]):
+        raise HTTPException(status_code=403,
+                            detail="ADMT opt-out active. Human review required.")
     if slug.startswith("flux-demo-") and db.bump_demo_usage(f"u{user['id']}", _today()) > _DEMO_DAILY_CAP:
-        raise HTTPException(status_code=429, detail="تجاوزت حد الاستخدام التجريبي اليومي")
+        raise HTTPException(status_code=429, detail={
+            "error": "demo_daily_limit",
+            "message": {
+                "en": "Daily demo allowance used up. Sign up for unlimited access.",
+                "ar": "استهلكت حصتك اليومية من التجارب. سجّل للوصول غير المحدود.",
+            },
+            "retry_after_seconds": 86400,
+            "upgrade_url": "/pricing",
+        })
+    # Never re-arm an operator-final board: a sealed / finalized launch must not
+    # be re-dispatched (its workers are dead and it would hold the host-cap).
+    if _board_finalized(slug) or hc.board_is_sealed(slug):
+        raise HTTPException(status_code=409, detail="اللوحة منتهية/مختومة — لا يمكن إعادة الإطلاق")
     try:
         return hc.dispatch(slug, max_spawn=db.PLANS[user["plan"]]["parallel"], dry_run=dry_run, timeout_s=hc.DISPATCH_TIMEOUT_S)
     except Exception as e:
@@ -733,10 +1448,10 @@ def api_dispatch(slug: str, dry_run: bool = False, user: dict = Depends(get_curr
 def api_list_keys(user: dict = Depends(get_current_user)):
     # Return masked info only; never the raw token.
     data = {}
-    for prov in ("anthropic", "openai", "gemini", "kimi", "opencode-free"):
+    for prov in hc.SUPPORTED_PROVIDERS:
         tok = vault.get_user_key(user["id"], prov)
         if tok:
-            data[prov] = vault.mask_key(tok) if tok != "free" else "opencode-free (مجاني)"
+            data[prov] = vault.mask_key(tok)
     return {"keys": data, "byok_active": bool(data)}
 
 
@@ -744,18 +1459,10 @@ def api_list_keys(user: dict = Depends(get_current_user)):
 def api_set_key(payload: dict, request: Request, user: dict = Depends(get_current_user)):
     prov = (payload.get("provider") or "").lower()
     tok = (payload.get("token") or "").strip()
-    # Supported: real BYOK providers (need a key) + the free hosted provider
-    # (opencode-free) which the user can enable explicitly without any key.
-    if prov not in ("anthropic", "openai", "gemini", "kimi", "opencode-free"):
+    # Phase 3: real BYOK providers only — including the OpenRouter free tier,
+    # which still requires a user key + agreement (no anonymous free provider).
+    if prov not in hc.SUPPORTED_PROVIDERS:
         raise HTTPException(status_code=400, detail="مزوّد غير مدعوم")
-    if prov == "opencode-free":
-        if tok and tok.lower() not in ("free", "on", "true", ""):
-            raise HTTPException(status_code=400, detail="المزوّد المجاني لا يحتاج مفتاحاً")
-        # Store a sentinel so _user_provider_keys picks the free model.
-        vault.set_user_key(user["id"], "opencode-free", "free")
-        audit.audit("keys.set", uid=user["id"], email=user["email"], ip=_client_ip(request),
-                    outcome="ok", provider="opencode-free")
-        return {"ok": True, "provider": prov, "masked": "opencode-free (مجاني)"}
     if not tok:
         raise HTTPException(status_code=400, detail="المفتاح فارغ")
     vault.set_user_key(user["id"], prov, tok)
@@ -764,22 +1471,46 @@ def api_set_key(payload: dict, request: Request, user: dict = Depends(get_curren
     return {"ok": True, "provider": prov, "masked": vault.mask_key(tok)}
 
 
-def _user_provider_keys(user: dict) -> dict:
-    """Collect the user's BYOK keys so THEY pay for tokens and the squad gets a
-    higher-quality model than the free default (Claude/GPT/Gemini/Kimi).
+# ---------- provider agreements (Phase 3 BYOK gate) ----------
+@app.get("/api/agreements")
+def api_list_agreements(user: dict = Depends(get_current_user)):
+    """Which provider term-versions the user has accepted (for the BYOK UI)."""
+    return {
+        "required_versions": {p: hc.PROVIDER_AGREEMENT_VERSION for p in hc.SUPPORTED_PROVIDERS},
+        "accepted": db.provider_agreements(user["id"]),
+    }
 
-    Available on ALL plans (including demo): bringing a paid key is how a user
-    tests stronger code quality at their own token cost — FluxSwarm pays nothing.
-    If the user enabled 'opencode-free', we return that sentinel so the squad
-    pins to the free hosted model instead of needing a paid key.
+
+@app.post("/api/agreements/{provider}")
+def api_accept_agreement(provider: str, request: Request, user: dict = Depends(get_current_user)):
+    """Record the user's acceptance of a provider's terms before launch."""
+    prov = provider.strip().lower()
+    if prov not in hc.SUPPORTED_PROVIDERS:
+        raise HTTPException(status_code=400, detail="مزوّد غير مدعوم")
+    first = db.agree_provider(user["id"], prov, hc.PROVIDER_AGREEMENT_VERSION)
+    audit.audit("agreements.accept", uid=user["id"], email=user["email"], ip=_client_ip(request),
+                outcome="ok", provider=prov, version=hc.PROVIDER_AGREEMENT_VERSION)
+    return {"ok": True, "provider": prov, "version": hc.PROVIDER_AGREEMENT_VERSION,
+            "first_accept": first}
+
+
+def _user_provider_keys(user: dict) -> dict:
+    """Collect the user's BYOK keys so THEY pay for tokens (Claude/GPT/Gemini/Kimi/OpenRouter).
+
+    Available on ALL plans (including demo): bringing a provider key (paid, or
+    the free OpenRouter tier) is how a user tests different runtimes at their
+    own token cost — FluxSwarm pays nothing for those.
+    Phase 3 agreement gate: a key is only used once the user has accepted that
+    provider's terms (POST /api/agreements/<provider>); unagreed providers are
+    excluded so the runtime resolver fails fast with a clear, actionable error.
     """
     keys = {}
-    for prov in ("anthropic", "openai", "gemini", "kimi"):
+    for prov in hc.SUPPORTED_PROVIDERS:
+        if not (hasattr(db, "has_provider_agreement") and db.has_provider_agreement(user["id"], prov)):
+            continue
         tok = vault.get_user_key(user["id"], prov)
         if tok:
             keys[prov] = tok
-    if vault.get_user_key(user["id"], "opencode-free") == "free":
-        keys["opencode-free"] = "free"
     return keys
 
 
@@ -842,7 +1573,16 @@ async def api_payments_webhook(request: Request):
     signature arrives; a client redirecting back is never proof of payment.
 
     Idempotent: a replayed event_id returns 200 without double-granting.
+
+    Rate-limited per client IP (10 req/min) to blunt credential-stuffing /
+    blind replays against the signature check; a burst still cannot bypass the
+    signature requirement, it just bounds the CPU the verifier spends on junk.
     """
+    ip = _client_ip(request)
+    if not limiter.check(f"webhook:{ip}", 10, 60):
+        audit.audit("payments.webhook", outcome="fail", reason="rate_limited",
+                    ip=ip)
+        raise HTTPException(status_code=429, detail="webhook rate limit exceeded")
     gw = payments_mod.get_gateway()
     if not getattr(gw, "operative", False):
         audit.audit("payments.webhook", outcome="fail", reason="gateway_not_configured",
@@ -1125,10 +1865,13 @@ def privacy_page():
     body = """<h1>سياسة الخصوصية (Privacy Policy)</h1>
 <p>تُجمع البيانات التالية لتشغيل الخدمة فقط: البريد الإلكتروني والاسم وكلمات المرور (مشفّرة Argon2id) ومفاتيح مزوّدي الذكاء الاصطناعي (مشفّرة فورياً بـ Fernet) وأهداف المشاريع ومخرجاتها وسجلُّ الاستخدام والتدقيق ومعلومات الدفع الأساسية.</p>
 <p>لا تُباع البيانات ولا تُستخدم في الإعلانات. نشاركها فقط: (1) مع معالج الدفع Paddle (تاجر السجلّ) لإتمام المعاملات، و(2) مع مزوّد الذكاء الاصطناعي الذي تختاره أنت عند تشغيل السرب (BYOK) لتنفيذ هدفك، وفق شروط ذلك المزوّد. لا تدرب المنصة على بياناتك.</p>
-<p>حقوقك (CCPA/CPRA): حق الاطلاع على بياناتك عبر <code>GET /api/account/export</code> (أو من لوحة الحساب)، وحق التصحيح والحذف الكامل عبر <code>DELETE /api/account</code> وحذف مفاتيحك فوراً، ولن تمرّ طلبات التصحيح الأخرى وسيلة <a href="mailto:{c}">{c}</a>. سياق بيانات التخزين: عند الإطلاق تُستضاف الخوادم في أمريكا الشمالية؛ اخترنا هذا الموقع لحوسبة الدفع والتشفير — راجع/ي «النقل الدولي» في النسخة الإنجليزية.</p>
+<p>حقوقك (CCPA/CPRA): حق الاطلاع على بياناتك عبر <code>GET /api/account/export</code> (أو من لوحة الحساب)، وحق التصحيح عبر <code>PATCH /api/account</code> (تعديل الاسم المعروض)، وحق الحذف الكامل عبر <code>DELETE /api/account</code> وحذف مفاتيحك فوراً، ولن تمرّ طلبات التصحيح الأخرى وسيلة <a href="mailto:{c}">{c}</a>. سياق بيانات التخزين: عند الإطلاق تُستضاف الخوادم في أمريكا الشمالية؛ اخترنا هذا الموقع لحوسبة الدفع والتشفير — راجع/ي «النقل الدولي» في النسخة الإنجليزية.</p>
 <p>سجلّ التدقيق الأمني (Append-only) مستبعد من الحذف: يُحتفظ به للأغراض الأمنية والتحقيقية فقط ولا يستخدم تسويقياً ولا للتدريب، وقد تتضمن مدخلاته البريد الإلكتروني وعنوان IP تلقائياً لأغراض التحقيق في إساءة الاستخدام، وهي غير قابلة للمحو. الأثاث الناتج عن تشغيل السرب (ملفات المنتج المولّدة على القرص) تُحذف عند حذف الحساب في الإصدارات اللاحقة؛ إلى حينه يمكنك طلب الحذف عبر البريد. تفاصيل الملفات المنقولة وعوامل الاحتفاظ موجودة في صفحة <a href="/cookies">ملفات تعريف الارتباط والتتبّع</a> واسترداد الأموال في <a href="/refund">سياسة الاسترداد والرصيد</a>.</p>
 <p>انات المملكة المتحدة والاتحاد الأوروبي (إضافة بريطانية/أوروبية): الأساس القانوني للمعالجة هو تنفيذ العقد، والمصلحة المشروعة (أمان النظام ومكافحة الاحتيال)، والالتزام القانوني (سجلات الفوترة). حقوقك تشمل الوصول والتصحيح والمحو ونقل البيانات والاعتراض على المعالجة وشكوى لدى سلطة حماية البيانات (في بريطانيا: مكتب مفوّض المعلومات). قد تُنقل بياناتك إلى مزوّدي الذكاء الاصطناعي خارج المملكة/الاتحاد وفق شروطهم؛ ولا ننقلها لأغراض تسويقية.</p>"""
     body = body.format(c=contact)
+    body += '<h2>الذكاء الاصطناعي — الإفصاح والتحقق (ADMT)</h2><p>عند إطلاق مشروع بمساعدة آليّة، تحلل المنصة هدفك عبر سرب من الوكلاء (المخطط، المهندس المعماري، ديفأوبس، TDD، المراجع، المنفّذ) وتولّد كوداً مسوّداً يتطلب مراجعتك. لديك الحق في الانسحاب من اتخاذ القرار الآلي (ADMT) في أي وقت من حسابك — يوقف ذلك كل عمليات الإطلاق الآلي مع بقاء الإنشاء اليدوي للمشاريع متاحاً — وإعادة التفعيل بعد إعادة الإقرار بالإشعار المحدّث. الإشعار الكامل: <a href="/admt-notice">صفحة إشعار ADMT</a>.</p>'
+    body += '<h2>مزوّدو المعالجة (بيان)</h2><p>يُرسل وصف مشروعك فقط إلى مزوّد الذكاء الاصطناعي الذي تختاره لتنفيذ هدفك وفق شروط ذلك المزوّد: <a href="https://cloud.google.com/terms/data-processing-addendum">Google DPA</a> · <a href="https://www.anthropic.com/legal/data-processing-addendum">Anthropic DPA</a> · <a href="https://openai.com/policies/data-processing-addendum/">OpenAI DPA</a>. لا ندرّب النماذج على بياناتك.</p>'
+    body += '<h2>الاحتفاظ بالبيانات</h2><p>يُحتفظ بالبيانات القابلة للتحديد 90 يوماً بعد حذف الحساب لأغراض الامتثال والتدقيق؛ سجلّ التدقيق مستبعد من الحذف كما هو موصوف أعلاه. التواصل بخصوص ADMT: <a href="mailto:privacy@fluxswarm.ai">privacy@fluxswarm.ai</a>.</p>'
     body += _legal_entity_block("ar")
     _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
     body += f'<p>أسئلة: <a href="mailto:{contact}">{contact}</a>'
@@ -1142,10 +1885,13 @@ def privacy_page_en():
     body = """<h1>Privacy Policy</h1>
 <p>We process only the data needed to operate the service: email, name, password (Argon2id), user-supplied AI provider keys (Fernet-encrypted), project goals and generated outputs, usage/audit records, and minimal payment metadata.</p>
 <p>We do not sell your data and do not use it for ads. We share it only (1) with Paddle (merchant of record) to complete transactions and (2) with the AI provider of your choice (BYOK) to execute your goal under that provider's terms. We do not train on your data.</p>
-<p>Your rights (CCPA/CPRA): access via <code>GET /api/account/export</code>, rectification and full erasure via <code>DELETE /api/account</code> (including immediate key deletion). Other correction requests: <a href="mailto:{c}">{c}</a>. On launch, data is hosted on servers in North America.</p>
+<p>Your rights (CCPA/CPRA): access via <code>GET /api/account/export</code>, rectification via <code>PATCH /api/account</code> (update your display name), and full erasure via <code>DELETE /api/account</code> (including immediate key deletion). Other correction requests: <a href="mailto:{c}">{c}</a>. On launch, data is hosted on servers in North America.</p>
 <p>The security audit log is append-only and excluded from erasure: it is retained for security/investigation purposes only, never for marketing or training; its entries may include your email address and IP address automatically.</p>
 <p>UK/EU addendum: lawful bases are performance of the contract, legitimate interests (system security, fraud prevention) and legal obligation (billing records). Your rights include access, rectification, erasure, portability, objection, and complaint to your supervisory authority (in the UK: the ICO). Your data may be transferred to the AI provider you choose, outside the UK/EU, under that provider's terms; we do not transfer it for marketing. Cookies and tracking are described on <a href="/cookies-en">/cookies</a>; refunds and credits on <a href="/refund-en">/refund</a>.</p>"""
     body = body.format(c=contact)
+    body += '<h2>AI Decision-Making Transparency (ADMT)</h2><p>An AI-assisted launch decomposes your goal through a squad of agents (Planner, Architect, DevOps, TDD, Reviewer, Builder) and generates draft code that requires your review. You can <strong>opt out of ADMT</strong> at any time from your account — this disables all AI-assisted launches while manual project creation remains available — and opt back in only after re-acknowledging the current notice. Full disclosure: <a href="/admt-notice-en">ADMT Notice page</a>.</p>'
+    body += '<h2>Processing providers</h2><p>Only your project description is sent to the AI provider you choose to execute your goal, subject to that provider\u2019s terms: <a href="https://cloud.google.com/terms/data-processing-addendum">Google DPA</a> \u00b7 <a href="https://www.anthropic.com/legal/data-processing-addendum">Anthropic DPA</a> \u00b7 <a href="https://openai.com/policies/data-processing-addendum/">OpenAI DPA</a>. We do not train models on your data.</p>'
+    body += '<h2>Data retention</h2><p>Identifiable data is retained for 90 days after account deletion for compliance and audit purposes; the audit log remains excluded from erasure as described above. ADMT contact: <a href="mailto:privacy@fluxswarm.ai">privacy@fluxswarm.ai</a>.</p>'
     body += _legal_entity_block("en")
     _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
     body += f'<p>Questions: <a href="mailto:{contact}">{contact}</a>'
@@ -1166,6 +1912,8 @@ def terms_page():
 <h2>تحديد المسؤولية</h2><p>إلى أقصى حد يسمح به القانون، تُقدَّم الخدمة «كما هي» دون ضمانات، وتُحدَّد المسؤولية عن الخدمة ومخرجاتها كما يسمح به القانون؛ ولا يُسقَط ما لا يمكن إسقاطه قانوناً ولا حقوق المستهلك الإلزامية (بما فيها في المملكة المتحدة والاتحاد الأوروبي).</p>
 <h2>القانون الحاكم والاختصاص</h2><p>تخضع هذه الشروط للقانون المعمول به؛ حقوق المستهلك الإلزامية في بلدك لا تتأثر. تُراجع تفاصيل الاختصاص قانونياً مع توسع الخدمة. أسئلة: <a href="mailto:{c}">{c}</a>.</p>"""
     body = body.format(c=contact)
+    body += '<h2>استخدام الذكاء الاصطناعي (ADMT)</h2><p>بإطلاقك مشروعاً بمساعدة آليّة أنت تقرّ الإشعار المسبق (<a href="/admt-notice">إشعار ADMT</a>). يمكنك الانسحاب من ADMT في أي وقت من حسابك مع بقاء الإنشاء اليدوي متاحاً. المراجعة البشرية متاحة عند الطلب وتُنجز خلال 48 ساعة من رفع الطلب.</p>'
+    body += '<h2>المسؤولية عن الكود المولّد آلياً</h2><p>المخرجات المولّدة بالذكاء الاصطناعي مسوّدات تتطلب مراجعتك واختبارها قبل الاستخدام؛ تُقدَّم دون ضمان بأنها خالية من الأخطاء أو مناسبة لكل حالة. تتحمل مسؤولية التحقق النهائي، وفق قيود المسؤولية العامة في هذه الشروط وشروط المزوّد المستخدم.</p>'
     body += _legal_entity_block("ar")
     _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
     body += f'<p>اتصل بنا: <a href="mailto:{contact}">{contact}</a>'
@@ -1210,6 +1958,8 @@ law. If you are a consumer in the UK, EU or another jurisdiction with mandatory
 consumer protections, your rights under that law are not affected. Jurisdiction
 specifics are kept under legal review as the service expands. Questions: <a href="mailto:{c}">{c}</a>.</p>"""
     body = body.format(c=contact)
+    body += '<h2>Use of AI (ADMT)</h2><p>By launching an AI-assisted project you acknowledge the pre-use notice (<a href="/admt-notice-en">ADMT Notice</a>). You may opt out of ADMT at any time from your account while keeping manual project creation. Human review is available on request and is completed within 48 hours of submission.</p>'
+    body += '<h2>AI-generated code liability</h2><p>AI-generated outputs are drafts that require your review and testing before use; they are provided without warranty of correctness or fitness for any particular purpose. Final verification remains your responsibility, subject to the general limitation of liability in these terms and to the terms of the provider used.</p>'
     body += _legal_entity_block("en")
     _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
     body += f'<p>Contact: <a href="mailto:{contact}">{contact}</a>'
@@ -1334,8 +2084,9 @@ def pricing_page():
     body = f"""<h1>Simple pricing, no token meters</h1>
 <p>Every launch costs exactly <strong>1 credit</strong>. Bring your own AI key and
 you pay only your provider's token rate — FluxSwarm charges the flat 1-credit
-coordination fee per launched project and nothing else. No key yet? The default
-free hosted model runs the squad end-to-end too.</p>
+coordination fee per launched project and nothing else. No key yet? The edge
+default runs the squad on the operator-configured model (deployment-wide),
+and the public demo uses the network's configured runtime.</p>
 <div class="plans">{rows}</div>
 <p>Credits are prepaid and never expire; a failed launch is refunded automatically.
 Payments are processed by Paddle (merchant of record), which handles sales tax and
@@ -1363,11 +2114,12 @@ assigned to a real agent crew, watched live on a kanban board:
 <strong>Reviewer</strong> (verify) → <strong>Builder</strong> (merge to output).
 The agents run inside the Hermes execution runtime using the open-source ECC
 skill profiles — you do not need to install or manage either.</p>
-<h2>3. Pick a model — bring a key or use the free one</h2><p>Bring your own AI
+<h2>3. Pick a model — bring a key or use the deployment default</h2><p>Bring your own
 provider key (Anthropic Claude, OpenAI, Gemini or Kimi) for stronger output; your
 key is Fernet-encrypted at rest, injected into the agent process only at launch,
-and never returned by the API. You pay your provider's token price. Without a key,
-the squad runs on a free hosted model included with the service.</p>
+and never returned by the API. You pay your provider's token price, and the
+provider's terms must be accepted once in your keys page before a launch. Without
+a key, the squad runs on the operator-configured default model for the deployment.</p>
 <h2>4. Pick it up from the workspace</h2><p>Generated files land in your project
 workspace, browsable in the UI on the board, ready to push to your own repository.</p>
 <h2>Billing</h2><p>1 credit per launched project across every plan. Credits are
@@ -1389,18 +2141,20 @@ def faq_page():
 specialized agents (Planner, Architect, DevOps, TDD, Reviewer, Builder) plan,
 build, test, verify and assemble it on a live task board, with the generated files
 in your workspace.</p>
-<h2>Does the squad need my AI key?</h2><p>No. A free hosted model is the default, so
-the squad runs end-to-end with no key. Bringing your own key (Anthropic Claude,
+<h2>Does the squad need my AI key?</h2><p>No. Without a key the squad runs on the
+deployment&rsquo;s operator-configured model. Bringing your own key (Anthropic Claude,
 OpenAI, Gemini or Kimi) is optional and lifts output quality; your key pays your
-provider&rsquo;s token rate. Keys are Fernet-encrypted at rest, injected only at
+provider&rsquo;s token rate and requires accepting that provider&rsquo;s terms once in
+your keys page. Keys are Fernet-encrypted at rest, injected only at
 launch, and never returned by the API.</p>
 <h2>What is Hermes? What is ECC?</h2><p>Hermes is the execution runtime that drives
 the board. ECC is an underlying open-source component: the agent skill profiles
 the squad uses. FluxSwarm is the product that orchestrates them; it is not Hermes
 and does not own ECC. Both are required to run a launch.</p>
-<h2>Does running without a key cost me anything?</h2><p>Each launch costs 1 credit.
-The Demo plan starts you with 3 free credits (no card). Credit never pays model
-tokens on the free model — you pay the 1-credit coordination fee only.</p>
+<h2>Does running cost me anything?</h2><p>Each launch costs 1 credit.
+The Demo plan starts you with 3 free credits (no card). Model tokens are paid by
+your own key (BYOK) or by the network&rsquo;s configured provider; every plan pays the
+flat 1-credit coordination fee per launch.</p>
 <h2>How much do paid plans cost?</h2><p>Credit packs, not subscriptions. Starter
 $29/25 credits, Pro $99/120 credits, Scale $299/500 credits (USD; GBP applied at
 checkout by Paddle). Credits never expire. Billing runs through Paddle (merchant
@@ -1483,7 +2237,339 @@ def acceptable_use_page_en():
     return _LEGAL_BASE_EN.format(title="Acceptable Use", body=body)
 
 
-# ---------- compliance: CCPA/CPRA account rights ----------
+# ---------- compliance: CCPA/CPRA ADMT (uses /api/account/* + external review) ----------
+# Pre-use disclosure served before the first AI-assisted launch, per the ADMT
+# transparency requirements. `last_updated` doubles as the notice version a
+# client must echo back when re-reading the notice to opt back in.
+ADMT_NOTICE = {
+    "platform": "FluxSwarm",
+    "admt_types": ["planning", "architecture", "coding", "review", "deployment"],
+    "description": "AI agents assist in generating code based on your description. Outputs are drafts requiring human review.",
+    "logic_summary": "Planner analyzes goal → Architect selects stack → DevOps designs infra → TDD writes tests → Reviewer checks quality → Builder generates code",
+    "human_review_available": True,
+    "opt_out_available": True,
+    "last_updated": "2026-09-04",
+}
+_ADMT_NOTICE_VERSION = ADMT_NOTICE["last_updated"]
+
+# Localized description / logic_summary (AR + EN). Structure stays identical so
+# i18n never changes the API contract.
+_ADMT_NOTICE_L10N = {
+    "en": {
+        "description": ADMT_NOTICE["description"],
+        "logic_summary": ADMT_NOTICE["logic_summary"],
+    },
+    "ar": {
+        "description": "يعمل وكلاء الذكاء الاصطناعي على توليد كود بناءً على وصفك. المخرجات مسوّدات تتطلب مراجعة بشرية.",
+        "logic_summary": "المخطّط يحلّل الهدف ← المهندس المعماري يختار الحزمة التقنية ← ديفأوبس يصمّم البنية التحتية ← TDD يكتب الاختبارات ← المراجع(ة) يفحص الجودة ← المنفّذ يولّد الكود",
+    },
+}
+
+# Canonical agent catalog for the logic-access disclosure (mirrors
+# hc.AGENT_REGISTRY). Decision text is rendered deterministically from the
+# goal's detected signals.
+_ADMT_AGENTS = (
+    {"agent": "ecc-planner", "role": "planning"},
+    {"agent": "ecc-architect", "role": "architecture"},
+    {"agent": "ecc-devops", "role": "deployment"},
+    {"agent": "ecc-tdd", "role": "coding"},
+    {"agent": "ecc-reviewer", "role": "review"},
+    {"agent": "ecc-build-fixer", "role": "deployment"},
+)
+
+
+def _admt_goal_flags(goal: str) -> dict:
+    g = (goal or "").lower()
+    return {
+        "scalability": any(k in g for k in (
+            "scale", "scalab", "traffic", "concurr", "million", "توسع", "ترافيك", "ملايين", "متزامن")),
+        "web_api": any(k in g for k in (
+            "web", "api", "site", "saas", "خدمة", "موقع", "واجهة", "استضافة")),
+        "data": any(k in g for k in (
+            "database", "sql", "postgres", "data", "storage", "قاعدة", "بيانات", "تخزين")),
+    }
+
+
+def _admt_decisions(goal: str) -> list[dict]:
+    """Deterministic per-agent decision record derived from the goal text."""
+    flags = _admt_goal_flags(goal)
+    out = []
+    if flags["scalability"]:
+        out.append({"agent": "ecc-planner",
+                    "decision": "Selected microservices architecture",
+                    "rationale": "Scalability requirement detected in goal"})
+    else:
+        out.append({"agent": "ecc-planner",
+                    "decision": "Selected a modular monolith for this goal",
+                    "rationale": "No explicit scalability requirement detected in goal"})
+    if flags["web_api"] and flags["data"]:
+        stack = "FastAPI + PostgreSQL web service"
+    elif flags["web_api"]:
+        stack = "FastAPI web service"
+    elif flags["data"]:
+        stack = "PostgreSQL-backed service"
+    else:
+        stack = "Simple service with minimal external surface"
+    out.append({"agent": "ecc-architect", "decision": f"Selected {stack}",
+                "rationale": "Requirements detected from the goal's stack and data hints"})
+    out.append({"agent": "ecc-devops",
+                "decision": "Designed containerized deployment with isolated execution",
+                "rationale": "Each squad runs in a sandboxed, network-isolated runtime"})
+    out.append({"agent": "ecc-tdd",
+                "decision": "Wrote tests first, then code to satisfy them",
+                "rationale": "TDD workflow drives every unit from a failing test"})
+    out.append({"agent": "ecc-reviewer",
+                "decision": "Verified generated code against acceptance criteria",
+                "rationale": "Reviewer performs self-evaluation and verification"})
+    out.append({"agent": "ecc-build-fixer",
+                "decision": "Integrated reviewed changes into a buildable result",
+                "rationale": "Builder synthesizes the final MVP from reviewed work"})
+    return out
+
+
+def _project_runtime_info(user: dict) -> dict:
+    """Best-effort (provider, model) for the logic-access disclosure. Never
+    raises for an unconfigured runtime — we disclose what is pinned, or null."""
+    try:
+        model, provider = hc._resolve_runtime(_user_provider_keys(user))
+        if not model and provider:
+            model = hc._operator_model_for(provider)
+        return {"model": model, "provider": provider}
+    except Exception:
+        return {"model": None, "provider": None}
+
+
+def _get_project_row(pid: int) -> dict | None:
+    c = db._conn()
+    try:
+        row = c.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        c.close()
+
+
+def _telegram_send(bot_token: str, chat_id: int, text: str) -> None:
+    import urllib.parse
+    import urllib.request
+
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    body = urllib.parse.urlencode({"chat_id": chat_id, "text": text[:4000]}).encode("utf-8")
+    with urllib.request.urlopen(url, data=body, timeout=10) as resp:
+        resp.read()
+
+
+def _notify_human_review(review: dict, status: str, notes: str) -> dict:
+    """Notify the requesting user. There is no mailer in this install, so the
+    email channel is recorded in the audit trail (a future SMTP hook reads the
+    same message); when the user linked Telegram AND a bot token is configured
+    (and we are not in demo mode) the message is delivered there directly."""
+    user = db.get_user_by_id(review["user_id"]) or {}
+    message = (
+        f"Your ADMT human-review request #{review['id']} for "
+        f"'{review.get('project_name') or 'project'}' was {status}."
+    )
+    if notes:
+        message += f" Reviewer notes: {notes[:200]}"
+    audit.audit("admt.notify", uid=review["user_id"],
+                email=review.get("user_email") or user.get("email"),
+                outcome="ok", subject="ADMT human review update",
+                message=message[:500], channel="email")
+    channel = "email"
+    sent = False
+    bot_token = os.environ.get("FLUXSWARM_TELEGRAM_BOT_TOKEN", "").strip()
+    if bot_token and os.environ.get("FLUXSWARM_DEMO_MODE", "0") != "1":
+        tg = db.get_telegram_link(review["user_id"]) if hasattr(db, "get_telegram_link") else None
+        if tg:
+            try:
+                _telegram_send(bot_token, tg["telegram_chat_id"], message)
+                channel = "telegram"
+                sent = True
+            except Exception:
+                pass
+    return {"channel": channel, "sent": sent}
+
+
+def get_admin(request: Request):
+    """Admin-only dependency: a shared-secret bearer token (FLUXSWARM_ADMIN_TOKEN).
+
+    Deny-by-default: when the env var is unset NO bearer token is accepted (the
+    admin surface is disabled rather than left open). Comparison is
+    constant-time via secrets.compare_digest.
+    """
+    expected = os.environ.get("FLUXSWARM_ADMIN_TOKEN", "").strip()
+    ah = request.headers.get("Authorization", "")
+    presented = ah.replace("Bearer ", "") if ah.startswith("Bearer ") else ""
+    if not expected or not presented or not secrets.compare_digest(expected, presented):
+        raise HTTPException(status_code=401, detail="غير مصرّح")
+
+
+@app.get("/api/account/admt-notice")
+def api_admt_notice(lang: str = "en", user: dict = Depends(get_current_user)):
+    notice = dict(ADMT_NOTICE)
+    if lang in _ADMT_NOTICE_L10N:
+        notice["description"] = _ADMT_NOTICE_L10N[lang]["description"]
+        notice["logic_summary"] = _ADMT_NOTICE_L10N[lang]["logic_summary"]
+    return notice
+
+
+@app.post("/api/account/admt-notice/acknowledge")
+def api_admt_notice_ack(request: Request, user: dict = Depends(get_current_user)):
+    db.record_admt_notice_ack(user["id"])
+    audit.audit("admt.notice.ack", uid=user["id"], email=user["email"],
+                ip=_client_ip(request), outcome="ok", notice_version=_ADMT_NOTICE_VERSION)
+    return {"ok": True, "acknowledged": True, "notice_version": _ADMT_NOTICE_VERSION}
+
+
+@app.post("/api/account/opt-out-admt")
+def api_admt_opt_out(request: Request, user: dict = Depends(get_current_user)):
+    before = db.get_admt_opt_out(user["id"])
+    db.set_admt_opt_out(user["id"], True)
+    audit.audit("admt.optout", uid=user["id"], email=user["email"],
+                ip=_client_ip(request), outcome="ok", was_already=before)
+    return {"ok": True, "admt_opt_out": True, "was_already": bool(before)}
+
+
+@app.post("/api/account/opt-in-admt")
+def api_admt_opt_in(payload: AdmtOptInIn, request: Request,
+                    user: dict = Depends(get_current_user)):
+    if not payload.acknowledge:
+        raise HTTPException(status_code=400,
+                            detail="إعادة قراءة إشعار ADMT مطلوبة قبل إعادة التفعيل")
+    if (payload.last_updated or "").strip() != _ADMT_NOTICE_VERSION:
+        raise HTTPException(status_code=400,
+                            detail="إشعار ADMT المحدّث يجب إعادة قراءته وإقراره (أرسل نسخته الحالية)")
+    db.record_admt_notice_ack(user["id"])
+    db.set_admt_opt_out(user["id"], False)
+    audit.audit("admt.optin", uid=user["id"], email=user["email"],
+                ip=_client_ip(request), outcome="ok", notice_version=_ADMT_NOTICE_VERSION)
+    return {"ok": True, "admt_opt_out": False}
+
+
+@app.post("/api/projects/{project_id}/request-human-review")
+def api_request_human_review(project_id: int, request: Request,
+                             user: dict = Depends(get_current_user)):
+    proj = _get_project_row(project_id)
+    if not proj or proj["user_id"] != user["id"]:
+        raise HTTPException(status_code=404, detail="المشروع غير موجود")
+    review_id = db.request_human_review(user["id"], project_id)
+    audit.audit("admt.review.request", uid=user["id"], email=user["email"],
+                ip=_client_ip(request), outcome="ok",
+                project_id=project_id, review_id=review_id)
+    return {"ok": True, "review_id": review_id, "human_review_status": "requested"}
+
+
+@app.get("/api/admin/human-review-queue")
+def api_admin_review_queue(request: Request, _: None = Depends(get_admin)):
+    queue = db.list_human_review_queue()
+    audit.audit("admt.review.queue", ip=_client_ip(request), outcome="ok",
+                pending=len(queue))
+    return {"count": len(queue), "pending": queue}
+
+
+@app.get("/api/admin/provider-agreements")
+def api_admin_provider_agreements(request: Request, _: None = Depends(get_admin)):
+    """Admin registry of provider agreements accepted via BYOK (ledger: 003).
+
+    Lists who accepted which provider term version and when. Vendor-level DPA
+    links are disclosed on the legal pages (/privacy, /privacy-en) and in
+    docs/CCPA_RISK_ASSESSMENT.md — this table is the user acceptance ledger,
+    not a vendor contract registry.
+    """
+    rows = db.provider_agreements_summary()
+    audit.audit("provider.agreements.admin", ip=_client_ip(request), outcome="ok",
+                count=len(rows))
+    by_provider: dict[str, dict] = {}
+    for row in rows:
+        entry = by_provider.setdefault(row["provider"], {"provider": row["provider"], "accepted": 0, "agreements": []})
+        entry["accepted"] += 1
+        entry["agreements"].append({
+            "user": row["email"], "agreed_at": row["agreed_at"], "version": row["version"],
+        })
+    return {"count": len(rows), "by_provider": [
+        by_provider[p] for p in sorted(by_provider)
+    ]}
+
+
+@app.patch("/api/admin/human-review/{review_id}")
+def api_admin_update_review(review_id: int, payload: HumanReviewUpdateIn,
+                            request: Request, _: None = Depends(get_admin)):
+    status = (payload.status or "").strip()
+    if status not in ("approved", "rejected", "needs_changes"):
+        raise HTTPException(status_code=422, detail="حالة مراجعة غير صالحة")
+    review = db.get_human_review(review_id)
+    if not review:
+        raise HTTPException(status_code=404, detail="الطلب غير موجود")
+    notes = (payload.reviewer_notes or "").strip()
+    if not db.update_human_review(review_id, status, notes):
+        raise HTTPException(status_code=409, detail="الطلب نُفّذ من قبل")
+    notified = _notify_human_review(review, status, notes)
+    audit.audit("admt.review.update", uid=review["user_id"], email=review["user_email"],
+                ip=_client_ip(request), outcome="ok", review_id=review_id,
+                review_status=status, channel=notified["channel"])
+    return {"ok": True, "review_id": review_id, "status": status, "notified": notified}
+
+
+@app.get("/api/projects/{project_id}/admt-logic")
+def api_project_admt_logic(project_id: int, user: dict = Depends(get_current_user)):
+    proj = _get_project_row(project_id)
+    if not proj:
+        raise HTTPException(status_code=404, detail="المشروع غير موجود")
+    if proj["user_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="غير مصرّح")
+    goal = proj.get("goal") or ""
+    runtime = _project_runtime_info(user)
+    return {
+        "project_id": int(proj["id"]),
+        "goal": goal,
+        "agents_used": [a["agent"] for a in _ADMT_AGENTS],
+        "decisions": _admt_decisions(goal),
+        "runtime_model": runtime["model"],
+        "provider": runtime["provider"],
+        "generated_at": datetime.datetime.fromtimestamp(float(proj["created_at"])).isoformat(),
+    }
+
+
+def _admt_notice_view(lang: str) -> dict:
+    notice = dict(ADMT_NOTICE)
+    if lang in _ADMT_NOTICE_L10N:
+        notice["description"] = _ADMT_NOTICE_L10N[lang]["description"]
+        notice["logic_summary"] = _ADMT_NOTICE_L10N[lang]["logic_summary"]
+    return notice
+
+
+@app.get("/admt-notice", response_class=HTMLResponse)
+def admt_notice_page(request: Request):
+    return templates.TemplateResponse(
+        request=request, name="admt_notice.html",
+        context={"title": "إشعار الذكاء الاصطناعي — FluxSwarm", "lang": "ar",
+                 "notice": _admt_notice_view("ar"), "api_base": "",
+                 "csp_nonce": request.state.csp_nonce})
+
+
+@app.get("/admt-notice-en", response_class=HTMLResponse)
+def admt_notice_page_en(request: Request):
+    return templates.TemplateResponse(
+        request=request, name="admt_notice.html",
+        context={"title": "ADMT Notice — FluxSwarm", "lang": "en",
+                 "notice": _admt_notice_view("en"), "api_base": "",
+                 "csp_nonce": request.state.csp_nonce})
+
+
+@app.patch("/api/account")
+def api_account_update(payload: AccountUpdateIn, request: Request,
+                       user: dict = Depends(get_current_user)):
+    """Right to correct (CCPA/CPRA): replace the display name on the account."""
+    name = (payload.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="الاسم فارغ")
+    if not db.update_user_name(user["id"], name):
+        raise HTTPException(status_code=404, detail="الحساب غير موجود")
+    audit.audit("account.rectify", uid=user["id"], email=user["email"],
+                ip=_client_ip(request), outcome="ok")
+    refreshed = db.get_user_by_id(user["id"]) or {}
+    return {"ok": True, "user": public_user(refreshed)}
+
+
 @app.get("/api/account/export")
 def api_account_export(request: Request, user: dict = Depends(get_current_user)):
     payload = db.account_payload(user["id"])
@@ -1673,9 +2759,7 @@ def api_buy_template(tid: int, payload: BuyIn, request: Request,
                 price=tpl.get("price_credits"))
     # Launched squad is auto-dispatched now (no manual dispatch wait).
     goal = (payload.goal or "").strip() or tpl.get("description") or f"Build using squad template: {tpl.get('name')}"
-    goal = goal.strip()
-    if len(goal) > _TEMPLATE_LIMITS["goal_max_len"]:
-        goal = goal[:_TEMPLATE_LIMITS["goal_max_len"]]
+    goal = sanitize_goal(goal)[:_TEMPLATE_LIMITS["goal_max_len"]]
     slug = f"u{user['id']}-t{tid}-{int(time.time())}-{secrets.token_hex(4)}"
     launched = False
     launch_error = None

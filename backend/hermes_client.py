@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from provider import ProviderHealth, ProviderStatus, check_provider_health
+
 # HERMES_BIN is overridable via FLUXSWARM_HERMES_BIN so the same code runs on
 # Linux/Docker (e.g. /app/hermes/bin/hermes) as well as the dev Windows host.
 # Falls back to the host's installed path when the env var is unset.
@@ -33,6 +35,18 @@ _HERMES_BIN_ENV = os.environ.get("FLUXSWARM_HERMES_BIN")
 HERMES_BIN = Path(_HERMES_BIN_ENV) if _HERMES_BIN_ENV else Path("C:/Users/DELL/AppData/Local/hermes/bin/hermes.exe")
 HERMES_HOME = os.environ.get("HERMES_HOME", "C:/Users/DELL/AppData/Local/hermes")
 PROFILES_DIR = Path(HERMES_HOME) / "profiles"
+
+# Session 3: memory-derived host concurrency budget ("null budget" cap).
+# Hermes' dispatcher *independently* derives its own in-swarm limit
+# (kanban.max_in_progress / lane resolution); this is OUR side's default
+# max_spawn ceiling so no launch over-commits the container's RAM.
+#   MEMORY_GUARD_MB_PER_WORKER = guard RAM per concurrent worker.
+#   FLUXSWARM_MEM_TOTAL_MB     = the cgroup/container memory limit (docker
+#                                compose `deploy.resources.limits.memory`).
+# 8GB / 384MB = 21 -> clamped to MAX_IN_PROGRESS = 16.
+_MEM_TOTAL_MB = int(os.environ.get("FLUXSWARM_MEM_TOTAL_MB", "8192"))
+MEMORY_GUARD_MB_PER_WORKER = int(os.environ.get("MEMORY_GUARD_MB_PER_WORKER", "384"))
+MAX_IN_PROGRESS = max(2, min(16, _MEM_TOTAL_MB // MEMORY_GUARD_MB_PER_WORKER))
 
 # Safe board-slug charset. Slugs are server-generated (u{uid}-{time}-{rand},
 # u{uid}-tg-…, flux-demo-…, tg-{chat}-…), but delete_boards validates every
@@ -68,29 +82,34 @@ ENV_MAP = {
     "openai": "OPENAI_API_KEY",
     "gemini": "GEMINI_API_KEY",
     "kimi": "KIMI_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
 }
 
-# Paid BYOK providers, in precedence order (see _resolve_runtime).
-_PAID_PROVIDERS = ("anthropic", "openai", "gemini", "kimi")
+# Keyed BYOK providers, in precedence order (see _resolve_runtime). Includes the
+# OpenRouter free tier: it needs a real (free) API key plus the user's provider
+# agreement, so it is resolved exactly like the paid BYOK providers.
+_KEYED_PROVIDERS = ("anthropic", "openai", "gemini", "kimi", "openrouter")
 
-# Free, no-key provider that Hermes already has configured (OpenCode Free).
-# It is NOT a production default: it may run only when the operator explicitly
-# opts in (FLUXSWARM_DEMO_MODE=1) or when a user explicitly selects it in the
-# BYOK UI. An unconfigured production launch fails fast instead of silently
-# running on the free tier.
-FREE_PROVIDER = "opencode-free"
-FREE_MODEL = "nemotron-3-ultra-free"
+# Provider agreement gate (Phase 3): a launch that relies on a BYOK provider
+# requires the user to have accepted that provider's terms first (see
+# PROVIDER_AGREEMENT_VERSION + the /api/agreements endpoints). Kept here as the
+# single source of truth so main.py and the DB layer agree on the set.
+SUPPORTED_PROVIDERS = ("anthropic", "openai", "gemini", "kimi", "openrouter")
+PROVIDER_AGREEMENT_VERSION = "1.0"
+
+# Default model when an operator configures FLUXSWARM_DEFAULT_PROVIDER=openrouter
+# (or a user brings an OpenRouter BYOK key) without a FLUXSWARM_MODEL_OPENROUTER
+# override. z-ai/glm-5.2:free is the current best free TRYING endpoint on
+# OpenRouter's free tier; free endpoints rotate, so ops can pin a different one
+# via the env override. It does NOT broaden the "no silent fallback" rule to
+# other providers: this default applies only once the operator/user has
+# explicitly chosen openrouter.
+OPENROUTER_DEFAULT_MODEL = "z-ai/glm-5.2:free"
 
 
 class ProviderConfigError(RuntimeError):
     """Raised when no runtime is deliberately configured (never silently)."""
 
-
-_DEMO_FLAGS = ("1", "true", "yes")
-
-
-def _is_demo_mode() -> bool:
-    return os.environ.get("FLUXSWARM_DEMO_MODE", "").strip().lower() in _DEMO_FLAGS
 
 # Driver-loop ceiling for a swarm launch (seconds). This is the HARD upper
 # bound the background dispatcher waits on a launch before it reports the true
@@ -102,46 +121,33 @@ def _is_demo_mode() -> bool:
 # via FLUXSWARM_DISPATCH_TIMEOUT_S for ops.
 DISPATCH_TIMEOUT_S = int(os.environ.get("FLUXSWARM_DISPATCH_TIMEOUT_S", "900"))
 
-# When the user explicitly opts into the free provider via BYOK UI, we record it
-# under this provider key so _resolve_runtime() can pick the right model.
-PROVIDER_OPENCODE_FREE = "opencode-free"
-
 
 def _resolve_runtime(provider_keys: Optional[dict]):
     """Return (model, provider) to pin every squad task to.
 
-    Priority:
-      1. User explicitly selected 'opencode-free' in the BYOK UI -> free hosted
-         model. This WINS over any other BYOK key so a stray/paid key (e.g. a
-         stale OpenAI key) can never hijack an explicitly-chosen free runtime.
-      2. User BYOK key -> use that provider's model (Claude/GPT/...). The model
+    Phase 3: there is NO free tier. Priority:
+      1. User BYOK key -> use that provider's model (Claude/GPT/...). The model
          itself is resolved at pin time from the operator's env overrides.
-      3. Nothing supplied -> the DEPLOYMENT default: operator-configured
-         provider/model (FLUXSWARM_DEFAULT_PROVIDER / FLUXSWARM_DEFAULT_MODEL),
-         or the free hosted model only in Demo/dev (FLUXSWARM_DEMO_MODE=1).
-         An unconfigured production raises ProviderConfigError — there is NO
-         silent fallback to opencode-free.
+      2. Nothing supplied -> the DEPLOYMENT default: operator-configured
+         provider/model (FLUXSWARM_DEFAULT_PROVIDER / FLUXSWARM_DEFAULT_MODEL).
+         An unconfigured runtime raises ProviderConfigError — there is no
+         silent fallback to a free model, in any mode.
     """
     if provider_keys:
-        # Explicitly-enabled free tier takes priority over any paid BYOK key.
-        if provider_keys.get("opencode-free"):
-            return FREE_MODEL, FREE_PROVIDER
-        # Prefer the first paid BYOK provider we have a key for.
-        for prov in _PAID_PROVIDERS:
+        for prov in _KEYED_PROVIDERS:
             if provider_keys.get(prov):
                 return None, prov  # model resolved/bound at pin time
     return _default_runtime()
 
 
 def _default_runtime() -> tuple[Optional[str], str]:
-    """Production runtime configured by the operator; free only for Demo/dev.
+    """Production runtime configured by the operator (no free fallback).
 
-    - FLUXSWARM_DEFAULT_PROVIDER set -> that provider, with a model from
-      FLUXSWARM_DEFAULT_MODEL or FLUXSWARM_MODEL_<PROVIDER>. A provider without
-      a model raises (a provider pin without a model cannot be persisted).
-    - FLUXSWARM_DEMO_MODE=1 -> the free hosted runtime (explicit Demo opt-in).
-    - Otherwise -> ProviderConfigError: a production deployment without a
-      deliberate default must not silently send squad work to the free tier.
+    FLUXSWARM_DEFAULT_PROVIDER set -> that provider, with a model from
+    FLUXSWARM_DEFAULT_MODEL or FLUXSWARM_MODEL_<PROVIDER>. A provider without a
+    model raises (a provider pin without a model cannot be persisted).
+    Otherwise -> ProviderConfigError: a deployment without a deliberate
+    provider default must not send squad work anywhere by guessing.
     """
     prov = os.environ.get("FLUXSWARM_DEFAULT_PROVIDER", "").strip()
     if prov:
@@ -154,13 +160,10 @@ def _default_runtime() -> tuple[Optional[str], str]:
                 "(no silent fallback)."
             )
         return model, prov
-    if _is_demo_mode():
-        return FREE_MODEL, FREE_PROVIDER
     raise ProviderConfigError(
-        "no production runtime configured: set FLUXSWARM_DEFAULT_PROVIDER (with "
-        "FLUXSWARM_DEFAULT_MODEL), enable FLUXSWARM_DEMO_MODE=1 only for "
-        "Demo/dev, or provide BYOK keys. Refusing to silently default to "
-        "opencode-free in production."
+        "no runtime configured: set FLUXSWARM_DEFAULT_PROVIDER (with "
+        "FLUXSWARM_DEFAULT_MODEL), or provide BYOK keys. Refusing to guess a "
+        "provider or model (no anonymous free tier)."
     )
 
 
@@ -168,15 +171,22 @@ def _operator_model_for(provider: str) -> Optional[str]:
     """Optional operator-configured model override for a provider.
 
     Tries the per-provider override (FLUXSWARM_MODEL_<PROVIDER>) first, then the
-    shared production default (FLUXSWARM_DEFAULT_MODEL). Returns None when no
-    model is declared — the caller must then fail loudly rather than guess.
+    shared production default (FLUXSWARM_DEFAULT_MODEL). For ``openrouter`` — and
+    only for it — the deliberately-chosen free demo model is the final fallback
+    (OPENROUTER_DEFAULT_MODEL), because opting into openrouter is itself the
+    deliberate runtime choice. Returns None when no model is declared — the
+    caller must then fail loudly rather than guess.
     """
     per_provider = os.environ.get(
         "FLUXSWARM_MODEL_" + provider.upper().replace("-", "_"), "").strip()
     if per_provider:
         return per_provider
     shared = os.environ.get("FLUXSWARM_DEFAULT_MODEL", "").strip()
-    return shared or None
+    if shared:
+        return shared
+    if provider == "openrouter":
+        return OPENROUTER_DEFAULT_MODEL
+    return None
 
 
 def _resolve_launch_runtime(provider_keys: Optional[dict]) -> tuple[str, str]:
@@ -196,9 +206,37 @@ def _resolve_launch_runtime(provider_keys: Optional[dict]) -> tuple[str, str]:
         )
     return model, provider
 
+
+def preflight_provider(provider_keys: Optional[dict] = None) -> ProviderHealth:
+    """Lightweight provider health-check before dispatch.
+
+    Resolves the runtime that would be used, then probes the provider
+    endpoint WITHOUT consuming credits.  Returns a ProviderHealth with
+    the diagnostic status (CONFIG_ERROR, AUTH_ERROR, PROVIDER_UNAVAILABLE,
+    TIMEOUT, MODEL_UNAVAILABLE, SUCCESS).
+    """
+    try:
+        model, provider = _resolve_launch_runtime(provider_keys)
+    except ProviderConfigError as exc:
+        return ProviderHealth(
+            status=ProviderStatus.CONFIG_ERROR,
+            provider=provider_keys.get("provider", "unknown") if provider_keys else "none",
+            model=None,
+            detail=str(exc),
+        )
+
+    # Extract the credential for the resolved provider (BYOK or operator env —
+    # there is no free tier in Phase 3, so a missing credential is an auth error).
+    credential = None
+    if provider_keys:
+        credential = provider_keys.get(provider)
+
+    return check_provider_health(provider, model=model, credential=credential)
+
+
 # Which env vars we should NEVER inject into shared profile .env files.
 # Provider keys stay in the subprocess environment only (never on disk).
-_PROFILE_KEY_NAMES = {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "KIMI_API_KEY"}
+_PROFILE_KEY_NAMES = {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "KIMI_API_KEY", "OPENROUTER_API_KEY"}
 
 
 @dataclass
@@ -245,9 +283,50 @@ def cleanup_profile_keys():
                 pass
 
 
+class _DockerResult:
+    """Adapt hermes_docker.run_dispatch() dict to the CompletedProcess surface
+    _run callers expect (`.returncode`, `.stdout`, `.stderr`), so the rest of
+    the dispatch/launch machinery is agnostic to the transport."""
+
+    def __init__(self, result: dict):
+        self.result = result
+        self.returncode = 124 if result.get("timed_out") else (result.get("returncode") or 0)
+        self.stdout = result.get("stdout_tail") or ""
+        self.stderr = result.get("stderr_tail") or ""
+        self.timed_out = bool(result.get("timed_out"))
+        self.container = result.get("container")
+
+    def __bool__(self):
+        return self.returncode == 0
+
+
 def _run(args: list[str], board: Optional[str] = None, capture=True,
          provider_keys: Optional[dict] = None) -> subprocess.CompletedProcess:
     # IMPORTANT: --board is an option on `hermes kanban`, BEFORE the subcommand.
+    # Phase 2 opt-in: run the hermes CLI inside the hardened Docker sandbox
+    # (hermes_docker.py) instead of directly on the host. Default OFF — the
+    # existing host runtime remains the default until the runner image is
+    # deployed to all nodes. FLUXSWARM_DOCKER_DISPATCH=1 enables it.
+    if os.environ.get("FLUXSWARM_DOCKER_DISPATCH", "").strip() == "1":
+        try:
+            import hermes_docker
+        except ImportError:
+            pass
+        else:
+            if board:
+                # build a hermes kanban argv without the --board front (the
+                # container already knows the board via the read-only mount).
+                hermes_argv = args
+                try:
+                    default_model, default_provider = _default_runtime()
+                except ProviderConfigError:
+                    default_model, default_provider = None, None
+                result = hermes_docker.run_dispatch(
+                    board=board, argv=hermes_argv, provider_keys=provider_keys,
+                    provider=default_provider, model=default_model,
+                )
+                return _DockerResult(result)
+
     cmd = [str(HERMES_BIN), "kanban"]
     if board:
         cmd += ["--board", board]
@@ -766,11 +845,97 @@ def _cleanup_board_workers(board: str) -> None:
             pass
 
 
-def dispatch(board: str, max_spawn: int = 8, dry_run: bool = False,
+SEAL_MARKER_NAME = "board.sealed"
+
+
+def seal_board(board: str, reason: str = "launch finalized") -> dict:
+    """Force an abandoned / refunded / errored board terminal so it stops
+    consuming the host-level kanban concurrency budget.
+
+    Hermes dispatch accounting counts ``running`` tasks across EVERY board
+    against the memory-derived host cap (``kanban.max_in_progress``). A launch
+    that ends stuck / timed-out / errored leaves its worker processes alive and
+    its tasks parked in ``running`` unless someone reclaims them. Without this,
+    the reconciliation reaper re-dispatchs such boards on every sweep — the
+    dead workers keep coming back, the board never reaches a terminal state,
+    and the ``running`` corpses hold the cap forever: every NEW launch then
+    lands in "waiting for dependency" and gets refunded as ``no_progress``.
+
+    Sealing makes the board terminal and drives its ``running`` count to zero:
+
+      1. kill every worker process tree recorded for the board;
+      2. flip every non-terminal AGENT task to ``blocked`` (claim/pid cleared);
+      3. drop a durable ``board.sealed`` marker so the reconciliation reaper
+         skips the board on later sweeps (it is operator-final, not a
+         transient provider blip that deserves a retry).
+
+    Best-effort and idempotent: per-row failures degrade the seal and never
+    raise (the caller always lands the launch bookkeeping first). Returns a
+    small report dict for auditing.
+    """
+    report: dict = {"killed": 0, "blocked": 0, "errors": []}
+    for pid in read_worker_pids(board):
+        try:
+            kill_process_tree(pid)
+            report["killed"] += 1
+        except Exception as exc:
+            report["errors"].append(f"kill {pid}: {exc}")
+    board_dir = Path(HERMES_HOME) / "kanban" / "boards" / board
+    db_path = board_dir / "kanban.db"
+    if db_path.exists():
+        try:
+            c = sqlite3.connect(str(db_path), timeout=5.0)
+            try:
+                cols = {r[1] for r in c.execute("PRAGMA table_info(tasks)")}
+                set_clauses = ["status=?"]
+                values_suffix = ["blocked"]
+                if "worker_pid" in cols:
+                    set_clauses.append("worker_pid=?"); values_suffix.append(None)
+                if "claim_lock" in cols:
+                    set_clauses.append("claim_lock=?"); values_suffix.append(None)
+                if "claim_expires" in cols:
+                    set_clauses.append("claim_expires=?"); values_suffix.append(None)
+                stmt = "UPDATE tasks SET %s WHERE id=?" % ", ".join(set_clauses)
+                rows = c.execute(
+                    "SELECT id FROM tasks WHERE status NOT IN ('done', 'blocked')"
+                ).fetchall()
+                for (tid,) in rows:
+                    try:
+                        c.execute(stmt, tuple(values_suffix) + (tid,))
+                        report["blocked"] += 1
+                    except Exception as exc:
+                        report["errors"].append(f"block {tid}: {exc}")
+                c.commit()
+            finally:
+                c.close()
+        except Exception as exc:
+            report["errors"].append(f"db: {exc}")
+    try:
+        board_dir.mkdir(parents=True, exist_ok=True)
+        (board_dir / SEAL_MARKER_NAME).touch()
+    except Exception as exc:
+        report["errors"].append(f"marker: {exc}")
+    return report
+
+
+def board_is_sealed(board: str) -> bool:
+    """True when *board* carries the durable seal marker (operator-final)."""
+    try:
+        return (Path(HERMES_HOME) / "kanban" / "boards" / board / SEAL_MARKER_NAME).exists()
+    except Exception:
+        return False
+
+
+def dispatch(board: str, max_spawn: int | None = None, dry_run: bool = False,
              provider_keys: Optional[dict] = None, blocking: bool = True,
              timeout_s: int = 600, stall_passes: int = 4,
              min_wait_s: int = 60) -> dict:
     """Run the dispatcher. If blocking, poll until terminal state or timeout.
+
+    ``max_spawn`` defaults to the memory-derived host ceiling
+    (``MAX_IN_PROGRESS``) so a caller that forgets the cap never over-commits
+    RAM (the pre-callers conceptually kept 8). Plan/reaper callers pass their
+    own smaller caps; the Hermes dispatcher applies its own lane limits too.
 
     Returns a dict that always carries ``outcome`` so the caller can tell a
     launch that converged from one that was cut short by the bounded wall-clock
@@ -795,6 +960,8 @@ def dispatch(board: str, max_spawn: int = 8, dry_run: bool = False,
     args = ["dispatch"]
     if dry_run:
         args.append("--dry-run")
+    if max_spawn is None:
+        max_spawn = MAX_IN_PROGRESS
     if max_spawn:
         args += ["--max", str(max_spawn)]
     r = _run(args, board=board, provider_keys=provider_keys)
@@ -929,6 +1096,12 @@ def list_tasks(board: str) -> list[dict]:
             if pre.startswith("ecc-"):
                 a = pre[len("ecc-"):] + ":" + post
         t["assignee_display"] = a
+    # Enrich every task with live agent activity (issue-2 contract). This is
+    # the single funnel for both the REST tasks endpoint and the /ws poll loop,
+    # so activity propagates everywhere automatically and stays in the same
+    # authoritative shape.
+    for t in data:
+        _attach_activity(board, t)
     return data
 
 
@@ -955,6 +1128,351 @@ def board_has_completed_work(board: str) -> bool:
             if assignee and assignee != "fluxswarm":
                 return True
     return False
+
+
+def board_has_unfinished_work(board: str) -> bool:
+    """True when any AGENT task is not yet terminal (done/blocked).
+
+    Used by the reconciliation reaper to decide whether a board still needs a
+    dispatch tick. The swarm ROOT planning card (assignee ``fluxswarm``) is
+    auto-completed immediately and represents no agent work, so it never keeps
+    a board "unfinished".
+    """
+    try:
+        tasks = list_tasks(board)
+    except Exception:
+        return False
+    if not tasks:
+        return False
+    for t in tasks:
+        assignee = (t.get("assignee") or "").strip().lower()
+        if not assignee or assignee == "fluxswarm":
+            continue
+        if t.get("state") not in ("done", "blocked"):
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Transient-block recovery (auto re-dispatch).
+#
+# A worker run that crashes mid-flight (provider HTTP 429 / transient outage)
+# is retried by the dispatcher up to its ``effective_limit`` and then parked
+# as ``blocked``.  ``board_has_unfinished_work`` treats ``blocked`` as
+# terminal, so without help the swarm freezes even after the provider
+# recovers.  ``bump_blocked_to_ready`` re-promotes blocked agent tasks back
+# to ``ready`` on a reaper cadence; the next normal dispatch pass re-spawns
+# them, and Hermes' parent-gating (``recompute_ready``) still prevents any
+# task from running before its dependencies complete.
+# ---------------------------------------------------------------------------
+
+def bump_blocked_to_ready(board: str, cap: int = 8) -> int:
+    """Re-promote blocked AGENT tasks on *board* back to ``ready``.
+
+    Returns the number of tasks re-promoted (0 when none are blocked).
+    Used by the reconciliation reaper so transient provider failures
+    recover automatically instead of freezing the board.  The ROOT planning
+    card and anything still waiting on open parents are left untouched by
+    Hermes' own ``promote`` parent-gating; the dispatcher decides whether a
+    re-promoted task may actually spawn.
+
+    A sealed board (operator-final) is a no-op: waking its workers would
+    resurrect a terminal launch and hold the host concurrency budget forever.
+    """
+    if board_is_sealed(board):
+        try:
+            from audit import audit
+            audit("reaper.skip_sealed", board=board)
+        except Exception:
+            pass
+        return 0
+    try:
+        tasks = list_tasks(board)
+    except Exception:
+        return 0
+    blocked = [t for t in tasks
+               if t.get("state") == "blocked"
+               and (t.get("assignee") or "").strip().lower() != "fluxswarm"]
+    if not blocked:
+        return 0
+    for t in blocked[:cap]:
+        tid = t.get("id")
+        if not tid:
+            continue
+        r = _run(["promote", tid], board=board)
+    return min(len(blocked), cap)
+
+
+def kill_stale_workers(board: str, stale_s: int = 300) -> list[str]:
+    """Kill workers whose ``running`` task heartbeat went quiet.
+
+    A worker that dies without a clean terminal event leaves its task in
+    ``running`` with a frozen PID and an old ``last_heartbeat_at``; it then
+    holds the host concurrency budget until the dispatcher's claim TTL reaps
+    it. This is the reaper's proactive sweep: kill the stale process tree and
+    park the task as ``blocked`` so the next dispatch pass re-spawns it once
+    the provider recovers.
+
+    Column-tolerant (queries only columns that exist in this board's schema)
+    and best-effort: per-row failures degrade the sweep, never raise. Returns
+    the list of task ids parked.
+    """
+    parked: list[str] = []
+    db_path = Path(HERMES_HOME) / "kanban" / "boards" / board / "kanban.db"
+    try:
+        if not db_path.exists():
+            return parked
+        c = sqlite3.connect(str(db_path), timeout=5.0)
+        try:
+            cols = {r[1] for r in c.execute("PRAGMA table_info(tasks)")}
+            if "worker_pid" not in cols or "last_heartbeat_at" not in cols:
+                return parked
+            cutoff = time.time() - max(60, int(stale_s))
+            rows = c.execute(
+                "SELECT id, worker_pid FROM tasks "
+                "WHERE status IN ('running','queued') "
+                "AND worker_pid IS NOT NULL "
+                "AND COALESCE(last_heartbeat_at, 0) < ?",
+                (cutoff,),
+            ).fetchall()
+            for tid, pid in rows:
+                if not pid:
+                    continue
+                try:
+                    kill_process_tree(int(pid))
+                except Exception:
+                    pass
+                set_clauses = ["status=?", "worker_pid=?"]
+                values = ["blocked", None]
+                if "claim_lock" in cols:
+                    set_clauses.append("claim_lock=?"); values.append(None)
+                if "claim_expires" in cols:
+                    set_clauses.append("claim_expires=?"); values.append(None)
+                c.execute(
+                    "UPDATE tasks SET %s WHERE id=? AND status IN ('running','queued')"
+                    % ", ".join(set_clauses),
+                    tuple(values) + (tid,),
+                )
+                parked.append(str(tid))
+                c.commit()
+        finally:
+            c.close()
+    except Exception:
+        pass
+    return parked
+
+
+def delete_demo_board(board: str) -> bool:
+    """Remove an expired demo board's directory (workspace + kanban.db).
+
+    Demo boards (``flux-demo-*``) are shared/throwaway: once sealed and aged
+    past the workspace TTL they are deleted wholesale. Defensive by
+    construction — the slug must be a ``flux-demo-`` slug, match the safe
+    charset, and resolve inside the boards root, so a corrupted call can never
+    escalate to an arbitrary filesystem delete (same rules as
+    ``delete_boards``, which deliberately refuses demo boards).
+    """
+    if not board.startswith("flux-demo-"):
+        return False
+    if not _SAFE_SLUG_RE.match(board):
+        return False
+    root = Path(HERMES_HOME) / "kanban" / "boards"
+    target = (root / board).resolve()
+    root_resolved = str(root.resolve()) + os.sep
+    if not str(target).startswith(root_resolved):
+        return False
+    try:
+        if target.exists():
+            shutil.rmtree(target)
+            return True
+    except OSError:
+        pass
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Live agent activity (Issue 2).
+#
+# Every field below is derived from REAL, persisted Hermes runtime state in the
+# board's ``kanban.db`` (task status + the ``task_events`` operational log).
+# Nothing is fabricated, randomized, or rotated: if a worker is genuinely
+# running it emits heartbeats (visible as "Working…"), and a completion records
+# its summary/artifacts. No chain-of-thought is ever surfaced — only safe
+# operational events.
+# ---------------------------------------------------------------------------
+
+# User-facing role info for the demo/ECC swarm assignees. ``action`` is the
+# truthful current focus while the agent is RUNNING (a worker performing its
+# role's job); ``done`` is what we show once it completes. Display names strip
+# the internal ``ecc-`` prefix as everywhere else in the UI.
+ROLE_INFO = {
+    "ecc-planner":     {"name": "Planner",  "action": "Creating the implementation plan",
+                        "done": "Plan completed",
+                        "desc": "Expert planning specialist: breaks the feature into an actionable, dependency-ordered implementation plan."},
+    "ecc-architect":   {"name": "Architect", "action": "Designing the system architecture",
+                        "done": "Architecture completed",
+                        "desc": "Software architecture specialist: designs the system structure, interfaces and scalability."},
+    "ecc-devops":      {"name": "DevOps",   "action": "Setting up CI/CD and containerization",
+                        "done": "CI/CD and containerization set up",
+                        "desc": "Sets up CI/CD pipelines and containerization so the project builds and deploys reproducibly."},
+    "ecc-tdd":         {"name": "TDD",      "action": "Writing the test suite",
+                        "done": "Test suite written",
+                        "desc": "Test-driven development specialist: writes the test suite before the implementation."},
+    "ecc-reviewer":    {"name": "Reviewer", "action": "Reviewing outputs and gating the swarm",
+                        "done": "Review passed",
+                        "desc": "Reviews every worker handoff and gates the swarm, completing only when the evidence is sufficient."},
+    "ecc-build-fixer": {"name": "Builder",  "action": "Assembling the final build",
+                        "done": "Build assembled",
+                        "desc": "Synthesizes the verified worker outputs into the final deliverable and makes the build green."},
+}
+
+_BOARD_DB_CACHE: dict = {}
+
+
+def _board_db_path(board: str) -> Path:
+    return Path(HERMES_HOME) / "kanban" / "boards" / board / "kanban.db"
+
+
+def _task_activity_events(board: str, task_id: str) -> list[dict]:
+    """Return the chronological OPERATIONAL event log for one task, in display
+    form (``label`` + ``at``) built from the persisted ``task_events`` rows.
+    Consecutive heartbeats collapse into a single "Working…" entry so the log
+    stays compact instead of repeating every ~60s."""
+
+    db = _board_db_path(board)
+    try:
+        if not db.exists():
+            return []
+        c = sqlite3.connect(str(db))
+        try:
+            rows = c.execute(
+                "SELECT kind, payload, created_at FROM task_events "
+                "WHERE task_id = ? ORDER BY id",
+                (task_id,),
+            ).fetchall()
+        finally:
+            c.close()
+    except Exception:
+        return []
+
+    out: list[dict] = []
+    last_heartbeat = 0
+    for kind, payload, created_at in rows:
+        pd = None
+        if payload:
+            try:
+                pd = json.loads(payload)
+            except Exception:
+                pd = None
+        if kind == "heartbeat":
+            if created_at - last_heartbeat >= 60:
+                out.append({"kind": "working", "label": "Working…", "at": int(created_at)})
+                last_heartbeat = int(created_at)
+            continue
+        if kind == "claimed":
+            out.append({"kind": "started", "label": "Started", "at": int(created_at)})
+        elif kind == "spawned":
+            pid = (pd or {}).get("pid")
+            out.append({"kind": "spawned",
+                        "label": f"Worker spawned (PID {pid})" if pid else "Worker spawned",
+                        "at": int(created_at)})
+        elif kind == "attached":
+            fname = (pd or {}).get("filename")
+            out.append({"kind": "produced",
+                        "label": f"Produced {fname}" if fname else "Produced an artifact",
+                        "at": int(created_at)})
+        elif kind == "completed":
+            summary = (pd or {}).get("summary") or ""
+            label = "Completed"
+            if summary:
+                label = f"Completed: {summary.strip()[:220]}"
+            out.append({"kind": "completed", "label": label, "at": int(created_at)})
+        elif kind == "failed":
+            out.append({"kind": "failed", "label": "Failed", "at": int(created_at)})
+        elif kind == "blocked":
+            out.append({"kind": "blocked", "label": "Blocked", "at": int(created_at)})
+        elif kind in ("reclaimed", "crashed", "timed_out"):
+            out.append({"kind": "recovered", "label": "Worker recovered and requeued",
+                        "at": int(created_at)})
+    return out
+
+
+def _result_preview(board: str, task: dict) -> str | None:
+    """A short real result preview: the task's stored ``result`` if present,
+    else the ``completed`` event summary, truncated for the compact UI."""
+    result = (task.get("result") or "").strip()
+    if result:
+        return result[:280]
+    db = _board_db_path(board)
+    try:
+        if not db.exists():
+            return None
+        c = sqlite3.connect(str(db))
+        try:
+            row = c.execute(
+                "SELECT payload FROM task_events "
+                "WHERE task_id = ? AND kind = 'completed' ORDER BY id DESC LIMIT 1",
+                (task.get("id"),),
+            ).fetchone()
+        finally:
+            c.close()
+        if row and row[0]:
+            pd = json.loads(row[0])
+            s = (pd.get("summary") or "").strip()
+            if s:
+                return s[:280]
+    except Exception:
+        pass
+    return None
+
+
+def _attach_activity(board: str, task: dict) -> dict:
+    """Enrich a single task dict with the live-activity fields surfaced to the
+    UI. All values come from real Hermes state/events (issue-2 contract)."""
+    assignee = (task.get("assignee") or "").strip()
+    role = ROLE_INFO.get(assignee) or {}
+    state = task.get("state", "unknown")
+
+    events = _task_activity_events(board, task.get("id", ""))
+    completed_at = task.get("completed_at")
+    last_heartbeat_at = task.get("last_heartbeat_at")
+
+    last_activity_at = None
+    for e in events:
+        at = e.get("at")
+        if at is not None and (last_activity_at is None or at > last_activity_at):
+            last_activity_at = at
+    for ts in (completed_at, last_heartbeat_at):
+        if ts is not None and (last_activity_at is None or int(ts) > last_activity_at):
+            last_activity_at = int(ts)
+
+    if role:
+        if state == "running":
+            current_action = role["action"]
+        elif state == "done":
+            current_action = role["done"]
+        elif state == "blocked":
+            current_action = "Blocked"
+        else:
+            current_action = "Waiting for dependency"
+        display = role["name"]
+        description = role["desc"]
+    else:
+        current_action = { "running": "Working…",
+                           "done": "Completed",
+                           "blocked": "Blocked" }.get(state, "Waiting")
+        display = task.get("assignee_display") or assignee or "Agent"
+        description = ""
+
+    result_preview = _result_preview(board, task) if state == "done" else None
+
+    task["role_name"] = display
+    task["role_description"] = description
+    task["current_action"] = current_action
+    task["activity_log"] = events
+    task["last_activity_at"] = last_activity_at
+    task["result_preview"] = result_preview
+    return task
 
 
 def show_task(board: str, task_id: str) -> dict:

@@ -1,0 +1,12 @@
+description: ECC ecc-architect bot (Everything Claude Code integration)
+description_auto: false
+ui_meta:
+  hermes-bots:
+    shape: squircle
+    color: hsl(333 68% 58%)
+    imageKind: shape
+    title: ECC-Architect  يصمّم بنية المشروع وأنماط التصميم والهيكل الملفّي المناسب
+      للغة/الإطار.
+    custom: true
+_ui_meta_revisions:
+  hermes-bots: 1

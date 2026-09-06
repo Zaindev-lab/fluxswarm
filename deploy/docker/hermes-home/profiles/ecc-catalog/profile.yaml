@@ -1,0 +1,12 @@
+description: ECC ecc-catalog bot (Everything Claude Code integration)
+description_auto: false
+ui_meta:
+  hermes-bots:
+    shape: pill
+    color: hsl(185 68% 58%)
+    imageKind: shape
+    title: ECC-Catalog · فهرس مهارات ECC — دليل تصفّح لأصول ECC (286 مهارة/68 وكيل/22
+      قاعدة) يقترح المهارة المناسبة.
+    custom: true
+_ui_meta_revisions:
+  hermes-bots: 1

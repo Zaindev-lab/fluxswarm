@@ -1,15 +1,19 @@
 """
 FluxSwarm BYOK vault.
 
-Stores user-supplied provider API keys encrypted at rest with Fernet
-(symmetric encryption). Keys are decrypted only when launching that user's
-squad and injected into the Hermes subprocess environment. FluxSwarm itself
-never pays for tokens in BYOK mode.
+Stores user-supplied provider API keys encrypted at rest using KMS envelope
+encryption (see ``kms_client``). Each key blob is sealed under a fresh per-blob
+DEK (AES-256-GCM); the DEK is wrapped by a KEK held by the configured KMS
+(``FLUXSWARM_KMS_BACKEND`` = file | aws_kms | azure_keyvault | hashicorp_vault).
+Attacking the store alone therefore yields nothing without the KMS.
 
-The FERNET_KEY is loaded from FLUXSWARM_FERNET_KEY, or else from the OS user
-profile (~/.fluxswarm/fernet.key) — ALWAYS outside this repo, never next to the
-ciphertext. A legacy key that was sitting beside the data (backend/data/.fernet_key)
-is migrated out exactly once and the plaintext copy removed.
+Keys are decrypted only when launching that user's squad and injected into the
+Hermes subprocess (or sandbox container) environment. FluxSwarm itself never
+pays for tokens in BYOK mode.
+
+Legacy blobs (written by previous versions with Fernet) are still readable: the
+legacy Fernet payload is detected and decrypted with ``FLUXSWARM_FERNET_KEY``
+(or the OS-user key file), so already-stored BYOK keys keep working.
 """
 from __future__ import annotations
 
@@ -19,6 +23,7 @@ import os
 from pathlib import Path
 
 from cryptography.fernet import Fernet
+import kms_client
 
 _log = logging.getLogger("vault")
 
@@ -69,10 +74,19 @@ def _load_key() -> bytes:
         # Ephemeral fallback: encrypts with a throwaway key (does not persist).
         return Fernet.generate_key()
 
+# The KMS backend that seals new/current BYOK blobs.
+_KMS = kms_client.get_client()
+
+# Legacy Fernet (pre-KMS) key for decrypting old blobs only.
+_FERNET = Fernet(_load_key())
+
+
+def _is_envelope(blob: str) -> bool:
+    return bool(blob) and blob.lstrip().startswith("{") and '"wrapped_dek"' in blob
+
+
 # Per-user key storage: user_id -> {provider: encrypted_token}
 _STORE = Path(os.environ.get("FLUXSWARM_BYOK_STORE", str(BASE / "data" / "byok.json")))
-
-_FERNET = Fernet(_load_key())
 
 
 def _load() -> dict:
@@ -88,10 +102,11 @@ def _save(data: dict):
 
 
 def set_user_key(user_id: int, provider: str, token: str):
-    """Encrypt and store a user's provider token (provider: anthropic|openai|gemini|kimi)."""
+    """Encrypt and store a user's provider token (provider: anthropic|openai|gemini|kimi|openrouter)."""
     data = _load()
     uid = str(user_id)
-    data.setdefault(uid, {})[provider] = _FERNET.encrypt(token.encode()).decode()
+    env_blob = _KMS.encrypt(token.encode("utf-8"))
+    data.setdefault(uid, {})[provider] = env_blob
     _save(data)
 
 
@@ -100,8 +115,12 @@ def get_user_key(user_id: int, provider: str) -> str | None:
     enc = data.get(str(user_id), {}).get(provider)
     if not enc:
         return None
+    # Current envelope format (KMS). Fall back to legacy Fernet for blobs
+    # written before the Phase 3 KMS overhaul.
     try:
-        return _FERNET.decrypt(enc.encode()).decode()
+        if _is_envelope(enc):
+            return _KMS.decrypt(enc).decode("utf-8")
+        return _FERNET.decrypt(enc.encode()).decode("utf-8")
     except Exception:
         # Never silently ship an empty/corrupt key upstream (F6/FIX-4): log the
         # condition loudly so ops can detect key-rotation or store corruption.

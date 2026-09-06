@@ -1,0 +1,11 @@
+description: ECC ecc-test bot (Everything Claude Code integration)
+description_auto: false
+ui_meta:
+  hermes-bots:
+    shape: circle
+    color: hsl(120 68% 58%)
+    imageKind: shape
+    title: 'ECC-TEST  بروفايل الاختبار — التحقق من سلوك الوكيل وسلامة إعدادات ECC.'
+    custom: true
+_ui_meta_revisions:
+  hermes-bots: 1

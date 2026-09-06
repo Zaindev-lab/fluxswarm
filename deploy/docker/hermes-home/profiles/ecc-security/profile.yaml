@@ -1,0 +1,12 @@
+description: ECC ecc-security bot (Everything Claude Code integration)
+description_auto: false
+ui_meta:
+  hermes-bots:
+    shape: triangle
+    color: hsl(0 68% 58%)
+    imageKind: shape
+    title: 'ECC-Security   أمين الأمن + AgentShield — يفحص الأمان ويطبّق حماية AgentShield:
+      حقن التعليمات، المصادقة، تسريب الأسرار.'
+    custom: true
+_ui_meta_revisions:
+  hermes-bots: 1

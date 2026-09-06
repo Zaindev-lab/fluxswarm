@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="{{ lang }}" dir="{{ 'rtl' if lang == 'ar' else 'ltr' }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }}</title>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:#0e1116;color:#e6edf3;line-height:1.7}
+  .wrap{max-width:780px;margin:0 auto;padding:2rem 1.25rem}
+  h1{font-size:1.5rem} h2{font-size:1.15rem;margin-top:1.6rem}
+  .card{border:1px solid #2a2f3a;border-radius:10px;padding:1rem 1.25rem;margin:1rem 0;background:#151a22}
+  .tag{display:inline-block;background:#1f2937;border:1px solid #334155;border-radius:999px;padding:.15rem .7rem;margin:.2rem .2rem 0 0;font-size:.85rem}
+  a{color:#7aa2ff}
+  .btn{display:inline-block;background:#2563eb;color:#fff;border:0;border-radius:8px;padding:.6rem 1.2rem;font-size:.95rem;cursor:pointer}
+  .btn:disabled{opacity:.55;cursor:default}
+  .note{color:#9aa6b2;font-size:.88rem}
+  .ok{color:#3fb950}
+  .err{color:#f85149}
+  meta{color-scheme:dark}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>{{ notice.platform }} — {% if lang == 'ar' %}إشعار استخدام الذكاء الاصطناعي (ADMT){% else %}AI Decision-Making Transparency (ADMT) Notice{% endif %}</h1>
+  <p>{% if lang == 'ar' %}قبل استخدام المساعدة الآلية، يُرجى قراءة هذا الإشعار المسبق. يمكنك الانسحاب في أي وقت دون فقدان الوصول اليدوي للمشاريع.{% else %}Before using AI-assisted launches, please read this pre-use notice. You may opt out at any time without losing manual project access.{% endif %}</p>
+
+  <div class="card">
+    <h2>{% if lang == 'ar' %}أنواع القرارات الآلية{% else %}Automated decision types{% endif %}</h2>
+    {% for t in notice.admt_types %}
+      <span class="tag">{{ t }}</span>
+    {% endfor %}
+    <p class="note">{{ notice.description }}</p>
+  </div>
+
+  <div class="card">
+    <h2>{% if lang == 'ar' %}منطق المعالجة{% else %}Logic summary{% endif %}</h2>
+    <p>{{ notice.logic_summary }}</p>
+    <p class="note">
+      {% if lang == 'ar' %}
+        مراجعة بشرية متاحة عند الطلب. مخرجات السرب مسوّدات تتطلب مراجعتك.
+      {% else %}
+        Human review is available on request. Squad outputs are drafts requiring your review.
+      {% endif %}
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>{% if lang == 'ar' %}بياناتك{% else %}Your data{% endif %}</h2>
+    <p class="note">
+      {% if lang == 'ar' %}
+        يُرسل وصف مشروعك إلى مزوّد الذكاء الاصطناعي لتنفيذ هدفك فقط، ولا ندرّب النماذج على بياناتك.
+      {% else %}
+        Your project description is sent to the AI provider only to execute your goal. We do not train models on your data.
+      {% endif %}
+    </p>
+    <p class="note">
+      {% if lang == 'ar' %}
+        حقوقك (CCPA/CPRA): النسخ، التصحيح، الحذف، والانسحاب من ADMT — راجع <a href="/privacy">سياسة الخصوصية</a>.
+      {% else %}
+        Your rights (CCPA/CPRA): access, correction, erasure, and ADMT opt-out — see the <a href="/privacy-en">privacy policy</a>.
+      {% endif %}
+    </p>
+  </div>
+
+  {% if lang == 'ar' %}
+    <button class="btn" id="ackBtn">فهمت — أقِر الإشعار</button>
+    <span class="id note" id="ackMsg"></span>
+    <p class="note">نسخة الإشعار: {{ notice.last_updated }} · أسئلة: <a href="mailto:privacy@fluxswarm.ai">privacy@fluxswarm.ai</a></p>
+  {% else %}
+    <button class="btn" id="ackBtn">I understand — acknowledge</button>
+    <span class="id note" id="ackMsg"></span>
+    <p class="note">Notice version: {{ notice.last_updated }} · Questions: <a href="mailto:privacy@fluxswarm.ai">privacy@fluxswarm.ai</a></p>
+  {% endif %}
+</div>
+<script nonce="{{ csp_nonce }}">
+(function(){
+  var API = {{ api_base|tojson }};
+  var L = {{ lang|tojson }};
+  var msg = document.getElementById('ackMsg');
+  var btn = document.getElementById('ackBtn');
+  btn.addEventListener('click', async function(){
+    var token = null;
+    try { token = localStorage.getItem('token'); } catch (e) {}
+    if (!token) {
+      msg.textContent = L === 'ar' ? 'سجّل الدخول من الصفحة الرئيسية ثم عد للإقرار. الإشعار متاح للاطلاع دون تسجيل.' : 'Log in from the home page, then return to acknowledge. You can read the notice anonymously.';
+      msg.className = 'note';
+      return;
+    }
+    btn.disabled = true;
+    try {
+      var r = await fetch(API + '/api/account/admt-notice/acknowledge', {method:'POST', headers:{Authorization:'Bearer ' + token}});
+      var d = await r.json().catch(function(){ return {}; });
+      if (r.ok) { msg.textContent = L === 'ar' ? 'تم الإقرار وتسجيله. شكراً.' : 'Acknowledged and recorded. Thank you.'; msg.className = 'ok'; }
+      else { msg.textContent = (d && d.detail) || (L==='ar'?'تعذّر الإقرار — حاول لاحقاً.':'Acknowledgment failed — try again.'); msg.className = 'err'; }
+    } catch (e) { msg.textContent = L === 'ar' ? 'تعذّر الإقرار — حاول لاحقاً.' : 'Acknowledgment failed — try again.'; msg.className = 'err'; }
+    finally { btn.disabled = false; }
+  });
+})();
+</script>
+</body>
+</html>

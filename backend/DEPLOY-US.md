@@ -84,6 +84,7 @@ Endpoints:
 | **Terms of Service page (EN)** | Live | `GET /terms-en` |
 | **Operating entity disclosure** | Optional at deploy time (env-driven) | `FLUXSWARM_LEGAL_*` in `.env` → rendered on all four legal pages |
 | **CCPA/CPRA right to access** | Live | `GET /api/account/export` (returns all user rows) |
+| **CCPA/CPRA right to correct** | Live | `PATCH /api/account` (update display name; audited as `account.rectify`) |
 | **CCPA/CPRA right to delete** | Live | `DELETE /api/account` (removes user + projects + templates + purchases + payment events + encrypted keys) |
 | **Data at rest** | Fernet-encrypted user AI keys; Argon2id passwords; audit log has no secrets | `vault.py`, `auth.py` |
 | **Data in transit** | TLS via Caddy (auto), HSTS header already sent by the app | headers middleware |

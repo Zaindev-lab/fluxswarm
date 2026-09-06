@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>جرب FluxSwarm مجاناً</title>
+<style>
+  :root{--bg:#0b1020;--card:#131a2e;--acc:#4f7cff;--ok:#2ecc71;--warn:#f1c40f;--txt:#e8ecf7;--mut:#9aa4c2;--bord:#23305a;--fieldbg:#0d1428;--fieldbord:#2a3a6b;--dash:#223059;--err:#ff6b6b;--btnbg:#4f7cff}
+  html[data-theme="light"]{--bg:#f5f7fb;--card:#ffffff;--acc:#3458ff;--ok:#16a34a;--warn:#b45309;--txt:#1a2233;--mut:#5c6880;--bord:#d7dcea;--fieldbg:#f0f3f9;--fieldbord:#c9d2e6;--dash:#dbe1ee;--err:#dc2626;--btnbg:#3458ff}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple system,"Segoe UI",Tahoma,sans-serif;background:var(--bg);color:var(--txt)}
+  main{max-width:720px;margin:0 auto;padding:32px 16px}
+  h1{font-size:26px;margin:0 0 6px}
+  .sub{color:var(--mut);margin:0 0 24px}
+  .top{display:flex;justify-content:space-between;align-items:center;gap:10px}
+  .tools{display:flex;gap:8px}
+  .tools button{background:var(--card);color:var(--txt);border:1px solid var(--bord);border-radius:8px;padding:6px 12px;font-size:13px;cursor:pointer;margin:0}
+  .card{background:var(--card);border:1px solid var(--bord);border-radius:12px;padding:20px}
+  textarea{width:100%;min-height:96px;background:var(--fieldbg);color:var(--txt);border:1px solid var(--fieldbord);border-radius:8px;padding:12px;font-size:15px}
+  button{margin-top:12px;background:var(--btnbg);color:#fff;border:0;border-radius:8px;padding:12px 22px;font-size:16px;cursor:pointer}
+  button:disabled{opacity:.5;cursor:wait}
+  .q{color:var(--mut);font-size:13px;margin-top:10px}
+  .agent{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px dashed var(--dash)}
+  .agent:last-child{border-bottom:0}
+  .bar{flex:1;height:8px;background:var(--fieldbg);border-radius:6px;overflow:hidden}
+  .bar>i{display:block;height:100%;background:var(--ok);width:0;transition:width .5s}
+  .st{width:74px;font-size:12px;color:var(--mut)}
+  .eta{color:var(--mut);font-size:13px;margin-top:12px}
+  #err{color:var(--err);font-size:14px;margin-top:12px}
+  .link{display:inline-block;margin-top:18px;color:var(--acc);text-decoration:none}
+  .skel{flex:1;height:8px;background:var(--fieldbg);border-radius:6px;position:relative;overflow:hidden}
+  .skel::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent,var(--bord),transparent);animation:sh 1.2s infinite}
+  @keyframes sh{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
+</style>
+</head>
+<body>
+<main>
+  <div class="top">
+    <h1>⚡ جرب FluxSwarm مجاناً</h1>
+    <div class="tools">
+      <button id="dirBtn" title="Toggle direction (RTL/LTR)" aria-label="Toggle direction">⇄ عربي</button>
+      <button id="themeBtn" title="Toggle theme" aria-label="Toggle theme">🌙</button>
+    </div>
+  </div>
+  <p class="sub">سرب من وكلاء الذكاء الاصطناعي (تخطيط → معمارية → DevOps → اختبارات → مراجعة) يبني مشروعك خلال دقائق. <b>1 إطلاق في الساعة</b> للزوار.</p>
+  <div class="card">
+    <label for="goal">صف مشروعك</label>
+    <textarea id="goal" placeholder="مثال: تطبيق FastAPI لإدارة الفواتير مع اختبارات و CI/CD"></textarea>
+    <button id="launch">🔨 إطلاق التجربة مجاناً</button>
+    <p class="q" id="quota"></p>
+    <div id="stage" hidden>
+      <hr style="border:0;border-top:1px dashed var(--dash);margin:16px 0">
+      <div id="agents"></div>
+      <p class="eta" id="eta"></p>
+    </div>
+    <div id="err" hidden></div>
+  </div>
+  <a class="link" href="/">→ حساب كامل: إطلاقات غير محدودة وخطط مدفوعة</a>
+</main>
+<script nonce="{{ csp_nonce }}">
+const $=id=>document.getElementById(id);
+let slug=null;
+
+// Theme (dark default, respect system, persist choice).
+(function(){
+  const saved=localStorage.getItem("fsTheme");
+  const theme=saved||(matchMedia("(prefers-color-scheme: light)").matches?"light":"dark");
+  document.documentElement.dataset.theme=theme;
+  $("themeBtn").textContent=theme==="dark"?"🌙":"☀️";
+  $("themeBtn").onclick=()=>{
+    const next=document.documentElement.dataset.theme==="dark"?"light":"dark";
+    document.documentElement.dataset.theme=next;
+    localStorage.setItem("fsTheme",next);
+    $("themeBtn").textContent=next==="dark"?"🌙":"☀️";
+  };
+})();
+// Direction (RTL default, persist choice).
+(function(){
+  const dir=localStorage.getItem("fsDir")||"rtl";
+  document.documentElement.dir=dir;
+  document.documentElement.lang=dir==="rtl"?"ar":"en";
+  $("dirBtn").textContent=dir==="rtl"?"⇄ عربي":"⇄ EN";
+  $("dirBtn").onclick=()=>{
+    const next=document.documentElement.dir==="rtl"?"ltr":"rtl";
+    document.documentElement.dir=next;
+    document.documentElement.lang=next==="rtl"?"ar":"en";
+    localStorage.setItem("fsDir",next);
+    $("dirBtn").textContent=next==="rtl"?"⇄ عربي":"⇄ EN";
+  };
+})();
+
+async function quota(){try{
+  const r=await fetch("/api/demo/status");const d=await r.json();
+  $("quota").textContent="حصتك اليومية المتبقية: "+d.daily_quota_remaining+" من "+d.daily_quota_total+" إطلاق.";
+}catch(e){}}
+quota();
+
+const TOAST_STATUS={done:"مكتمل",running:"يعمل…",pending:"بانتظار",blocked:"محظور"};
+const SKEL="<div class='agent'><span style='color:var(--mut)'>••••</span><div class='skel'></div><span class='st'>…</span></div>";
+let firstPoll=true;
+
+async function poll(){
+  if(!slug)return;
+  try{
+    const r=await fetch("/api/demo/progress/"+encodeURIComponent(slug));
+    if(!r.ok){if(r.status===404){$("err").hidden=false;$("err").textContent="اللوحة غير موجودة بعد — أعد محاولة الإطلاق.";}return;}
+    const d=await r.json();
+    $("agents").innerHTML=d.agents.map(a=>
+      '<div class="agent"><span>'+a.name+'</span>'+
+      '<div class="bar"><i style="width:0%" data-w="'+a.progress+'"></i></div>'+
+      '<span class="st">'+(TOAST_STATUS[a.status]||a.status)+'</span></div>'
+    ).join("");
+    // CSP-strict: set widths via CSSOM (style= attributes are blocked).
+    document.querySelectorAll(".bar i[data-w]").forEach(el=>{el.style.width=el.getAttribute("data-w")+"%";el.removeAttribute("data-w");});
+    if(d.status==="running"){
+      $("eta").textContent="الوقت المتوقع المتبقي: ~"+Math.max(0,d.estimated_remaining_seconds||0)+" ثانية";
+      setTimeout(poll,4000);
+    }else{
+      $("eta").textContent="✅ انتهت الجلسة التجريبية. سجّل مجاناً لتنزيل الكود وفتح عمل كامل.";
+      setTimeout(poll,10000);
+    }
+  }catch(e){setTimeout(poll,4000);}
+}
+
+$("launch").onclick=async()=>{
+  const goal=($("goal").value||"Build a sample FastAPI notes API with tests and CI/CD (DEMO)").trim();
+  $("launch").disabled=true;$("err").hidden=true;
+  try{
+    const r=await fetch("/api/demo/launch?goal="+encodeURIComponent(goal));
+    if(!r.ok){
+      const t=await r.text();let msg=t;
+      try{
+        const j=JSON.parse(t);
+        msg=(j.message&&(j.message.en||j.message.ar))||(j.detail&&(j.detail.en||j.detail.ar))||j.detail||j.error;
+        if(typeof msg!=="string")msg=JSON.stringify(msg);
+        if(j&&j.retry_after_seconds){msg+=" ("+Math.ceil(j.retry_after_seconds/60)+" دقيقة)";}
+      }catch(e){}
+      $("err").hidden=false;$("err").textContent="تعذّر الإطلاق: "+msg;
+      return;
+    }
+    const d=await r.json();slug=d.slug;$("stage").hidden=false;
+    $("agents").innerHTML=SKEL.repeat(6);$("eta").textContent="جاري تجهيز السرب…";
+    poll();
+  }catch(e){
+    $("err").hidden=false;$("err").textContent="خطأ في الاتصال — حاول مجدداً.";
+  }finally{$("launch").disabled=false;}
+};
+</script>
+</body>
+</html>

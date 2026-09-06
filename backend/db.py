@@ -70,7 +70,8 @@ def init_db():
             ref_code TEXT UNIQUE NOT NULL,
             referred_by TEXT,
             created_at REAL NOT NULL,
-            logged_out_at REAL
+            logged_out_at REAL,
+            admt_opt_out INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -142,6 +143,29 @@ def init_db():
             count INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (who, day)
         );
+        CREATE TABLE IF NOT EXISTS provider_agreements (
+            user_id INTEGER NOT NULL,
+            provider TEXT NOT NULL,
+            agreed_at REAL NOT NULL,
+            version TEXT NOT NULL DEFAULT '1.0',
+            PRIMARY KEY (user_id, provider),
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );
+        CREATE TABLE IF NOT EXISTS admt_disclosures (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            project_id INTEGER,
+            disclosed_at REAL NOT NULL,
+            acknowledged_at REAL,
+            admt_type TEXT,
+            logic_summary TEXT,
+            human_review_status TEXT,
+            requested_at REAL,
+            reviewed_at REAL,
+            reviewer_notes TEXT,
+            FOREIGN KEY(user_id) REFERENCES users(id),
+            FOREIGN KEY(project_id) REFERENCES projects(id)
+        );
         CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_id);
         CREATE INDEX IF NOT EXISTS idx_purchases_template ON template_purchases(template_id);
         CREATE INDEX IF NOT EXISTS idx_purchases_buyer ON template_purchases(buyer_id);
@@ -165,6 +189,8 @@ def _migrate():
         cols = [r[1] for r in c.execute("PRAGMA table_info(users)")]
         if "logged_out_at" not in cols:
             c.execute("ALTER TABLE users ADD COLUMN logged_out_at REAL")
+        if "admt_opt_out" not in cols:
+            c.execute("ALTER TABLE users ADD COLUMN admt_opt_out INTEGER NOT NULL DEFAULT 0")
         pcols = [r[1] for r in c.execute("PRAGMA table_info(projects)")]
         # Launch-outcome bookkeeping: lets the driver (and UI) distinguish a
         # converged launch from one cut short by a provider/worker stall, and
@@ -180,6 +206,25 @@ def _migrate():
             c.execute("ALTER TABLE projects ADD COLUMN launch_refunded INTEGER NOT NULL DEFAULT 0")
         if "launch_updated_at" not in pcols:
             c.execute("ALTER TABLE projects ADD COLUMN launch_updated_at REAL")
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS admt_disclosures (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                project_id INTEGER,
+                disclosed_at REAL NOT NULL,
+                acknowledged_at REAL,
+                admt_type TEXT,
+                logic_summary TEXT,
+                human_review_status TEXT,
+                requested_at REAL,
+                reviewed_at REAL,
+                reviewer_notes TEXT,
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                FOREIGN KEY(project_id) REFERENCES projects(id)
+            )
+            """
+        )
         c.commit()
     finally:
         c.close()
@@ -254,6 +299,18 @@ def create_user(email: str, name: str, password: str, ref_code: str | None = Non
         return get_user_by_id(uid)
     except sqlite3.IntegrityError:
         raise ValueError("البريد مسجّل مسبقاً")
+    finally:
+        c.close()
+
+
+def update_user_name(user_id: int, name: str) -> bool:
+    """Rectify the display name (CCPA/CPRA right to correct). False when the
+    user does not exist."""
+    c = _conn()
+    try:
+        cur = c.execute("UPDATE users SET name=? WHERE id=?", (name.strip(), user_id))
+        c.commit()
+        return cur.rowcount > 0
     finally:
         c.close()
 
@@ -655,9 +712,11 @@ def account_payload(user_id: int) -> dict:
             "SELECT id,gateway,kind,created_at FROM payment_events WHERE user_id=?", (user_id,))]
         tg = [dict(r) for r in c.execute(
             "SELECT telegram_chat_id,linked_at FROM telegram_links WHERE user_id=?", (user_id,))]
+        agrees = [dict(r) for r in c.execute(
+            "SELECT provider,agreed_at,version FROM provider_agreements WHERE user_id=?", (user_id,))]
         return {"user": dict(u), "projects": projects, "referrals": refs,
                 "templates": tpls, "template_purchases": buys, "payment_events": pays,
-                "telegram_links": tg}
+                "telegram_links": tg, "provider_agreements": agrees}
     finally:
         c.close()
 
@@ -679,6 +738,8 @@ def delete_user(user_id: int) -> bool:
             "DELETE FROM telegram_links WHERE user_id=?",
             "DELETE FROM telegram_codes WHERE user_id=?",
             "DELETE FROM password_resets WHERE user_id=?",
+            "DELETE FROM provider_agreements WHERE user_id=?",
+            "DELETE FROM admt_disclosures WHERE user_id=?",
             "DELETE FROM users WHERE id=?",
         ):
             try:
@@ -687,6 +748,190 @@ def delete_user(user_id: int) -> bool:
                 pass
         c.commit()
         return True
+    finally:
+        c.close()
+
+
+# ---------- provider agreements (Phase 3 BYOK gate) ----------
+
+def agree_provider(user_id: int, provider: str, version: str = "1.0") -> bool:
+    """Record a user's acceptance of a provider's terms (idempotent upsert).
+
+    Re-acceptance refreshes ``agreed_at`` and the accepted ``version``.
+    Returns True on first acceptance, False when already agreed.
+    """
+    c = _conn()
+    try:
+        now = time.time()
+        existing = c.execute(
+            "SELECT agreed_at FROM provider_agreements WHERE user_id=? AND provider=?",
+            (user_id, provider)).fetchone()
+        c.execute(
+            "INSERT INTO provider_agreements (user_id, provider, agreed_at, version) "
+            "VALUES (?,?,?,?) "
+            "ON CONFLICT(user_id, provider) DO UPDATE SET agreed_at=?, version=?",
+            (user_id, provider, now, version, now, version))
+        c.commit()
+        return existing is None
+    finally:
+        c.close()
+
+
+def provider_agreements(user_id: int) -> dict[str, dict]:
+    """{provider: {agreed_at, version}} for a user (empty dict when none)."""
+    c = _conn()
+    try:
+        rows = c.execute(
+            "SELECT provider, agreed_at, version FROM provider_agreements WHERE user_id=?",
+            (user_id,)).fetchall()
+        return {r["provider"]: {"agreed_at": r["agreed_at"], "version": r["version"]} for r in rows}
+    finally:
+        c.close()
+
+
+def has_provider_agreement(user_id: int, provider: str) -> bool:
+    c = _conn()
+    try:
+        r = c.execute(
+            "SELECT 1 FROM provider_agreements WHERE user_id=? AND provider=?",
+            (user_id, provider)).fetchone()
+        return r is not None
+    finally:
+        c.close()
+
+
+def provider_agreements_summary() -> list[dict]:
+    """Operator view of accepted provider agreements (admin endpoint).
+
+    The ledger lives in alembic 003 (user_id/provider/agreed_at/version). The
+    session-2 prompt's registry columns (agreement_type/signed_at/expires_at/
+    jurisdiction/document_url) do not exist in the schema — the authentic table
+    IS the acceptance ledger; vendor DPA links are served by the legal pages
+    (see docs/CCPA_RISK_ASSESSMENT.md).
+    """
+    c = _conn()
+    try:
+        rows = c.execute(
+            "SELECT pa.provider, pa.agreed_at, pa.version, u.email "
+            "FROM provider_agreements pa JOIN users u ON u.id = pa.user_id "
+            "ORDER BY pa.agreed_at DESC").fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        c.close()
+
+
+# ---------- CCPA/CPRA ADMT (Phase 5) ----------
+
+def record_admt_notice_ack(user_id: int) -> int:
+    """Persist a pre-use notice acknowledgment (disclosed_at = acknowledged_at).
+
+    Each acknowledgment (incl. re-reads before opt-in) appends a ledger row so
+    the disclosure history is transparent to the data-subject.
+    """
+    c = _conn()
+    try:
+        now = time.time()
+        cur = c.execute(
+            "INSERT INTO admt_disclosures (user_id,disclosed_at,acknowledged_at,admt_type) "
+            "VALUES (?,?,?,?)",
+            (user_id, now, now, "pre-use-notice"),
+        )
+        c.commit()
+        return cur.lastrowid
+    finally:
+        c.close()
+
+
+def has_admt_notice_ack(user_id: int) -> bool:
+    c = _conn()
+    try:
+        r = c.execute(
+            "SELECT 1 FROM admt_disclosures WHERE user_id=? AND admt_type='pre-use-notice' "
+            "AND acknowledged_at IS NOT NULL LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        return r is not None
+    finally:
+        c.close()
+
+
+def get_admt_opt_out(user_id: int) -> bool:
+    c = _conn()
+    try:
+        r = c.execute("SELECT admt_opt_out FROM users WHERE id=?", (user_id,)).fetchone()
+        return bool(r and r["admt_opt_out"])
+    finally:
+        c.close()
+
+
+def set_admt_opt_out(user_id: int, value: bool) -> None:
+    c = _conn()
+    try:
+        c.execute("UPDATE users SET admt_opt_out=? WHERE id=?", (1 if value else 0, user_id))
+        c.commit()
+    finally:
+        c.close()
+
+
+def request_human_review(user_id: int, project_id: int) -> int:
+    """Create a human-review request for a project (admt_disclosures row)."""
+    c = _conn()
+    try:
+        now = time.time()
+        cur = c.execute(
+            "INSERT INTO admt_disclosures (user_id,project_id,disclosed_at,admt_type,"
+            "human_review_status,requested_at) VALUES (?,?,?,?,?,?)",
+            (user_id, project_id, now, "human-review-request", "requested", now),
+        )
+        c.commit()
+        return cur.lastrowid
+    finally:
+        c.close()
+
+
+def get_human_review(review_id: int) -> dict | None:
+    c = _conn()
+    try:
+        row = c.execute(
+            "SELECT d.*, u.email AS user_email, u.name AS user_name, "
+            "p.name AS project_name, p.board_slug "
+            "FROM admt_disclosures d JOIN users u ON u.id=d.user_id "
+            "LEFT JOIN projects p ON p.id=d.project_id WHERE d.id=?",
+            (review_id,),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        c.close()
+
+
+def list_human_review_queue(limit: int = 100) -> list[dict]:
+    """Pending (status='requested') human-review requests, oldest first."""
+    c = _conn()
+    try:
+        rows = c.execute(
+            "SELECT d.*, u.email AS user_email, u.name AS user_name, "
+            "p.name AS project_name, p.board_slug, p.goal "
+            "FROM admt_disclosures d JOIN users u ON u.id=d.user_id "
+            "LEFT JOIN projects p ON p.id=d.project_id "
+            "WHERE d.human_review_status='requested' ORDER BY d.requested_at ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        c.close()
+
+
+def update_human_review(review_id: int, status: str, notes: str = "") -> bool:
+    """Resolve a pending request; returns False when already resolved/missing."""
+    c = _conn()
+    try:
+        cur = c.execute(
+            "UPDATE admt_disclosures SET human_review_status=?, reviewer_notes=?, reviewed_at=? "
+            "WHERE id=? AND human_review_status='requested'",
+            (status, notes, time.time(), review_id),
+        )
+        c.commit()
+        return cur.rowcount > 0
     finally:
         c.close()
 

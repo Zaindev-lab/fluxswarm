@@ -1,0 +1,87 @@
+# FluxSwarm Friends-Beta self-contained compose.
+#
+# Design intent:
+#  - FULLY self-contained Linux image (Hermes Agent v0.21.0 + ECC seed installed
+#    inside the image). NO Windows host-mount of hermes.exe or a host HERMES_HOME.
+#  - PORT is platform-provided (Render/other passes $PORT); default 8787.
+#  - Only the directories that MUST be persistent are on named volumes:
+#      * /app/backend/data        -> FluxSwarm SQLite (users.db) + secrets
+#      * /app/hermes_home/kanban  -> Hermes kanban boards (SQLite + workspaces)
+#      * /app/hermes_home/logs    -> runtime logs
+#      * /app/hermes_home/memories-> agent memories
+#      * /app/hermes_home/state   -> runtime state DBs
+#      * /app/hermes_home/pairing -> pairing records
+#    The ECC profiles/skills/config seed stays in the image layer (static).
+services:
+  fluxswarm:
+    build:
+      # The Dockerfile COPYs backend/ + deploy/docker/* from the repo ROOT, so
+      # the build context must be the repository root, not this folder.
+      # (Relative paths here are resolved from this compose file's directory.)
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    image: fluxswarm-beta
+    container_name: fluxswarm-app-1
+    # Pin a stable hostname so the Hermes claimer id (socket.gethostname())
+    # stays constant across container re-creations. Otherwise a re-created
+    # container gets a new hostname, the two claim prefixes diverge, and a
+    # task claimed before the re-create looks "foreign" to the new host — its
+    # dead worker would freeze until the claim TTL instead of being
+    # crash-reclaimed promptly by the reconciliation reaper.
+    hostname: fluxswarm
+    ports:
+      - "127.0.0.1:${PORT:-8787}:${PORT:-8787}"
+    # Hardening: explicit memory budget + least-privilege runtime. FLUXSWARM_MEM_TOTAL_MB /
+    # MEMORY_GUARD_MB_PER_WORKER below derive the backend-side concurrency cap
+    # (MAX_IN_PROGRESS) and MUST stay in sync with `deploy.resources.limits.memory`.
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 8G
+        reservations:
+          cpus: '2.0'
+          memory: 4G
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:rw
+      - /run:rw
+      - /var/tmp:rw
+    environment:
+      PORT: "${PORT:-8787}"
+      HERMES_HOME: /app/hermes_home
+      FLUXSWARM_HERMES_BIN: /usr/local/bin/hermes
+      FLUXSWARM_DEMO_MODE: "1"
+      # Session 3: memory-derived swarm concurrency + reaper tuning + dispatch window.
+      FLUXSWARM_MEM_TOTAL_MB: "8192"
+      MEMORY_GUARD_MB_PER_WORKER: "384"
+      FLUXSWARM_REAPER_MAX_SPAWN: "16"
+      FLUXSWARM_REAPER_ENABLED: "1"
+      FLUXSWARM_DISPATCH_TIMEOUT_S: "900"
+      # Session 2: no operator default pinned to OpenRouter free. The demo
+      # surface picks a healthy provider from provider_pool; production requires
+      # a paid key (envguard). The key below feeds the pool's openrouter entries
+      # (and user BYOK) — none of these defaults leak into production launches.
+      OPENROUTER_API_KEY: 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
+      FLUXSWARM_PAYMENTS: "0"
+      # No REDIS_URL => in-process rate limiting (single worker). Self-contained.
+    volumes:
+      - fluxswarm_data:/app/backend/data
+      - hermes_kanban:/app/hermes_home/kanban
+      - hermes_logs:/app/hermes_home/logs
+      - hermes_memories:/app/hermes_home/memories
+      - hermes_state:/app/hermes_home/state
+      - hermes_pairing:/app/hermes_home/pairing
+    restart: unless-stopped
+
+volumes:
+  fluxswarm_data:
+  hermes_kanban:
+  hermes_logs:
+  hermes_memories:
+  hermes_state:
+  hermes_pairing:

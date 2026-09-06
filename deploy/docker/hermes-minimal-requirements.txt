@@ -1,0 +1,36 @@
+# Minimal curated dependency set for Hermes Agent v0.21.0 (pinned, from the
+# project's [project.dependencies]) covering the parent `hermes kanban`
+# commands AND the spawned worker `hermes ... chat -q` runtime used by the
+# FluxSwarm swarm, which talks to the anonymous `opencode-free` provider via an
+# OpenAI-compatible client.
+#
+# Deliberately EXCLUDED (unused by kanban/swarm + opencode-free, and heavy):
+#   - ML/audio local-inference stack: faster-whisper, openwakeword, onnxruntime,
+#     sherpa-onnx, nemo-relay, sentencepiece, sounddevice, pvporcupine, numpy,
+#     Pillow, ai-edge-litert
+#   - per-platform extras: hermes-agent[cron|mcp|honcho|acp|termux|google|
+#       homeassistant|sms|web|pty], pywinpty/pywin32/... (win32 only),
+#       tzdata (win32 only), concurrent-log-handler (win32 only),
+#       croniter (cron feature, not kanban)
+# Versions pinned to the values in the Hermes pyproject.toml.
+openai==2.24.0
+httpx[socks]==0.28.1
+certifi==2026.5.20
+pyyaml==6.0.3
+ruamel.yaml==0.18.17
+python-dotenv==1.2.2
+pydantic==2.13.4
+rich==14.3.3
+prompt_toolkit==3.0.52
+tenacity==9.1.4
+requests==2.33.0
+Jinja2==3.1.6
+Markdown==3.10.2
+packaging==26.0
+snowballstemmer==3.1.1
+PyJWT[crypto]==2.13.0
+websockets==15.0.1
+pathspec==1.1.1
+psutil==7.2.2
+python-multipart>=0.0.9,<1
+croniter==6.0.0

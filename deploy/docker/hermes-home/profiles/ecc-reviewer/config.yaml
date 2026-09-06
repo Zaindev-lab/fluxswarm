@@ -1,0 +1,46 @@
+﻿skills:
+  external_dirs: /app/hermes_home/skills/ecc/skills
+description: ecc-reviewer آ· ظ…ط±ط§ط¬ط¹ ط§ظ„ظƒظˆط¯ â€” ظٹط±ط§ط¬ط¹ ط¬ظˆط¯ط© ط§ظ„ظƒظˆط¯ ظˆط£ط³ظ„ظˆط¨ظ‡ ظˆظٹظƒطھط´ظپ ط§ظ„ط¹ظ„ظ„ ط¨ظ„ط؛ط©
+  ط§ظ„ظ…ط´ط±ظˆط¹ ظˆظٹظ‚ط¯ظ‘ظ… طھط¹ط¯ظٹظ„ط§طھ ظ…ظ‚طھط±ط­ط©.
+plugins:
+  enabled: []
+_config_version: 40
+agent: {}
+
+# â”€â”€ Security â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Secret redaction is ON by default â€” strings that look like API keys,
+# tokens, and passwords are masked in tool output, logs, and chat
+# responses before the model or user ever sees them. Set redact_secrets
+# to false to disable (e.g. when developing the redactor itself).
+# tirith pre-exec scanning is enabled by default when the tirith binary
+# is available. Configure via security.tirith_* keys or env vars
+# (TIRITH_ENABLED, TIRITH_BIN, TIRITH_TIMEOUT, TIRITH_FAIL_OPEN).
+#
+# security:
+#   redact_secrets: true
+#   tirith_enabled: true
+#   tirith_path: "tirith"
+#   tirith_timeout: 5
+#   tirith_fail_open: true
+
+# â”€â”€ Fallback Model â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Automatic provider failover when primary is unavailable.
+# Uncomment and configure to enable. Triggers on rate limits (429),
+# overload (529), service errors (503), or connection failures.
+#
+# Supported providers:
+#   openrouter   (OPENROUTER_API_KEY)  â€” routes to any model
+#   openai-codex (OAuth â€” hermes auth) â€” OpenAI Codex
+#   nous         (OAuth â€” hermes auth) â€” Nous Portal
+#   zai          (ZAI_API_KEY)         â€” Z.AI / GLM
+#   kimi-coding  (KIMI_API_KEY)        â€” Kimi / Moonshot
+#   kimi-coding-cn (KIMI_CN_API_KEY)   â€” Kimi / Moonshot (China)
+#   minimax      (MINIMAX_API_KEY)     â€” MiniMax
+#   minimax-cn   (MINIMAX_CN_API_KEY)  â€” MiniMax (China)
+#   bedrock      (AWS IAM / boto3)     â€” AWS Bedrock (Converse API)
+#
+# For custom OpenAI-compatible endpoints, add base_url and key_env.
+#
+# fallback_model:
+#   provider: openrouter
+#   model: anthropic/claude-sonnet-4

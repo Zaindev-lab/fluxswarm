@@ -7,10 +7,31 @@ on:
 jobs:
   test-backend:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: fluxswarm_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d fluxswarm_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     env:
       # CI runs in Demo/dev mode so `import main` and the suite work without
       # production secrets; production-mode failure paths are unit-tested.
       FLUXSWARM_DEMO_MODE: "1"
+      # Phase 1: run the SQLite->PostgreSQL parity + Alembic migration suite
+      # against the ephemeral service container.
+      FLUXSWARM_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/fluxswarm_test
+      # Phase 3: pin the hermetic file-KMS backend so the suite never touches a
+      # real keyring.
+      FLUXSWARM_KMS_BACKEND: file
+      FLUXSWARM_KMS_FILE_KEY: ci-test-passphrase-not-secret
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -22,7 +43,7 @@ jobs:
         run: python -c "import main"
         working-directory: backend
       - name: Lint (syntax)
-        run: python -m py_compile main.py hermes_client.py
+        run: python -m py_compile main.py hermes_client.py hermes_docker.py kms_client.py db.py db_postgres.py serverlock.py
         working-directory: backend
       - name: Run tests
         run: python -m pytest backend/tests -q
