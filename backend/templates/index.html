@@ -8,19 +8,30 @@
 <meta property="og:title" content="FluxSwarm — AI development squad" />
 <meta property="og:description" content="Type a goal. A 6-agent squad builds it on a live board. 1 credit per launch. Bring your own provider key." />
 <meta property="og:type" content="website" />
-<meta name="twitter:card" content="summary" />
+<meta property="og:image" content="/static/brand/og.jpg" />
+<meta name="twitter:card" content="summary_large_image" />
 {% if canonical %}<link rel="canonical" href="{{ canonical }}" />{% endif %}
 <title>FluxSwarm — AI development squad</title>
 <style>
+  @font-face{font-family:'Inter';font-style:normal;font-weight:400;font-display:swap;src:url('/static/fonts/Inter-400.woff2') format('woff2')}
+  @font-face{font-family:'Inter';font-style:normal;font-weight:600;font-display:swap;src:url('/static/fonts/Inter-600.woff2') format('woff2')}
+  @font-face{font-family:'Inter';font-style:normal;font-weight:700;font-display:swap;src:url('/static/fonts/Inter-700.woff2') format('woff2')}
+  @font-face{font-family:'Inter';font-style:normal;font-weight:800;font-display:swap;src:url('/static/fonts/Inter-800.woff2') format('woff2')}
+  @font-face{font-family:'Space Grotesk';font-style:normal;font-weight:500;font-display:swap;src:url('/static/fonts/SpaceGrotesk-500.woff2') format('woff2')}
+  @font-face{font-family:'Space Grotesk';font-style:normal;font-weight:700;font-display:swap;src:url('/static/fonts/SpaceGrotesk-700.woff2') format('woff2')}
   :root{
-    --bg:#0a0c11; --panel:#12151d; --panel2:#0e1117; --border:#232837;
-    --fg:#eef1f6; --muted:#98a0af; --accent:#6d7cfa; --accent2:#9d8bff;
-    --green:#34c77b; --amber:#e5a83a; --blue:#5a8cff; --red:#ef5562;
-    --radius:14px; --radius-sm:10px;
+    --bg:#0b0f1a; --panel:#141a2c; --panel2:#0f1424; --border:#25304a;
+    --fg:#eef1fb; --muted:#8b96b3; --accent:#22d3ee; --accent2:#7c3aed;
+    --green:#10b981; --amber:#f59e0b; --blue:#38bdf8; --red:#f87171;
+    --radius:16px; --radius-sm:11px; --font-sans:'Inter',ui-sans-serif,system-ui,'Segoe UI',Tahoma,Arial; --font-display:'Space Grotesk','Inter',ui-sans-serif,system-ui,Tahoma,Arial;
   }
   *{box-sizing:border-box}
-  body{margin:0;font-family:"Inter",ui-sans-serif,system-ui,"Segoe UI",Tahoma,Arial;font-weight:400;background:var(--bg);color:var(--fg);-webkit-font-smoothing:antialiased;line-height:1.55}
-  nav{padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:var(--panel2);position:sticky;top:0;z-index:40;backdrop-filter:blur(8px)}
+  body{margin:0;font-family:var(--font-sans);font-weight:400;background:
+    radial-gradient(1100px 500px at 85% -100px,rgba(124,58,237,.16),transparent 60%),
+    radial-gradient(900px 480px at -10% -80px,rgba(34,211,238,.14),transparent 60%),
+    var(--bg);background-attachment:fixed;color:var(--fg);-webkit-font-smoothing:antialiased;line-height:1.55}
+  nav{padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:rgba(15,20,36,.82);position:sticky;top:0;z-index:40;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
+  .nav-logo{height:26px;width:26px;border-radius:7px;object-fit:cover;flex:0 0 auto}
   nav h1{font-size:18px;margin:0;font-weight:800;letter-spacing:-.2px;background:linear-gradient(90deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
   nav .tag{font-size:12px;color:var(--muted)}
   nav .spacer{flex:1}
@@ -103,11 +114,55 @@
     main{padding:16px 12px}
     .card{padding:16px}
   }
+  /* ===== hero redesign (design-preview) ===== */
+  .hero{position:relative;overflow:hidden}
+  .hero::before{content:"";position:absolute;inset:0;pointer-events:none;background:
+    radial-gradient(600px 300px at 80% -20px,rgba(124,58,237,.20),transparent 65%),
+    radial-gradient(500px 280px at 8% -30px,rgba(34,211,238,.16),transparent 65%)}
+  .eyebrow{display:inline-flex;align-items:center;gap:8px;font-size:12px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--accent);border:1px solid rgba(34,211,238,.35);background:rgba(34,211,238,.08);border-radius:999px;padding:6px 14px;margin:0 0 14px}
+  .hero-title{font-family:var(--font-display);font-weight:700;letter-spacing:-.5px;line-height:1.12;font-size:clamp(26px,4.2vw,40px);margin:0 0 10px;max-width:16ch}
+  .hero-title .grad{background:linear-gradient(92deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .hero-sub{color:var(--muted);font-size:14.5px;margin:0 0 18px;max-width:56ch;line-height:1.65}
+  .squad-strip{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+  .chip{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--fg);border:1px solid var(--border);background:var(--panel);border-radius:999px;padding:7px 13px;box-shadow:0 6px 18px rgba(0,0,0,.25)}
+  .chip .cdot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green)}
+  .chip .cdot.run{background:var(--blue);animation:pulse 1.5s infinite}
+  .badge{display:inline-block;font-size:12px;color:var(--fg);border:1px solid var(--border);border-radius:999px;padding:6px 12px;background:var(--panel);white-space:nowrap;box-shadow:0 4px 14px rgba(0,0,0,.22)}
+  .card{transition:border-color .2s,box-shadow .2s}
+  .card:hover{border-color:#2e3b5c}
+  .section-title{font-family:var(--font-display);font-weight:700;font-size:20px;letter-spacing:-.3px;margin:0 0 4px}
+  .section-title .grad{background:linear-gradient(92deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
+  /* ===== premium plan cards ===== */
+  .plan{position:relative;background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--border);border-radius:var(--radius);padding:22px 22px 20px;display:flex;flex-direction:column;transition:border-color .2s,transform .2s,box-shadow .2s}
+  .plan:hover{transform:translateY(-2px)}
+  .plan.best{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent),0 16px 40px rgba(34,211,238,.10)}
+  .plan .hot{position:absolute;top:-11px;left:50%;transform:translateX(-50%);background:linear-gradient(92deg,var(--accent),var(--accent2));color:#0b0f1a;font-size:10.5px;font-weight:800;letter-spacing:1px;padding:4px 12px;border-radius:999px;white-space:nowrap}
+  .plan .pname{font-size:17px;font-weight:800}
+  .plan .price{font-size:30px;font-weight:800;margin:10px 0 2px;letter-spacing:-1px;font-family:var(--font-display)}
+  .plan .price small{font-size:12px;color:var(--muted);font-weight:400;letter-spacing:0}
+  .plan ul{list-style:none;padding:0;margin:12px 0 16px;font-size:13px;color:var(--fg);flex:1}
+  .plan li{padding:4px 0;color:var(--muted)}
+  .plan li .tick{color:var(--green);margin-right:6px}
+  .pbtn{width:100%;text-align:center}
+  /* ===== credits meter ===== */
+  .userbox{display:inline-flex;flex-direction:column;gap:4px;font-size:12px}
+  .userbox .ub-line{display:flex;justify-content:space-between;gap:10px;align-items:center}
+  .userbox .ub-plan{color:var(--accent);font-weight:700}
+  .credbar{width:150px;height:6px;border-radius:99px;background:var(--panel);border:1px solid var(--border);overflow:hidden}
+  .credbar i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--accent),var(--accent2))}
+  /* ===== FAQ ===== */
+  details.faq{border:1px solid var(--border);border-radius:12px;background:var(--panel2);padding:14px 16px;margin-top:10px}
+  details.faq summary{cursor:pointer;font-weight:700;font-size:14px;list-style:none}
+  details.faq summary::-webkit-details-marker{display:none}
+  details.faq summary::after{content:"+";float:right;color:var(--accent);font-weight:800}
+  details.faq[open] summary::after{content:"–"}
+  details.faq p{margin:10px 0 0;font-size:13px;color:var(--muted);line-height:1.65}
 </style>
 </head>
 <body>
 <a class="skip-link" href="#main" data-i18n="skip_link">Skip to content</a>
 <nav role="navigation" aria-label="FluxSwarm">
+  <img class="nav-logo" src="/static/brand/logo.jpg" alt="" width="26" height="26" />
   <h1>FluxSwarm</h1>
   <span class="tag" data-i18n="header_tag">A squad of 6 AI agents builds your project on a live board</span>
   <span class="spacer"></span>
@@ -119,14 +174,16 @@
   <button class="nav" id="navMarket" data-onclick="gotoSection" data-arg="market" data-i18n="nav_market">Marketplace</button>
   <button class="nav" id="navProjects" data-onclick="gotoSection" data-arg="projects" data-i18n="nav_projects">History</button>
   <button class="nav" id="navSettings" data-onclick="gotoSection" data-arg="settings" data-i18n="nav_settings">Account</button>
-  <span id="userPill" class="pill hidden"></span>
+  <span id="userPill" class="hidden"></span>
   <button class="nav" id="navLogin" data-onclick="navLoginClick" data-i18n="nav_login">Log in / Sign up</button>
 </nav>
 <main id="main" role="main">
 
   <!-- HERO / CREATE -->
-  <div class="card" id="hero">
-    <h2 style="margin-top:0;font-size:18px" data-i18n="hero_title">Launch a project with a full agent squad</h2>
+  <div class="card hero" id="hero">
+    <p class="eyebrow">⚡ AI agent squad</p>
+    <h2 class="hero-title" data-i18n-html="hero_title">Launch a project with a <span class="grad">full agent squad</span></h2>
+    <p class="hero-sub">Type a goal and watch Planner, Architect, DevOps, TDD, Reviewer &amp; Builder plan, build, test and assemble it on a live board — in minutes, not weeks.</p>
     <div class="row">
       <div style="flex:1;min-width:200px">
         <label for="pname" data-i18n="lbl_pname">Project name</label>
@@ -137,21 +194,31 @@
         <textarea id="pgoal" placeholder="Build a FastAPI app with auth, tests and CI/CD"></textarea>
       </div>
     </div>
-    <button class="primary" id="createBtn" data-onclick="createProject" data-i18n="btn_launch">🚀 Launch squad</button>
-    <button class="ghost" data-onclick="launchDemo" data-i18n="btn_demo">▶ Free Demo</button>
-    <div class="row" style="gap:8px;margin-top:12px">
-      <span class="badge">✅ 400+ automated tests</span>
-      <span class="badge">🔒 GDPR &amp; CCPA aligned</span>
-      <span class="badge">🛡️ Prompt-injection hardened</span>
-      <span class="badge">BYOK — your keys, your calls</span>
+    <div class="row">
+      <button class="primary" id="createBtn" data-onclick="createProject" data-i18n="btn_launch">🚀 Launch squad</button>
+      <button class="ghost" data-onclick="launchDemo" data-i18n="btn_demo">▶ Free Demo</button>
+    </div>
+    <div class="squad-strip" aria-hidden="true">
+      <span class="chip"><span class="cdot"></span>Planner</span>
+      <span class="chip"><span class="cdot run"></span>Architect</span>
+      <span class="chip"><span class="cdot run"></span>DevOps</span>
+      <span class="chip"><span class="cdot"></span>TDD</span>
+      <span class="chip"><span class="cdot"></span>Reviewer</span>
+      <span class="chip"><span class="cdot run"></span>Builder</span>
+    </div>
+    <div class="row" style="gap:8px;margin-top:14px">
+      <span class="badge">🧪 Test-driven — built on a 380+ check CI suite</span>
+      <span class="badge">🔒 Built for GDPR &amp; CCPA compliance</span>
+      <span class="badge">🛡️ Output scanning — prompt-injection &amp; secret-leak guardrails</span>
+      <span class="badge">👑 BYOK — your keys, your calls</span>
     </div>
     <div class="hint" id="heroHint" data-i18n="hero_hint">Each launch uses 1 credit. Sign in to launch — the Demo plan starts with 3 free credits (no card).</div>
   </div>
 
   <!-- WHAT IS FLUXSWARM -->
   <div class="card" id="about">
-    <h2 style="margin-top:0;font-size:16px" data-i18n="about_title">What is FluxSwarm?</h2>
-    <p class="hint" style="font-size:13px;line-height:1.7;margin:0" data-i18n="about_body">
+    <h2 class="section-title" data-i18n-html="about_title">What is <span class="grad">FluxSwarm</span>?</h2>
+    <p class="hint" style="font-size:13.5px;line-height:1.7;margin:8px 0 0" data-i18n="about_body">
       Type a goal and a squad of 6 specialized agents — Planner, Architect, DevOps, TDD,
       Reviewer, Builder — plans, builds, tests, reviews and assembles it on a live task
       board you can watch. Generated files land in your project workspace, ready to use.
@@ -197,9 +264,16 @@ Bring your own provider key for the strongest output — or a free OpenRouter ke
 
   <!-- PRICING -->
   <div class="card hidden" id="pricing">
-    <h2 style="margin-top:0;font-size:18px" data-i18n="pricing_title">Plans &amp; pricing</h2>
+    <h2 class="section-title" data-i18n="pricing_title">Plans &amp; pricing</h2>
     <div class="grid" id="plansGrid"></div>
     <div class="hint" data-i18n="pricing_hint">Prepaid credit packs — no monthly fee. All plans include the full squad (6 agents); higher tiers add credits and parallel execution. Prices in USD; GBP is applied by Paddle at checkout for UK customers.</div>
+    <div style="margin-top:12px">
+      <details class="faq" open><summary>How are credits used?</summary><p>One launch = one project board = one credit. You buy nothing monthly — packs never expire.</p></details>
+      <details class="faq"><summary>Can I try before paying?</summary><p>Yes — the Demo plan includes 3 free credits, no card required. You can also bring your own provider key (BYOK) at any tier.</p></details>
+      <details class="faq"><summary>Which AI providers are supported?</summary><p>Claude, GPT, Gemini and Kimi via BYOK, plus a free OpenRouter option (GLM-5.2). Output strength follows the provider you use.</p></details>
+      <details class="faq"><summary>What does the 1-credit launch fee cover?</summary><p>The squad execution itself. With BYOK you pay your provider's token rate directly; FluxSwarm still only charges the single credit.</p></details>
+      <details class="faq"><summary>Refunds?</summary><p>Paddle handles payments; launches that fail before any work starts are auto-refunded in credits, and our refund policy covers unused credit packs.</p></details>
+    </div>
   </div>
 
   <!-- REFERRALS -->
@@ -332,9 +406,9 @@ function openAuth(){document.getElementById("authModal").classList.add("open");d
 function switchTab(t){document.getElementById("tabLogin").classList.toggle("active",t==="login");document.getElementById("tabReg").classList.toggle("active",t==="reg");document.getElementById("loginForm").classList.toggle("hidden",t!=="login");document.getElementById("regForm").classList.toggle("hidden",t!=="reg");}
 
 async function loadSquad(){const g=document.getElementById("squadGrid");g.innerHTML='<div class="empty">Loading squad…</div>';try{const r=await fetch(API+"/api/squad");const d=await r.json();g.innerHTML="";[...d.workers,d.verifier,d.synthesizer].forEach(a=>{const div=document.createElement("div");div.className="agent";div.innerHTML=`<div class="role">${esc(a.role)}</div><div class="name">${esc(a.display||a.profile)}</div><div class="skills">${t("skills_lbl")} ${esc(a.skills.join(", "))}</div>`;g.appendChild(div);});}catch(e){g.innerHTML='<div class="empty">Could not load squad</div>';}}
-async function loadPlans(){const g=document.getElementById("plansGrid");g.innerHTML='<div class="empty">Loading plans…</div>';try{const r=await fetch(API+"/api/plans");const d=await r.json();g.innerHTML="";d.forEach(p=>{const div=document.createElement("div");div.className="plan"+(p.id==="pro"?" best":"");div.innerHTML=`<div class="pname">${esc(p.name)}</div><div class="price">$${p.price}<small>${t("per_pack")}</small></div><div class="credit">${fmt("credits_line",p.credits,p.parallel)}</div><ul><li>${t("desc_"+p.id)}</li><li>${t("feat_full")}</li><li>${t("feat_credit")}</li><li>${t("feat_live")}</li><li>${t("feat_tg")}</li></ul><button class="ghost" data-onclick="subscribe" data-arg="${p.id}">${p.price==0?t("use_free"):t("subscribe_btn")}</button>`;g.appendChild(div);});}catch(e){g.innerHTML='<div class="empty">Could not load plans</div>';}}
+async function loadPlans(){const g=document.getElementById("plansGrid");g.innerHTML='<div class="empty">Loading plans…</div>';try{const r=await fetch(API+"/api/plans");const d=await r.json();g.innerHTML="";d.forEach(p=>{const div=document.createElement("div");div.className="plan"+(p.id==="pro"?" best":"");div.innerHTML=`${p.id==="pro"?'<div class="hot">MOST POPULAR</div>':""}<div class="pname">${esc(p.name)}</div><div class="price">$${p.price}<small> / ${t("per_pack")}</small></div><div class="credit">${fmt("credits_line",p.credits,p.parallel)}</div><ul><li><span class="tick">✓</span>${t("desc_"+p.id)}</li><li><span class="tick">✓</span>${t("feat_full")}</li><li><span class="tick">✓</span>${t("feat_credit")}</li><li><span class="tick">✓</span>${t("feat_live")}</li><li><span class="tick">✓</span>${t("feat_tg")}</li></ul><button class="ghost pbtn" data-onclick="subscribe" data-arg="${p.id}">${p.price==0?t("use_free"):t("subscribe_btn")}</button>`;g.appendChild(div);});}catch(e){g.innerHTML='<div class="empty">Could not load plans</div>';}}
 
-function setUser(u){currentUser=u;document.getElementById("userPill").classList.remove("hidden");document.getElementById("userPill").textContent=`${esc(u.name)} · ${u.plan} · ${u.credits} ${t("creds")}`;document.getElementById("navLogin").textContent=t("logout");document.getElementById("heroHint").textContent=t("loggedin_hint");loadReferrals();loadByok();loadTelegram();loadProjects();loadSettings();}
+function setUser(u){currentUser=u;const pill=document.getElementById("userPill");pill.classList.remove("hidden");const pct=(u.credits>=9999)?100:Math.min(100,Math.max(4,u.credits));pill.innerHTML=`<span class="userbox"><span class="ub-line"><b>${esc(u.name)}</b><span class="ub-plan">${esc(u.plan)}</span></span><span class="ub-line"><span>${u.credits} ${t("creds")}</span><span class="credbar"><i style="width:${pct}%"></i></span></span></span>`;document.getElementById("navLogin").textContent=t("logout");document.getElementById("heroHint").textContent=t("loggedin_hint");loadReferrals();loadByok();loadTelegram();loadProjects();loadSettings();}
 function clearUser(){currentUser=null;token=null;document.getElementById("userPill").classList.add("hidden");document.getElementById("navLogin").textContent=t("nav_login");document.getElementById("heroHint").textContent=t("hero_hint");document.getElementById("projectsList").innerHTML='<div class="empty">'+t("projects_login_empty")+'</div>';document.getElementById("settInfo").classList.remove("hidden");document.getElementById("settInfo").textContent=t("settings_login_empty");document.getElementById("settBody").classList.add("hidden");loadTelegram();}
 
 async function doLogin(){const email=document.getElementById("l_email").value.trim();const pw=document.getElementById("l_pw").value;const btn=document.getElementById("loginBtn");btn.disabled=true;try{const r=await fetch(API+"/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email,password:pw})});if(!r.ok){let d=null;try{d=await r.json();}catch(e){}toast(d&&d.detail?errt(d.detail):t("login_fail"));return;}const d=await r.json();token=d.token;setUser(d.user);document.getElementById("authModal").classList.remove("open");toast(t("login_ok"));}catch(e){toast(t("login_fail"));}finally{btn.disabled=false;}}
@@ -540,10 +614,10 @@ const I18N = {
     header_tag:"A squad of 6 AI agents builds your project on a live board",
     nav_how:"How it works", nav_faq:"FAQ", nav_projects:"History", nav_settings:"Account",
     nav_pricing:"Pricing", nav_ref:"Referrals", nav_byok:"My keys", nav_login:"Log in / Sign up", nav_market:"Marketplace",
-    hero_title:"Launch a project with a full agent squad", lbl_pname:"Project name", lbl_pgoal:"Build goal (the squad will execute it)",
+    hero_title:"Launch a project with a <span class=\"grad\">full agent squad</span>", lbl_pname:"Project name", lbl_pgoal:"Build goal (the squad will execute it)",
     btn_launch:"🚀 Launch squad", btn_demo:"▶ Free Demo",
     hero_hint:"Each launch uses 1 credit. Sign in to launch — the Demo plan starts with 3 free credits (no card).",
-    about_title:"What is FluxSwarm?",
+    about_title:"What is <span class=\"grad\">FluxSwarm</span>?",
     about_body:
       "Type a goal and a squad of 6 specialized agents — Planner, Architect, DevOps, TDD, Reviewer, Builder — plans, builds, tests, reviews and assembles it on a live task board you can watch. Generated files land in your project workspace, ready to use. Bring your own provider key for the strongest output — each launch is still a single credit. 1 credit per launch, credits never expire, no monthly fee.",
     squad_title:"The Squad", board_title:"Live task board",
@@ -599,7 +673,7 @@ const I18N = {
 };
 let LANG = "en";
 function setLang(l){LANG=l;localStorage.setItem("flux-lang",l);document.documentElement.lang="en";document.documentElement.dir="ltr";
-  document.querySelectorAll("[data-i18n]").forEach(el=>{const k=el.getAttribute("data-i18n");if(I18N[l][k])el.textContent=I18N[l][k];});
+  document.querySelectorAll("[data-i18n],[data-i18n-html]").forEach(el=>{const k=el.getAttribute("data-i18n")||el.getAttribute("data-i18n-html");if(I18N[l][k]){if(el.hasAttribute("data-i18n-html"))el.innerHTML=I18N[l][k];else el.textContent=I18N[l][k];}});
   document.getElementById("secTitle").textContent=I18N[l].sec_title;
   document.getElementById("secBtn").textContent=I18N[l].sec_run;
   loadSquad();loadPlans();loadTemplates();loadTelegram();
@@ -617,8 +691,14 @@ async function runSecurity(){
   el.innerHTML=`<div class="refbox"><b>${I18N[LANG].sec_score}: <span style="color:${color}">${esc(d.score)}/100 (${esc(d.label)})</span></b><br>method: ${esc(d.method)}<br>findings: ${d.findings.length}</div>`;
 }
 </script>
-<footer style="text-align:center;padding:18px 12px;font-size:13px;color:var(--muted);border-top:1px solid var(--border);margin-top:32px">
-  FluxSwarm ·
+<footer style="text-align:center;padding:22px 12px;font-size:13px;color:var(--muted);border-top:1px solid var(--border);margin-top:32px">
+  <div style="display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:10px">
+    <img class="nav-logo" src="/static/brand/logo.jpg" alt="" width="24" height="24" />
+    <span style="font-weight:800;color:var(--fg)">FluxSwarm</span>
+    <span>·</span>
+    <span>AI development squad</span>
+  </div>
+  <div style="display:flex;flex-wrap:wrap;justify-content:center;gap:6px 14px">
   <a href="/how-it-works" style="color:var(--accent)">How it works</a> ·
   <a href="/faq" style="color:var(--accent)">FAQ</a> ·
   <a href="/pricing" style="color:var(--accent)">Pricing</a> ·
@@ -628,6 +708,7 @@ async function runSecurity(){
   <a href="/refund-en" style="color:var(--accent)">Refund policy</a> ·
   <a href="/cookies-en" style="color:var(--accent)">Cookies</a> ·
   <a href="/acceptable-use-en" style="color:var(--accent)">Acceptable use</a>
+  </div>
 </footer>
 </body>
 </html>
