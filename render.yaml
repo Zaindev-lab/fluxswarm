@@ -75,3 +75,10 @@ services:
         sync: false
       - key: FLUXSWARM_ANALYTICS_DOMAIN
         sync: false
+      # In-app support assistant AI fallback (optional; leave empty → rules + escalate).
+      - key: FLUXSWARM_SUPPORT_AI_BASE
+        value: https://api.openai.com/v1
+      - key: FLUXSWARM_SUPPORT_AI_MODEL
+        value: gpt-4o-mini
+      - key: FLUXSWARM_SUPPORT_AI_KEY
+        sync: false

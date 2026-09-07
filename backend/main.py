@@ -43,6 +43,7 @@ import vault
 import security
 import payments as payments_mod
 import provider_pool
+import support_agent
 from ratelimit import limiter
 
 BASE = Path(__file__).resolve().parent
@@ -909,6 +910,13 @@ class RegisterIn(BaseModel):
     tos_accept: bool = False
 
 
+class SupportIn(BaseModel):
+    """In-app support chat turn. The message is stripped + capped by the agent;
+    history is a short conversational context for the optional AI fallback."""
+    message: str = Field(max_length=2000)
+    history: list[dict] = Field(default_factory=list, max_length=12)
+
+
 class LoginIn(BaseModel):
     email: str
     password: str = Field(max_length=4096)
@@ -1284,6 +1292,36 @@ def api_login(p: LoginIn, request: Request):
 @app.get("/api/me")
 def api_me(user: dict = Depends(get_current_user)):
     return public_user(user)
+
+
+_SUPPORT_WINDOW = 60
+_SUPPORT_MAX_PER_WINDOW = 20
+
+
+@app.post("/api/support/chat")
+def api_support_chat(p: SupportIn, request: Request,
+                     user: dict | None = Depends(get_current_user_optional)):
+    """In-app support assistant (hybrid: rule-based KB + optional AI fallback).
+
+    The rule engine answers deterministic product questions free of charge; when
+    no rule matches, an operator-configured OpenAI-compatible endpoint may reply,
+    otherwise the assistant escalates to the support email. The endpoint is
+    open (works signed out) but rate-limited per client IP to keep it cheap and
+    abuse-proof; the message is capped and the history truncated server-side.
+    """
+    ip = _client_ip(request)
+    if not limiter.check(f"support:ip:{ip}", _SUPPORT_MAX_PER_WINDOW, _SUPPORT_WINDOW):
+        raise HTTPException(status_code=429,
+                            detail="Please slow down a moment before sending more messages")
+    try:
+        ans = support_agent.answer(p.message, p.history)
+    except Exception:
+        audit.audit("support.chat", uid=user["id"] if user else None,
+                    ip=ip, outcome="error", source="exception")
+        raise HTTPException(status_code=500, detail="Support could not answer right now — please try again")
+    audit.audit("support.chat", uid=user["id"] if user else None,
+                ip=ip, outcome="ok", source=ans["source"])
+    return ans
 
 
 @app.post("/api/auth/logout")

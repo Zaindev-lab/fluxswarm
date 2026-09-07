@@ -123,6 +123,26 @@ Companion scripts:
   while the BYOK vault is non-empty** (a new Fernet key would strand existing
   ciphertexts), and prints the restart hint (old sessions log out).
 
+### In-app support assistant (ships, no setup needed)
+
+A floating chat helper answers pricing / credits / BYOK / referrals / refunds /
+Telegram / account-data questions from a built-in product knowledge base —
+`POST /api/support/chat`, open, per-IP rate-limited (20 msgs / 60 s), audited.
+No network calls and no keys are required for this tier. For questions the rules
+can't match it escalates to `FLUXSWARM_CONTACT_EMAIL`.
+
+Optionally, an AI fallback can answer instead of escalating (system prompt is a
+strict product handbook; it sees only the chat message):
+
+```text
+FLUXSWARM_SUPPORT_AI_BASE=https://api.openai.com/v1
+FLUXSWARM_SUPPORT_AI_MODEL=gpt-4o-mini
+FLUXSWARM_SUPPORT_AI_KEY=<your key>   # leave unset to keep rules + escalate only
+```
+
+Any OpenAI-compatible endpoint works (OpenAI, Azure OpenAI, OpenRouter, ...);
+set `FLUXSWARM_SUPPORT_AI_BASE` accordingly.
+
 ## 5. Local sandbox: see the whole billing flow TODAY (no Paddle account)
 
 Run the backend with these env vars and the paid plans open a *sandbox* checkout

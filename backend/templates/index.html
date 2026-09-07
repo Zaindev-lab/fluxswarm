@@ -166,6 +166,29 @@
   details.faq summary::after{content:"+";float:right;color:var(--accent);font-weight:800}
   details.faq[open] summary::after{content:"–"}
   details.faq p{margin:10px 0 0;font-size:13px;color:var(--muted);line-height:1.65}
+  /* ===== support chat ===== */
+  .support-fab{position:fixed;bottom:26px;right:26px;z-index:88;width:52px;height:52px;border-radius:50%;border:0;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;font-size:22px;font-weight:800;cursor:pointer;box-shadow:0 6px 26px rgba(0,0,0,.45);transition:transform .18s,opacity .18s}
+  .support-fab:hover{transform:scale(1.06)}
+  .support-fab.hidden{opacity:0;pointer-events:none}
+  .support-panel{position:fixed;bottom:86px;right:20px;z-index:89;width:min(400px,92vw);max-height:68vh;display:none;flex-direction:column;background:var(--panel2);border:1px solid var(--border);border-radius:var(--radius);box-shadow:0 12px 50px rgba(0,0,0,.55);overflow:hidden}
+  .support-panel.open{display:flex}
+  .support-head{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid var(--border);background:var(--panel);font-weight:700;font-size:14px}
+  .support-head span{display:flex;align-items:center;gap:6px}
+  .support-close{background:none;border:0;color:var(--muted);font-size:18px;cursor:pointer}
+  .support-msgs{flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:10px;font-size:13px;line-height:1.6}
+  .support-msgs:empty::before{content:"";display:none}
+  .support-msg{max-width:92%;padding:10px 12px;border-radius:12px;background:var(--panel);border:1px solid var(--border);white-space:pre-wrap;word-break:break-word}
+  .support-msg.user{align-self:flex-end;background:linear-gradient(90deg,var(--accent),var(--accent2));border:0;color:#fff}
+  .support-msg.bot{align-self:flex-start}
+  .support-msg.escalate a,.support-msg.bot a{color:var(--accent);text-decoration:underline}
+  .support-msg.ai{border-left:3px solid var(--amber)}
+  .support-chips{display:flex;flex-wrap:wrap;gap:6px;padding:0 14px 10px}
+  .support-chips button{border:1px solid var(--border);border-radius:99px;background:var(--panel);color:var(--fg);padding:5px 10px;font-size:12px;cursor:pointer;white-space:nowrap}
+  .support-chips button:hover{border-color:var(--accent);color:var(--accent)}
+  .support-input{display:flex;border-top:1px solid var(--border);padding:8px 10px;background:var(--panel)}
+  .support-input input{flex:1;background:var(--panel2);color:var(--fg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:9px 10px;font-size:13px;min-width:0}
+  .support-input button{margin-left:6px;border:1px solid var(--border);border-radius:var(--radius-sm);background:transparent;color:var(--fg);padding:9px 14px;cursor:pointer;font-size:13px}
+  .support-input button:hover{border-color:var(--accent);color:var(--accent)}
 </style>
 </head>
 <body>
@@ -394,6 +417,21 @@ Bring your own provider key for the strongest output — or a free OpenRouter ke
 </div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<!-- SUPPORT CHAT -->
+<div class="support-panel" id="supportPanel" role="dialog" aria-label="Support assistant">
+  <div class="support-head">
+    <span id="supportTitle">FluxSwarm Support</span>
+    <button class="support-close" id="supportClose" aria-label="Close support">✕</button>
+  </div>
+  <div class="support-msgs" id="supportMsgs"></div>
+  <div class="support-chips" id="supportChips"></div>
+  <div class="support-input">
+    <input id="supportInput" placeholder="Ask about pricing, credits, BYOK, refunds…" maxlength="2000" autocomplete="off" />
+    <button id="supportSend">Send</button>
+  </div>
+</div>
+<button class="support-fab" id="supportFab" aria-label="Open support assistant">?</button>
 
 <script nonce="{{ csp_nonce }}">
 const API="";
@@ -690,7 +728,8 @@ const I18N = {
     tg_title:"🤖 Link Telegram Bot", tg_hint:"Send your goal to the FluxSwarm Telegram bot and get live swarm results. Link your account so launches run under your credits and plan.",
     tg_login_hint:"Sign in to link Telegram to your account.", tg_link:"Link Telegram", tg_unlink:"Unlink", tg_code_min:"min.",
     tg_linked:"Linked to Telegram (chat)", tg_code_hint:"Open the FluxSwarm bot on Telegram and send:",
-    tg_code_ttl:"Code valid for", tg_unlinked:"Unlinked", tg_unlink_fail:"Unlink failed"
+    tg_code_ttl:"Code valid for", tg_unlinked:"Unlinked", tg_unlink_fail:"Unlink failed",
+    chat_sending:"Thinking…", chat_fail:"Support couldn't answer right now — please email support@fluxswarm.ai and include your account email."
   }
 };
 let LANG = "en";
@@ -712,6 +751,94 @@ async function runSecurity(){
   const color = d.score>=90?"var(--green)":d.score>=70?"var(--amber)":"var(--red)";
   el.innerHTML=`<div class="refbox"><b>${I18N[LANG].sec_score}: <span style="color:${color}">${esc(d.score)}/100 (${esc(d.label)})</span></b><br>method: ${esc(d.method)}<br>findings: ${d.findings.length}</div>`;
 }
+
+/* ===================== support assistant ===================== */
+const SUPPORT_CHIPS=["Pricing","How credits work","BYOK","Refunds","Link Telegram","Talk to a human","Referral program","Delete account"];
+const supportEls=()=>({panel:document.getElementById("supportPanel"),msgs:document.getElementById("supportMsgs"),chips:document.getElementById("supportChips"),inp:document.getElementById("supportInput"),fab:document.getElementById("supportFab")});
+let supportHistory=[];
+function supportBubble(cls,text,actions){
+  const {msgs}=supportEls();
+  const div=document.createElement("div");
+  div.className="support-msg "+cls;
+  const p=document.createElement("div");
+  p.textContent=text||I18N[LANG].err_prefix+"—";
+  div.appendChild(p);
+  if(actions&&actions.length){
+    const row=document.createElement("div");
+    row.style.cssText="display:flex;flex-wrap:wrap;gap:6px;margin-top:9px";
+    actions.forEach(a=>{
+      const b=document.createElement("button");
+      b.textContent=a.label||"";
+      b.style.cssText="border:1px solid var(--border);border-radius:99px;background:var(--panel);color:var(--fg);padding:5px 10px;font-size:12px;cursor:pointer";
+      b.type="button";
+      b.addEventListener("click",()=>supportAction(a));
+      row.appendChild(b);
+    });
+    div.appendChild(row);
+  }
+  msgs.appendChild(div);
+  msgs.scrollTop=msgs.scrollHeight;
+  return div;
+}
+function supportAction(a){
+  if(!a)return;
+  if(a.type==="goto"){supportClose();requestAnimationFrame(()=>typeof gotoSection==="function"&&gotoSection(a.value));}
+  else if(a.type==="mailto"){window.location.href="mailto:"+(a.value||"support@fluxswarm.ai");}
+  else if(a.type==="link"){window.location.href=a.value;}
+}
+function supportRenderChips(list){
+  const {chips}=supportEls();
+  chips.innerHTML="";
+  (list||SUPPORT_CHIPS).forEach(label=>{
+    const b=document.createElement("button");
+    b.type="button";b.textContent=label;
+    b.addEventListener("click",()=>{supportSend(label);});
+    chips.appendChild(b);
+  });
+}
+async function supportSend(text){
+  const {inp}=supportEls();
+  const msg=(text||"").trim();
+  supportRenderChips([]);
+  if(msg){supportBubble("user",msg);supportHistory.push({role:"user",content:msg});}
+  const pending=supportBubble("bot",I18N[LANG].chat_sending||"…");
+  try{
+    const r=await fetch(API+"/api/support/chat",{method:"POST",headers:{"Content-Type":"application/json",...(token?{Authorization:"Bearer "+token}:{})},body:JSON.stringify({message:msg,history:supportHistory.slice(-10)})});
+    const d=await r.json().catch(()=>null);
+    pending.remove();
+    if(!r.ok||!d){supportBubble("bot",I18N[LANG].chat_fail);supportRenderChips();return;}
+    supportBubble(d.source==="ai"?"bot ai":d.source==="escalate"?"bot escalate":"bot",d.text,d.actions||[]);
+    supportHistory.push({role:"assistant",content:d.text});
+    if(supportHistory.length>20){supportHistory=supportHistory.slice(-20);}
+  }catch(e){
+    pending.remove();
+    supportBubble("bot",I18N[LANG].chat_fail);
+    supportRenderChips();
+  }
+  if(text===undefined){inp.value="";}
+}
+function supportOpen(){
+  const {panel,fab}=supportEls();
+  panel.classList.add("open");fab.classList.add("hidden");
+  if(!panel.dataset.started){
+    panel.dataset.started="1";
+    supportSend("");
+  }
+  setTimeout(()=>supportEls().inp&&supportEls().inp.focus(),50);
+}
+function supportClose(){
+  const {panel,fab}=supportEls();
+  panel.classList.remove("open");fab.classList.remove("hidden");
+}
+(function supportInit(){
+  const {panel,inp,fab}=supportEls();
+  document.getElementById("supportClose").addEventListener("click",supportClose);
+  document.getElementById("supportSend").addEventListener("click",()=>{supportSend(inp.value);inp.value="";});
+  inp.addEventListener("keydown",e=>{if(e.key==="Enter"){supportSend(inp.value);inp.value="";}});
+  fab.addEventListener("click",supportOpen);
+  const rtl=window.getComputedStyle(document.body).direction;
+  if(rtl==="rtl"){document.getElementById("supportTitle").textContent="دعم FluxSwarm";}
+})();
 </script>
 <footer style="text-align:center;padding:22px 12px;font-size:13px;color:var(--muted);border-top:1px solid var(--border);margin-top:32px">
   <div style="display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:10px">
