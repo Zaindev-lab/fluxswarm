@@ -35,16 +35,21 @@ BASE = Path(__file__).resolve().parent
 DB = BASE / os.environ.get("FLUXSWARM_DB", "data/users.db")
 DB.parent.mkdir(exist_ok=True)
 
-# Plan catalogue (monthly). Demo is free and pre-seeded.
+# Plan catalogue — one-time credit packs, not subscriptions. Demo is free and
+# pre-seeded. "topup" is a pure credit refill: it never changes the user's plan
+# tier (parallel cap stays with their highest purchased plan).
 PLANS = {
-    "demo": {"name": "Demo", "price": 0, "credits": 3, "parallel": 1, "desc": "Limited free trial"},
-    "starter": {"name": "Starter", "price": 29, "credits": 25, "parallel": 2, "desc": "For freelancers and small projects"},
-    "pro": {"name": "Pro", "price": 99, "credits": 120, "parallel": 4, "desc": "For small teams"},
-    "scale": {"name": "Scale", "price": 299, "credits": 500, "parallel": 6, "desc": "For companies and agencies"},
+    "demo": {"name": "Demo", "price": 0, "credits": 5, "parallel": 1, "desc": "Free trial — no card required"},
+    "starter": {"name": "Starter", "price": 19, "credits": 20, "parallel": 2, "desc": "For freelancers and small projects"},
+    "pro": {"name": "Pro", "price": 49, "credits": 60, "parallel": 4, "desc": "For small teams"},
+    "scale": {"name": "Scale", "price": 149, "credits": 200, "parallel": 6, "desc": "For companies and agencies"},
+    "topup": {"name": "Top-up", "price": 9, "credits": 10, "parallel": 2, "desc": "Quick refill — credits never expire"},
 }
-PLAN_ORDER = ["demo", "starter", "pro", "scale"]
+PLAN_ORDER = ["demo", "starter", "pro", "scale", "topup"]
 
-REFERRAL_REWARD_CREDITS = 25  # credits granted to referrer when referred user subscribes (>= starter)
+REFERRAL_REWARD_CREDITS = 15   # credits granted to referrer when referred user makes a first paid purchase
+FRIEND_BONUS_CREDITS = 10      # credits granted to the referred friend on their first paid purchase
+REFERRAL_REWARD_CAP = 500      # max credits one referrer can farm (anti-abuse)
 
 
 def _conn() -> sqlite3.Connection:
@@ -71,7 +76,8 @@ def init_db():
             referred_by TEXT,
             created_at REAL NOT NULL,
             logged_out_at REAL,
-            admt_opt_out INTEGER NOT NULL DEFAULT 0
+            admt_opt_out INTEGER NOT NULL DEFAULT 0,
+            tos_accepted_at REAL
         );
         CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -191,6 +197,8 @@ def _migrate():
             c.execute("ALTER TABLE users ADD COLUMN logged_out_at REAL")
         if "admt_opt_out" not in cols:
             c.execute("ALTER TABLE users ADD COLUMN admt_opt_out INTEGER NOT NULL DEFAULT 0")
+        if "tos_accepted_at" not in cols:
+            c.execute("ALTER TABLE users ADD COLUMN tos_accepted_at REAL")
         pcols = [r[1] for r in c.execute("PRAGMA table_info(projects)")]
         # Launch-outcome bookkeeping: lets the driver (and UI) distinguish a
         # converged launch from one cut short by a provider/worker stall, and
@@ -277,15 +285,18 @@ def make_ref_code() -> str:
     return "FLX-" + secrets.token_hex(4).upper()
 
 
-def create_user(email: str, name: str, password: str, ref_code: str | None = None) -> dict:
+def create_user(email: str, name: str, password: str, ref_code: str | None = None,
+                tos_accepted_at: float | None = None) -> dict:
     email = email.lower().strip()
     c = _conn()
     try:
         salt = secrets.token_hex(8)
         ref = make_ref_code()
         cur = c.execute(
-            "INSERT INTO users (email,name,pw_hash,plan,credits,ref_code,referred_by,created_at) VALUES (?,?,?,?,?,?,?,?)",
-            (email, name, _make_pw_hash(password), "demo", PLANS["demo"]["credits"], ref, ref_code, time.time()),
+            "INSERT INTO users (email,name,pw_hash,plan,credits,ref_code,referred_by,created_at,tos_accepted_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (email, name, _make_pw_hash(password), "demo", PLANS["demo"]["credits"],
+             ref, ref_code, time.time(), tos_accepted_at),
         )
         uid = cur.lastrowid
         c.commit()
@@ -473,7 +484,9 @@ def deduct_credit(user_id: int) -> bool:
 
 def reward_referrer_once(referred_email: str) -> bool:
     """Reward the referrer exactly once per referred email (first paid
-    subscription that reaches the billing gate). Prevents credit farming by
+    subscription that reaches the billing gate) AND grant the referred friend
+    their one-time welcome bonus — all inside the same atomic claim so neither
+    reward can double-fire under concurrency. Prevents credit farming by
     oscillating subscriptions AND prevents double-credit under concurrency.
 
     The read-modify-write runs inside BEGIN IMMEDIATE so only one caller can
@@ -483,6 +496,10 @@ def reward_referrer_once(referred_email: str) -> bool:
     instead of minting a second reward. This closes the double-credit race that a
     plain ``BEGIN IMMEDIATE`` around a ``WHERE referred_email=? AND rewarded=0``
     UPDATE does NOT fix.
+
+    Referrer earnings are capped at REFERRAL_REWARD_CAP credits (anti-farming):
+    once the cap is reached the row is still claimed so the friend bonus fires
+    exactly once and no retry loop can mint further rewards.
     """
     c = _conn()
     try:
@@ -497,8 +514,16 @@ def reward_referrer_once(referred_email: str) -> bool:
             return False
         ref_user = c.execute("SELECT id FROM users WHERE ref_code=?", (row["referrer_code"],)).fetchone()
         if ref_user:
+            cur = c.execute("SELECT credits FROM users WHERE id=?", (ref_user["id"],)).fetchone()
+            held = cur["credits"] if cur else 0
+            grant = min(REFERRAL_REWARD_CREDITS, max(0, REFERRAL_REWARD_CAP - held))
+            if grant:
+                c.execute("UPDATE users SET credits = credits + ? WHERE id=?",
+                          (grant, ref_user["id"]))
+        friend = c.execute("SELECT id FROM users WHERE email=?", (referred_email,)).fetchone()
+        if friend:
             c.execute("UPDATE users SET credits = credits + ? WHERE id=?",
-                      (REFERRAL_REWARD_CREDITS, ref_user["id"]))
+                      (FRIEND_BONUS_CREDITS, friend["id"]))
         # Claim THIS specific row; only the winner (rowcount==1) commits.
         if c.execute("UPDATE referrals SET rewarded=1 WHERE id=? AND rewarded=0",
                      (row["id"],)).rowcount == 0:
@@ -511,6 +536,22 @@ def reward_referrer_once(referred_email: str) -> bool:
         return False
     finally:
         c.close()
+
+
+def add_credits(user_id: int, credits: int) -> bool:
+    """Top-up a credit balance without touching the user's plan tier. Used by the
+    one-time "topup" pack; the plan/parallel cap stays with the highest plan the
+    user purchased (topup is a refill, not a tier)."""
+    try:
+        c = _conn()
+        try:
+            cur = c.execute("UPDATE users SET credits = credits + ? WHERE id=?", (credits, user_id))
+            c.commit()
+            return cur.rowcount > 0
+        finally:
+            c.close()
+    except Exception:
+        return False
 
 
 def upgrade_plan(user_id: int, plan: str):

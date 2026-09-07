@@ -38,7 +38,7 @@ def _permissive_limiter(monkeypatch):
 
 
 def _register(email: str):
-    r = client.post("/api/auth/register", json={"email": email, "name": "T", "password": "s3cure-Pass-123"})
+    r = client.post("/api/auth/register", json={"email": email, "name": "T", "password": "s3cure-Pass-123", "tos_accept": True})
     assert r.status_code == 200, r.text
     return r.json()
 

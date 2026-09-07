@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# FluxSwarm — nightly backup of the SQLite DB, BYOK keystore and audit log,
-# plus the Hermes kanban named volume. Keeps 7 rotations on the box; push the
-# tarball off-site with your own tooling.
+# FluxSwarm — nightly backup. SQLite: the DB file, BYOK keystore and audit log.
+# PostgreSQL: a fresh logical dump of the app schema. Plus the Hermes kanban
+# named volume. Keeps 7 rotations on the box; push the tarball off-site with
+# your own tooling.
 #
 #   sudo bash deploy/backup.sh                # one backup now
 #   crontab -e →  0 3 * * * sudo bash /opt/fluxswarm/deploy/backup.sh
@@ -20,6 +21,20 @@ cd "$REPO_DIR"
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
   docker run --rm -v fluxswarm-kanban:/data -v "$BACKUP_DIR":/out alpine \
     tar czf "/out/kanban-$STAMP.tar.gz" -C /data . 2>/dev/null || true
+fi
+
+DB_URL="${FLUXSWARM_DATABASE_URL:-}"
+# PostgreSQL branch (P4.1): dump through the postgres client image, outside the
+# app container, so it works even while the app is being recycled.
+if [[ "$DB_URL" == postgres* ]] || [[ "$DB_URL" == postgresql* ]]; then
+  if command -v docker >/dev/null 2>&1; then
+    docker run --rm postgres:16-alpine sh -c 'PGPASSWORD=$(printf "%s" "$1" | sed -n "s|^postgres://[^:]*:\([^@]*\)@.*|\1|p") pg_dump "$1"' _ "$DB_URL" \
+      | gzip > "$DATA_DIR/fluxswarm-dump.sql.gz" 2>/dev/null || true
+  elif command -v pg_dump >/dev/null 2>&1; then
+    pg_dump "$DB_URL" | gzip > "$DATA_DIR/fluxswarm-dump.sql.gz" 2>/dev/null || true
+  else
+    echo "WARN: postgres DATABASE_URL set but no docker/pg_dump available — skipping DB dump." >&2
+  fi
 fi
 
 tar czf "$BACKUP_DIR/$NAME" \

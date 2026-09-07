@@ -22,6 +22,7 @@ def _make_user() -> tuple[int, str]:
     email = f"tgapi{ts}@fluxswarm.test"
     r = client.post("/api/auth/register", json={
         "email": email, "name": "TG User", "password": "s3cure-Pass-123",
+        "tos_accept": True,
     })
     assert r.status_code == 200, r.text
     token = r.json()["token"]
@@ -107,6 +108,7 @@ def test_credit_spend_and_failed_launch_refund():
     email = "credit-roundtrip@fluxswarm.test"
     r = client.post("/api/auth/register", json={
         "email": email, "name": "Credits", "password": "s3cure-Pass-123",
+        "tos_accept": True,
     })
     assert r.status_code == 200, r.text
     uid = db.get_user_by_email(email)["id"]

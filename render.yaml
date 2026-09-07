@@ -49,3 +49,29 @@ services:
         sync: false
       - key: REDIS_URL
         sync: false
+      # Billing — fill after Paddle setup (§2 in backend/DEPLOY-US.md).
+      - key: FLUXSWARM_PAYMENTS
+        value: "0"
+      - key: PADDLE_API_KEY
+        sync: false
+      - key: PADDLE_WEBHOOK_SECRET
+        sync: false
+      - key: PADDLE_CLIENT_TOKEN
+        sync: false
+      - key: PADDLE_PRICE_STARTER
+        sync: false
+      - key: PADDLE_PRICE_PRO
+        sync: false
+      - key: PADDLE_PRICE_SCALE
+        sync: false
+      - key: PADDLE_PRICE_TOPUP
+        sync: false
+      # Optional ops extras (leave empty to disable).
+      - key: FLUXSWARM_CONTACT_EMAIL
+        value: support@fluxswarm.ai
+      - key: FLUXSWARM_PUBLIC_BASE_URL
+        sync: false
+      - key: FLUXSWARM_RESEND_API_KEY
+        sync: false
+      - key: FLUXSWARM_ANALYTICS_DOMAIN
+        sync: false

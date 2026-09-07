@@ -33,9 +33,20 @@ def _permissive_limiter(monkeypatch):
 
 
 def _register(email: str, pw: str = "s3cure-Pass-123"):
-    r = client.post("/api/auth/register", json={"email": email, "name": "T", "password": pw})
+    r = client.post("/api/auth/register", json={"email": email, "name": "T", "password": pw, "tos_accept": True})
     assert r.status_code == 200, r.text
     return r.json()
+
+
+def test_register_requires_tos_acceptance():
+    # P2.8 compliance gate: no tos_accept -> 400, and the account is not created.
+    no_key = client.post("/api/auth/register", json={"email": "nosam@fluxswarm.test", "name": "T", "password": "s3cure-Pass-123"})
+    assert no_key.status_code == 400, no_key.text
+    assert db_mod.get_user_by_email("nosam@fluxswarm.test") is None
+
+    explicit_false = client.post("/api/auth/register", json={"email": "nosam2@fluxswarm.test", "name": "T", "password": "s3cure-Pass-123", "tos_accept": False})
+    assert explicit_false.status_code == 400, explicit_false.text
+    assert db_mod.get_user_by_email("nosam2@fluxswarm.test") is None
 
 
 def test_logout_invalidates_all_sessions():

@@ -100,6 +100,15 @@ def main() -> int:
             "detail": "pri_*" if ok else ("MISSING" if not pid else "BAD (must start with pri_)"),
         })
 
+    # Top-up is optional at launch but enables the $9/10 refill pack in checkout.
+    pid = _env("PADDLE_PRICE_TOPUP")
+    checks.append({
+        "var": "PADDLE_PRICE_TOPUP",
+        "ok": bool(pid) and pid.startswith("pri_"),
+        "detail": "pri_*" if (bool(pid) and pid.startswith("pri_")) else (
+            "MISSING (optional — skip or configure the $9 refill pack)"),
+    })
+
     public_url = _env("FLUXSWARM_PUBLIC_BASE_URL")
     ok_pub = bool(public_url) and public_url.startswith(("http://", "https://"))
     checks.append({

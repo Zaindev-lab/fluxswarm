@@ -71,6 +71,7 @@ PADDLE_WEBHOOK_SECRET=<live endpoint_secret_key>
 PADDLE_PRICE_STARTER=<live pri_...>
 PADDLE_PRICE_PRO=<live pri_...>
 PADDLE_PRICE_SCALE=<live pri_...>
+PADDLE_PRICE_TOPUP=<live pri_...>   # optional $9/10-credit refill pack
 FLUXSWARM_PUBLIC_BASE_URL=https://<your-domain>
 FLUXSWARM_PAYMENTS=1                             # opens the billing gate
 FLUXSWARM_LEGAL_ENTITY=...                        # see §0

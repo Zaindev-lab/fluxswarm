@@ -37,6 +37,7 @@ envguard.assert_production_secrets()
 import auth as auth_mod
 import db
 import hermes_client as hc
+import notify
 import serverlock
 import vault
 import security
@@ -296,7 +297,7 @@ _PADDLE_ORIGINS = "https://cdn.paddle.com https://*.paddle.com"
 # Responsive webpages serve inline scripts/styles signed by a per-request nonce
 # (see _new_csp). '{nonce}' is replaced at request time; no 'unsafe-inline'.
 _CSP_TEMPLATE = ("default-src 'self'; "
-                 "script-src 'self' 'nonce-{nonce}' https://cdn.paddle.com; "
+                 "script-src 'self' 'nonce-{nonce}' https://cdn.paddle.com https://plausible.io; "
                  # style-src intentionally uses 'unsafe-inline' (no nonce):
                  # the dashboard sets many layout details via style="" attributes,
                  # and per CSP3 a nonce would force CSP to IGNORE 'unsafe-inline',
@@ -305,7 +306,7 @@ _CSP_TEMPLATE = ("default-src 'self'; "
                  "style-src 'self' 'unsafe-inline' https://*.paddle.com; "
                  "img-src 'self' data: https://*.paddle.com; "
                  "font-src 'self' data: https://*.paddle.com; "
-                 "connect-src 'self' ws: wss: https://*.paddle.com wss://checkout.paddle.com; "
+                 "connect-src 'self' ws: wss: https://*.paddle.com wss://checkout.paddle.com https://plausible.io; "
                  "frame-src https://checkout.paddle.com https://sandbox-checkout.paddle.com "
                  "https://buy.paddle.com https://sandbox-buy.paddle.com; "
                  "object-src 'none'; "
@@ -440,6 +441,39 @@ def snapshot_health() -> dict:
 @app.get("/health")
 def api_health():
     return snapshot_health()
+
+
+@app.get("/metrics")
+def api_metrics():
+    """Prometheus-style text metrics (P4.4). Built from the /health snapshot so
+    it carries the same low-cost cached probes; exported for the operator's
+    monitoring, not for the public."""
+    s = snapshot_health()
+    lines = [
+        "# HELP fluxswarm_up 1 when the app is healthy.",
+        "# TYPE fluxswarm_up gauge",
+        f"fluxswarm_up {1 if s['ok'] else 0}",
+        "# HELP fluxswarm_db_ok 1 when the database responds.",
+        "# TYPE fluxswarm_db_ok gauge",
+        f"fluxswarm_db_ok {1 if s['db_ok'] else 0}",
+        "# HELP fluxswarm_hermes_bin_ok 1 when the Hermes runtime binary exists.",
+        "# TYPE fluxswarm_hermes_bin_ok gauge",
+        f"fluxswarm_hermes_bin_ok {1 if s['hermes_bin_ok'] else 0}",
+        "# HELP fluxswarm_active_boards currently live squad boards.",
+        "# TYPE fluxswarm_active_boards gauge",
+        f"fluxswarm_active_boards {s['active_boards']}",
+        "# HELP fluxswarm_sealed_boards boards finished/archived.",
+        "# TYPE fluxswarm_sealed_boards gauge",
+        f"fluxswarm_sealed_boards {s['sealed_boards']}",
+        "# HELP fluxswarm_demo_quota_remaining demo launches left in the global window.",
+        "# TYPE fluxswarm_demo_quota_remaining gauge",
+        f"fluxswarm_demo_quota_remaining {s['demo_quota_remaining']}",
+        "# HELP fluxswarm_uptime_seconds process uptime.",
+        "# TYPE fluxswarm_uptime_seconds gauge",
+        f"fluxswarm_uptime_seconds {s['uptime_seconds']}",
+        f"# db={s['db']} limiter_backend={s['limiter_backend']}",
+    ]
+    return PlainTextResponse("\n".join(lines) + "\n")
 
 
 @app.get("/api/provider/health")
@@ -872,6 +906,7 @@ class RegisterIn(BaseModel):
     name: str
     password: str = Field(max_length=4096)
     ref: str | None = None
+    tos_accept: bool = False
 
 
 class LoginIn(BaseModel):
@@ -922,7 +957,10 @@ def index(request: Request):
     base = os.environ.get("FLUXSWARM_PUBLIC_BASE_URL", "").strip().rstrip("/")
     return templates.TemplateResponse(request=request, name="index.html",
                                       context={"title": "FluxSwarm", "canonical": base + "/" if base else "",
-                                               "csp_nonce": request.state.csp_nonce})
+                                               "og_image": (base + "/static/brand/og-1200x630.png") if base else "/static/brand/og-1200x630.png",
+                                               "csp_nonce": request.state.csp_nonce,
+                                               "analytics_domain": os.environ.get(
+                                                   "FLUXSWARM_ANALYTICS_DOMAIN", "").strip()})
 
 
 @app.get("/api/plans")
@@ -1199,6 +1237,9 @@ def api_register(p: RegisterIn, request: Request):
     if not limiter.register_allowed(ip):
         raise HTTPException(status_code=429, detail="Registration limit reached — try again later")
     email = p.email.lower().strip()
+    if not p.tos_accept:
+        raise HTTPException(status_code=400,
+                            detail="Please accept the Terms & Privacy Policy to continue")
     if "@" not in email or "." not in email.split("@")[-1]:
         raise HTTPException(status_code=400, detail="Invalid email address")
     if len(p.password) < 8:
@@ -1206,7 +1247,8 @@ def api_register(p: RegisterIn, request: Request):
     if not p.name or not p.name.strip():
         raise HTTPException(status_code=400, detail="Name is required")
     try:
-        user = db.create_user(p.email, p.name, p.password, p.ref)
+        user = db.create_user(p.email, p.name, p.password, p.ref,
+                              tos_accepted_at=time.time())
     except ValueError:
         audit.audit("auth.register", email=p.email, ip=ip, outcome="fail",
                     reason="email_taken")
@@ -1214,6 +1256,7 @@ def api_register(p: RegisterIn, request: Request):
     limiter.record_registration(ip)
     token = auth_mod.make_token(user)
     audit.audit("auth.register", uid=user["id"], email=user["email"], ip=ip, outcome="ok")
+    notify.send_welcome_async(user["email"], user["name"])
     return {"token": token, "user": public_user(user)}
 
 
@@ -1360,6 +1403,8 @@ def api_create_project(payload: ProjectCreate, request: Request,
     # Credit gating: each launch costs 1 credit.
     if not db.deduct_credit(user["id"]):
         raise HTTPException(status_code=402, detail="Out of credits — upgrade your plan or use a referral code")
+    if db.get_user_credits(user["id"]) == 0:
+        notify.send_depletion_async(user["email"], user["name"])
     slug = make_project_slug(user["id"])
     hc.ensure_board(slug)
     try:
@@ -1621,9 +1666,16 @@ def _process_paddle_payload(body: bytes, signature: str | None, request: Request
             audit.audit("payments.webhook", outcome="fail", reason="incomplete_receipt",
                         ip=_client_ip(request), **detail_inner)
             raise HTTPException(status_code=422, detail="Incomplete payment data")
-        db.upgrade_plan(uid, receipt["plan"])
+        if receipt["plan"] == "topup":
+            # A pure credit refill: add the pack's credits without moving the
+            # user's plan tier (their parallel cap stays with the highest plan
+            # they purchased). Topups still trigger the once-per-referred-user
+            # referral rewards below (a paid purchase counts either way).
+            db.add_credits(uid, db.PLANS["topup"]["credits"])
+        else:
+            db.upgrade_plan(uid, receipt["plan"])
         u2 = db.get_user_by_id(uid)
-        if u2 and u2.get("referred_by") and receipt.get("plan"):
+        if u2 and u2.get("referred_by"):
             db.reward_referrer_once(u2["email"])
         audit.audit("payments.webhook", outcome="ok", ip=_client_ip(request), **detail_inner)
     elif receipt["event"] == "payment.refunded":
@@ -1817,12 +1869,39 @@ def dev_complete_mock_payment(request: Request, user_id: int, plan: str, aud: st
 
 # ---------- compliance: public legal pages ----------
 _LEGAL_BASE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
- <meta name="viewport" content="width=device-width, initial-scale=1"><title>{title}</title>
+ <meta name="viewport" content="width=device-width, initial-scale=1"><title>{title}</title>{head}
  <style>body{{font-family:system-ui,sans-serif;max-width:760px;margin:40px auto;padding:0 16px;
  line-height:1.7;color:#222}}h1{{font-size:1.6rem}}a{{color:#0b59c5}}</style></head>
- <body><p style="color:#777;font-size:.85rem">Last updated: 30 August 2026</p>{body}</body></html>"""
+ <body><p style="color:#777;font-size:.85rem">Last updated: 7 September 2026</p>{body}</body></html>"""
 
 _LEGAL_BASE_EN = _LEGAL_BASE
+
+
+def _public_base() -> str:
+    """Absolute site origin for canonical/og tags (empty when unset)."""
+    return os.environ.get("FLUXSWARM_PUBLIC_BASE_URL", "").strip().rstrip("/")
+
+
+def _og_head(title: str, canonical: str) -> str:
+    """OpenGraph + canonical head fragment."""
+    base = _public_base()
+    head = ""
+    if canonical:
+        head += f'<link rel="canonical" href="{canonical}">'
+    ogimg = base + "/static/brand/og-1200x630.png" if base else "/static/brand/og-1200x630.png"
+    head += (f'<meta property="og:title" content="{title}">'
+             f'<meta property="og:type" content="website">'
+             f'<meta property="og:image" content="{ogimg}">'
+             f'<meta name="twitter:card" content="summary_large_image">')
+    return head
+
+
+def _legal_page(title: str, body: str, path: str) -> str:
+    """Render a legal page with canonical + OpenGraph (single shared code path)."""
+    base = _public_base()
+    canonical = (base + path) if base else ""
+    return _LEGAL_BASE_EN.format(title=title, body=body,
+                                 head=_og_head(title, canonical))
 
 
 def _legal_entity_block(lang: str) -> str:
@@ -1849,183 +1928,120 @@ def _legal_entity_block(lang: str) -> str:
 
 @app.get("/privacy", response_class=HTMLResponse)
 def privacy_page():
-    contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
-    body = """<h1>Privacy Policy</h1>
-<p>We process only the data needed to operate the service: email, name, password (hashed with Argon2id), user-supplied AI provider keys (encrypted immediately with Fernet), project goals and generated outputs, usage and audit records, and minimal payment information.</p>
-<p>We do not sell your data and do not use it for advertising. We share it only (1) with Paddle (merchant of record) to complete transactions, and (2) with the AI provider you choose when you launch a swarm (BYOK) to execute your goal under that provider's terms. We do not train on your data.</p>
-<p>Your rights (CCPA/CPRA): the right to access your data via <code>GET /api/account/export</code> (or from the account panel), the right to rectification via <code>PATCH /api/account</code> (update your display name), and the right to full erasure via <code>DELETE /api/account</code> (including immediate deletion of your keys). Other correction requests can be sent to <a href="mailto:{c}">{c}</a>. Data storage context: on launch, servers are hosted in North America; we selected this location for compute and encryption — see the section on transfers in this policy.</p>
-<p>The security audit log (append-only) is excluded from erasure: it is retained for security and investigation purposes only, never for marketing or training; its entries may include your email address and IP address automatically, and they cannot be erased. Board artifacts generated by a swarm run (generated product files on disk) are deleted when the account is deleted in later versions; until then you may request deletion by email. Details on cookies and retention appear on the <a href="/cookies">cookies and tracking</a> page, and refunds are described on the <a href="/refund">refund policy</a> page.</p>
-<p>UK and EU users (British/European addendum): the lawful bases for processing are performance of the contract, legitimate interest (system security and fraud prevention), and legal obligation (billing records). Your rights include access, rectification, erasure, data portability, the right to object to processing, and the right to lodge a complaint with your data-protection authority (in the UK: the Information Commissioner's Office). Your data may be transferred to AI providers outside the UK/EU under their terms; we do not transfer it for marketing purposes.</p>"""
-    body = body.format(c=contact)
-    body += '<h2>AI Decision-Making Transparency (ADMT)</h2><p>When you launch an AI-assisted project, the platform analyses your goal through a squad of agents (Planner, Architect, DevOps, TDD, Reviewer, Builder) and generates draft code that requires your review. You have the right to opt out of automated decision-making (ADMT) at any time from your account — this stops all AI-assisted launches while manual project creation remains available — and to opt back in after re-acknowledging the updated notice. Full notice: <a href="/admt-notice">ADMT Notice page</a>.</p>'
-    body += '<h2>Processing providers (disclosure)</h2><p>Only your project description is sent to the AI provider you choose to execute your goal, subject to that provider\u2019s terms: <a href="https://cloud.google.com/terms/data-processing-addendum">Google DPA</a> \u00b7 <a href="https://www.anthropic.com/legal/data-processing-addendum">Anthropic DPA</a> \u00b7 <a href="https://openai.com/policies/data-processing-addendum/">OpenAI DPA</a>. We do not train on your data.</p>'
-    body += '<h2>Data retention</h2><p>Identifiable data is retained for 90 days after account deletion for compliance and audit purposes; the audit log remains excluded from erasure as described above. ADMT contact: <a href="mailto:privacy@fluxswarm.ai">privacy@fluxswarm.ai</a>.</p>'
-    body += _legal_entity_block("en")
-    _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
-    body += f'<p>Questions: <a href="mailto:{contact}">{contact}</a>'
-    body += f" · {_phone}</p>" if _phone else "</p>"
-    return _LEGAL_BASE_EN.format(title="Privacy Policy", body=body)
+    return _privacy_page("/privacy")
 
 
 @app.get("/privacy-en", response_class=HTMLResponse)
 def privacy_page_en():
+    return _privacy_page("/privacy-en")
+
+
+def _privacy_page(path: str):
     contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
     body = """<h1>Privacy Policy</h1>
-<p>We process only the data needed to operate the service: email, name, password (Argon2id), user-supplied AI provider keys (Fernet-encrypted), project goals and generated outputs, usage/audit records, and minimal payment metadata.</p>
-<p>We do not sell your data and do not use it for ads. We share it only (1) with Paddle (merchant of record) to complete transactions and (2) with the AI provider of your choice (BYOK) to execute your goal under that provider's terms. We do not train on your data.</p>
-<p>Your rights (CCPA/CPRA): access via <code>GET /api/account/export</code>, rectification via <code>PATCH /api/account</code> (update your display name), and full erasure via <code>DELETE /api/account</code> (including immediate key deletion). Other correction requests: <a href="mailto:{c}">{c}</a>. On launch, data is hosted on servers in North America.</p>
+<p>We process only the data needed to operate the service: email, name, password (hashed with Argon2id), user-supplied AI provider keys (encrypted immediately with Fernet), project goals and generated outputs, usage/audit records, and minimal payment metadata.</p>
+<p>We do not sell your data and do not use it for advertising. We share it only (1) with Paddle (merchant of record) to complete transactions and (2) with the AI provider you choose when you launch a swarm (BYOK) to execute your goal under that provider's terms. We do not train on your data.</p>
+<p>Your rights (CCPA/CPRA): access via <code>GET /api/account/export</code>, rectification via <code>PATCH /api/account</code> (update your display name), and full erasure via <code>DELETE /api/account</code> (including immediate deletion of your keys). Other correction requests: <a href="mailto:{c}">{c}</a>. On launch, data is hosted on servers in North America.</p>
 <p>The security audit log is append-only and excluded from erasure: it is retained for security/investigation purposes only, never for marketing or training; its entries may include your email address and IP address automatically.</p>
-<p>UK/EU addendum: lawful bases are performance of the contract, legitimate interests (system security, fraud prevention) and legal obligation (billing records). Your rights include access, rectification, erasure, portability, objection, and complaint to your supervisory authority (in the UK: the ICO). Your data may be transferred to the AI provider you choose, outside the UK/EU, under that provider's terms; we do not transfer it for marketing. Cookies and tracking are described on <a href="/cookies-en">/cookies</a>; refunds and credits on <a href="/refund-en">/refund</a>.</p>"""
+<p>UK/EU addendum: lawful bases are performance of the contract, legitimate interests (system security, fraud prevention) and legal obligation (billing records). Your rights include access, rectification, erasure, portability, objection, and complaint to your supervisory authority (in the UK: the ICO). Your data may be transferred to the AI provider you choose, outside the UK/EU, under that provider's terms; we do not transfer it for marketing. Cookies and tracking are described on <a href="/cookies">/cookies</a>; refunds and credits on <a href="/refund">/refund</a>.</p>"""
     body = body.format(c=contact)
-    body += '<h2>AI Decision-Making Transparency (ADMT)</h2><p>An AI-assisted launch decomposes your goal through a squad of agents (Planner, Architect, DevOps, TDD, Reviewer, Builder) and generates draft code that requires your review. You can <strong>opt out of ADMT</strong> at any time from your account — this disables all AI-assisted launches while manual project creation remains available — and opt back in only after re-acknowledging the current notice. Full disclosure: <a href="/admt-notice-en">ADMT Notice page</a>.</p>'
+    body += '<h2>AI Decision-Making Transparency (ADMT)</h2><p>An AI-assisted launch decomposes your goal through a squad of agents (Planner, Architect, DevOps, TDD, Reviewer, Builder) and generates draft code that requires your review. You can <strong>opt out of ADMT</strong> at any time from your account — this disables all AI-assisted launches while manual project creation remains available — and opt back in only after re-acknowledging the current notice. Full disclosure: <a href="/admt-notice">ADMT Notice page</a>.</p>'
     body += '<h2>Processing providers</h2><p>Only your project description is sent to the AI provider you choose to execute your goal, subject to that provider\u2019s terms: <a href="https://cloud.google.com/terms/data-processing-addendum">Google DPA</a> \u00b7 <a href="https://www.anthropic.com/legal/data-processing-addendum">Anthropic DPA</a> \u00b7 <a href="https://openai.com/policies/data-processing-addendum/">OpenAI DPA</a>. We do not train models on your data.</p>'
-    body += '<h2>Data retention</h2><p>Identifiable data is retained for 90 days after account deletion for compliance and audit purposes; the audit log remains excluded from erasure as described above. ADMT contact: <a href="mailto:privacy@fluxswarm.ai">privacy@fluxswarm.ai</a>.</p>'
+    body += '<h2>Data retention</h2><p>Deleted means deleted: identifiable data (your account, stored keys and boards) is erased immediately when you delete your account. The append-only security audit log is the sole exception — it is retained for security and abuse investigation only, never for marketing or training, and cannot be erased. Data Protection Officer: <a href="mailto:privacy@fluxswarm.ai">privacy@fluxswarm.ai</a>. UK: you may also contact the Information Commissioner&rsquo;s Office (Wycliffe House, Water Lane, Wilmslow, Cheshire SK9 5AF — ico.org.uk).</p>'
     body += _legal_entity_block("en")
     _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
     body += f'<p>Questions: <a href="mailto:{contact}">{contact}</a>'
     body += f" · {_phone}</p>" if _phone else "</p>"
-    return _LEGAL_BASE_EN.format(title="Privacy Policy", body=body)
+    return _legal_page("Privacy Policy", body, path)
 
 
 @app.get("/terms", response_class=HTMLResponse)
 def terms_page():
-    contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
-    body = """<h1>Terms of Service</h1>
-<p>The service is provided &quot;as is&quot;. Payments are processed by Paddle (merchant of record) under its own terms, including taxes and VAT where applicable.</p>
-<h2>Credits</h2><p>Credits are a prepaid service balance granted only after payment is confirmed. Each project launch costs one credit and credits never expire. A launch that fails before any work is consumed refunds the credit automatically, and if you obtain a refund from Paddle your plan is downgraded to Demo while your current credit balance stays.</p>
-<h2>Your data and your keys</h2><p>You are responsible for the goals you submit and for the provider keys you store (see the privacy policy for how they are protected). Keys are used only to execute your own launches.</p>
-<h2>Outputs</h2><p>Swarm outputs are yours, subject to the terms of the AI providers used and to any third-party components included in them. The service uses open-source execution software and agent skill profiles (Hermes; ECC), whose licences belong to their respective authors.</p>
-<h2>Acceptable use</h2><p>Abuse, unlawful content, or harmful activity is prohibited and may result in account suspension (see the <a href="/acceptable-use">acceptable-use policy</a>).</p>
-<h2>Availability and termination</h2><p>We work to keep the service available but do not guarantee uninterrupted availability. You can delete your account (and all of its data and boards) from the app at any time, and we may suspend accounts that violate these terms.</p>
-<h2>Limitation of liability</h2><p>To the maximum extent permitted by applicable law, the service is provided &quot;as is&quot; without warranties, and liability for the service and its outputs is limited as permitted by law. Nothing here limits or excludes liability that cannot be limited or excluded by law, nor affects your mandatory statutory consumer rights (including in the UK and the EU).</p>
-<h2>Governing law and jurisdiction</h2><p>These terms are governed by applicable law; your mandatory consumer rights in your country are not affected. Jurisdiction specifics are kept under legal review as the service expands. Questions: <a href="mailto:{c}">{c}</a>.</p>"""
-    body = body.format(c=contact)
-    body += '<h2>Use of AI (ADMT)</h2><p>By launching an AI-assisted project you acknowledge the pre-use notice (<a href="/admt-notice">ADMT Notice</a>). You may opt out of ADMT at any time from your account while keeping manual project creation available. Human review is available on request and is completed within 48 hours of submission.</p>'
-    body += '<h2>AI-generated code liability</h2><p>AI-generated outputs are drafts that require your review and testing before use; they are provided without warranty of being error-free or fit for every purpose. Final verification remains your responsibility, subject to the general limitation of liability in these terms and to the terms of the provider used.</p>'
-    body += _legal_entity_block("en")
-    _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
-    body += f'<p>Contact: <a href="mailto:{contact}">{contact}</a>'
-    body += f" · {_phone}</p>" if _phone else "</p>"
-    return _LEGAL_BASE_EN.format(title="Terms of Service", body=body)
+    return _terms_page("/terms")
 
 
 @app.get("/terms-en", response_class=HTMLResponse)
 def terms_page_en():
+    return _terms_page("/terms-en")
+
+
+def _terms_page(path: str):
     contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
     body = """<h1>Terms of Service</h1>
-<p>The service is provided &quot;as is&quot;. Paid transactions are processed by
-Paddle (merchant of record) under its own terms; any country-specific tax or VAT
-is handled by Paddle.</p>
-<h2>Credits</h2><p>Credits are a prepaid service balance, granted only after a
-confirmed payment. Each launched project costs 1 credit. Credits never expire.
-A launch that fails before the squad does any work refunds the credit to your
-account automatically. A merchant refund downgrades your plan to Demo and keeps
-your current credit balance.</p>
-<h2>Your data and your keys</h2><p>You remain responsible for the goals you submit
-and for the provider keys you store (see the privacy policy for how they are
-protected). User-supplied API keys are used only to execute your own launches.</p>
-<h2>Output</h2><p>You own the generated output, subject to the terms of the AI
-providers you used and to any third-party components included in it. The service
-uses third-party execution software and open-source agent skill profiles (Hermes;
-ECC); their licences belong to their respective authors.</p>
-<h2>Acceptable use</h2><p>Abuse, unlawful content, or harmful swarm activity is
-prohibited and may result in account suspension. See the <a href="/acceptable-use-en">acceptable-use policy</a>.</p>
-<h2>Availability</h2><p>We work to keep the service available but do not guarantee
-uninterrupted availability.</p>
-<h2>Termination</h2><p>You can delete your account (and its data and boards) at any
-time from the app. We may suspend accounts that violate these terms or the
-acceptable-use policy.</p>
-<h2>Limitation of liability</h2><p>To the maximum extent permitted by applicable
-law, the service is provided &quot;as is&quot; without warranties, and liability
-for the service and the generated output is limited as permitted by law. This does
-not limit or exclude liability that cannot be limited or excluded by law, and
-does not affect any statutory consumer rights you have (including in the UK and
-the EU).</p>
-<h2>Governing law and jurisdiction</h2><p>These terms are governed by applicable
-law. If you are a consumer in the UK, EU or another jurisdiction with mandatory
-consumer protections, your rights under that law are not affected. Jurisdiction
-specifics are kept under legal review as the service expands. Questions: <a href="mailto:{c}">{c}</a>.</p>"""
+<p>The service is provided &quot;as is&quot;. Paid transactions are processed by Paddle (merchant of record) under its own terms; any country-specific tax or VAT is handled by Paddle.</p>
+<h2>Eligibility and minimum age</h2><p>You must be at least 13 years old to use the Service, and if you are resident in the UK or the European Economic Area you must be at least 16 years old. By registering you confirm that you meet the age requirement for your country and that you accept these Terms and the Privacy Policy. If a parent or guardian registered on your behalf, they agree to these terms for you.</p>
+<h2>Credits</h2><p>Credits are a prepaid service balance, granted only after a confirmed payment. Each launched project costs 1 credit. Credits never expire. A launch that fails before the squad does any work refunds the credit to your account automatically. A merchant refund downgrades your plan to Demo and keeps your current credit balance.</p>
+<h2>Your data and your keys</h2><p>You remain responsible for the goals you submit and for the provider keys you store (see the privacy policy for how they are protected). User-supplied API keys are used only to execute your own launches.</p>
+<h2>Output</h2><p>You own the generated output, subject to the terms of the AI providers you used and to any third-party components included in it. The service uses third-party execution software and open-source agent skill profiles (Hermes; ECC); their licences belong to their respective authors.</p>
+<h2>Acceptable use</h2><p>Abuse, unlawful content, or harmful swarm activity is prohibited and may result in account suspension. See the <a href="/acceptable-use">acceptable-use policy</a>.</p>
+<h2>Availability and termination</h2><p>We work to keep the service available but do not guarantee uninterrupted availability. You can delete your account (and its data and boards) at any time from the app. We may suspend accounts that violate these terms or the acceptable-use policy.</p>
+<h2>Limitation of liability</h2><p>To the maximum extent permitted by applicable law, the service is provided &quot;as is&quot; without warranties, and liability for the service and the generated output is limited as permitted by law. This does not limit or exclude liability that cannot be limited or excluded by law, and does not affect any statutory consumer rights you have (including in the UK and the EU).</p>
+<h2>Governing law and jurisdiction</h2><p>These terms are governed by applicable law. If you are a consumer in the UK, EU or another jurisdiction with mandatory consumer protections, your rights under that law are not affected. Jurisdiction specifics are kept under legal review as the service expands. Questions: <a href="mailto:{c}">{c}</a>.</p>"""
     body = body.format(c=contact)
-    body += '<h2>Use of AI (ADMT)</h2><p>By launching an AI-assisted project you acknowledge the pre-use notice (<a href="/admt-notice-en">ADMT Notice</a>). You may opt out of ADMT at any time from your account while keeping manual project creation. Human review is available on request and is completed within 48 hours of submission.</p>'
+    body += '<h2>Use of AI (ADMT)</h2><p>By launching an AI-assisted project you acknowledge the pre-use notice (<a href="/admt-notice">ADMT Notice</a>). You may opt out of ADMT at any time from your account while keeping manual project creation available. Human review is available on request and is completed within 48 hours of submission.</p>'
     body += '<h2>AI-generated code liability</h2><p>AI-generated outputs are drafts that require your review and testing before use; they are provided without warranty of correctness or fitness for any particular purpose. Final verification remains your responsibility, subject to the general limitation of liability in these terms and to the terms of the provider used.</p>'
     body += _legal_entity_block("en")
     _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
     body += f'<p>Contact: <a href="mailto:{contact}">{contact}</a>'
     body += f" · {_phone}</p>" if _phone else "</p>"
-    return _LEGAL_BASE_EN.format(title="Terms of Service", body=body)
+    return _legal_page("Terms of Service", body, path)
 
 
 # ---------- legal: refund & credits (no-refund absolutes) ----------
 @app.get("/refund", response_class=HTMLResponse)
 def refund_page():
-    contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
-    body = """<h1>Refund &amp; Credit Policy</h1>
-<p>Credits are service credits: they never expire and cannot be withdrawn outside the service.</p>
-<p>Automatic refunds:</p>
-<ul>
-<li>If a swarm launch fails and no work was consumed, the credit is refunded to your account automatically.</li>
-<li>If you obtain a monetary refund from Paddle, your plan is downgraded to Demo and your current credit balance stays with you.</li>
-</ul>
-<p>When a monetary refund is considered (at our discretion, within 14 days of your first paid activation, net of consumed work): there is no automatic full refund; online merchants may have limited your usage. Requests within 14 days of purchase are processed before deducting consumed credits. After 14 days, no monetary refund for consumed usage, but any unconsumed credit balance may be refunded via <a href="mailto:{c}">{c}</a> and subject to Paddle's process.</p>
-<p>All payments are handled exclusively by Paddle (merchant of record). Your statutory consumer rights imposed by the laws of your country (including UK and EU consumer rights) are not waived by these terms. Disputes: <a href="mailto:{c}">{c}</a>.</p>"""
-    body = body.format(c=contact)
-    body += _legal_entity_block("en")
-    _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
-    body += f'<p>Questions: <a href="mailto:{contact}">{contact}</a>'
-    body += f" · {_phone}</p>" if _phone else "</p>"
-    return _LEGAL_BASE_EN.format(title="Refund &amp; Credit Policy", body=body)
+    return _refund_page("/refund")
 
 
 @app.get("/refund-en", response_class=HTMLResponse)
 def refund_page_en():
+    return _refund_page("/refund-en")
+
+
+def _refund_page(path: str):
     contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
     body = """<h1>Refund &amp; Credit Policy</h1>
 <p>Credits are service credits: they never expire and cannot be withdrawn outside the service.</p>
 <p>Automatic grants:</p>
 <ul>
-<li>If a swarm launch fails and no work was consumed, the credits are returned to your account automatically.</li>
+<li>If a swarm launch fails and no work was consumed, the credit is refunded to your account automatically.</li>
 <li>If you obtain a monetary refund from Paddle, your plan is downgraded to Demo and your current credit balance stays with you.</li>
 </ul>
 <p>Monetary refunds (at our discretion, within 14 days of your first paid activation, net of consumed work): there is no automatic full-refund policy; we review requests individually. Requests within 14 days of purchase are processed before deducting consumed credits. After 14 days, no monetary refund for consumed usage, but any unconsumed credit balance may be refunded via <a href="mailto:{c}">{c}</a> subject to Paddle's process.</p>
-<p>All payments are handled by Paddle (merchant of record). Your statutory consumer rights (including UK and EU) are not waived by any of these terms. Disputes: <a href="mailto:{c}">{c}</a>.</p>"""
+<p><strong>UK consumers (Consumer Contracts Regulations 2013):</strong> if you live in the UK you have a statutory 14-day cooling-off period starting the day after you purchase a credit pack. Where the pack (digital content) was not downloaded or used you may cancel for a full refund; once you begin using credits (launching projects) during the cooling-off period, you expressly waive the cancellation right in exchange for immediate use, and your refund is reduced accordingly to a fair proportion for what was consumed — in all cases your statutory rights are not affected by this policy.</p>
+<p>All payments are handled by Paddle (merchant of record). Your statutory consumer rights (including UK and EU) are not waived by any of these terms, and nothing here limits rights that cannot lawfully be excluded (FTC rules and card-network chargeback rights included). Disputes: <a href="mailto:{c}">{c}</a>.</p>"""
     body = body.format(c=contact)
     body += _legal_entity_block("en")
     _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
     body += f'<p>Questions: <a href="mailto:{contact}">{contact}</a>'
     body += f" · {_phone}</p>" if _phone else "</p>"
-    return _LEGAL_BASE_EN.format(title="Refund &amp; Credit Policy", body=body)
+    return _legal_page("Refund &amp; Credit Policy", body, path)
 
 
 # ---------- legal: cookies & tracking ----------
 @app.get("/cookies", response_class=HTMLResponse)
 def cookies_page():
+    return _cookies_page("/cookies")
+
+
+@app.get("/cookies-en", response_class=HTMLResponse)
+def cookies_page_en():
+    return _cookies_page("/cookies-en")
+
+
+def _cookies_page(path: str):
     contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
     body = """<h1>Cookies &amp; Tracking</h1>
-<p>The server sets no tracking cookies; the session relies on a JWT held in <code>localStorage</code> that expires after 7 days or when you log out. The only other local value is <code>flux-lang</code> (language preference).</p>
-<p>There is no analytics, no advertising, no tracking pixels, and no third-party trackers. Because we do not use cookies for advertising or analytics, no prior consent banner is required under UK cookie regulations (PECR) on our site. When you pay, Paddle sets cookies on its own domain only, never ours.</p>
+<p>The FluxSwarm server sets no tracking cookies. Your session uses a signed token held in browser <code>localStorage</code>; the only other local value is <code>flux-lang</code> (language preference) and <code>fs-consent</code> (your consent-banner choice).</p>
+<p>The site uses strictly necessary local storage only: the session token that keeps you signed in and your saved preferences. A dismissible notice explains this on the home page for visitors in the UK/EU and records your acceptance — it is not a consent wall, because nothing is loaded for advertising or analytics without your choice, and no third-party cookies are set on our domain.</p>
+<p>When you pay, Paddle (merchant of record) sets cookies on its own domain only, never ours; analytics, when enabled by the operator, are cookieless and privacy-friendly (Plausible).</p>
 <p>See also <a href="/refund">refund</a> · <a href="/privacy">privacy</a> · <a href="/acceptable-use">acceptable use</a>.</p>"""
     body = body.format(c=contact)
     body += _legal_entity_block("en")
     _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
     body += f'<p>Questions: <a href="mailto:{contact}">{contact}</a>'
     body += f" · {_phone}</p>" if _phone else "</p>"
-    return _LEGAL_BASE_EN.format(title="Cookies &amp; Tracking", body=body)
-
-
-@app.get("/cookies-en", response_class=HTMLResponse)
-def cookies_page_en():
-    contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
-    body = """<h1>Cookies &amp; Tracking</h1>
-<p>The FluxSwarm server sets no tracking cookies. Your session uses a JWT held in browser <code>localStorage</code>; the only other local value is <code>flux-lang</code> (language preference).</p>
-<p>There is no analytics, no advertising, no tracking pixels and no third-party trackers. When you pay, Paddle sets cookies on its own domain only, never ours.</p>
-<p>Because we do not use cookies for advertising or analytics, no prior consent banner is required under UK PECR for our own site. Paid pages are served by Paddle's checkout under its own notice. Contact: <a href="mailto:{c}">{c}</a></p>
-<p>See also <a href="/refund-en">refund policy</a> and <a href="/privacy-en">privacy</a>.</p>"""
-    body = body.format(c=contact)
-    body += _legal_entity_block("en")
-    _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
-    body += f'<p>Questions: <a href="mailto:{contact}">{contact}</a>'
-    body += f" · {_phone}</p>" if _phone else "</p>"
-    return _LEGAL_BASE_EN.format(title="Cookies &amp; Tracking", body=body)
+    return _legal_page("Cookies &amp; Tracking", body, path)
 
 
 # ---------- marketing: public product pages ----------
@@ -2060,14 +2076,27 @@ details.faq p{margin:8px 0 0;color:#8b96b3}"""
 
 _MARKET_BASE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="{desc}"><title>{title}</title>
+<meta name="description" content="{desc}"><title>{title}</title>{head}
 <style>{css}</style></head><body>
 <div class="top"><span class="logo">FluxSwarm</span><nav>
 <a href="/">Go to app</a><a href="/pricing">Pricing</a><a href="/how-it-works">How it works</a><a href="/faq">FAQ</a></nav></div>
-<div class="wrap">{body}<div class="foot">FluxSwarm · <a href="/privacy-en">Privacy</a> ·
-<a href="/terms-en">Terms</a> · <a href="/refund-en">Refund</a> ·
-<a href="/cookies-en">Cookies</a> · <a href="/acceptable-use-en">Acceptable use</a></div></div>
+<div class="wrap">{body}<div class="foot">FluxSwarm · <a href="/privacy">Privacy</a> ·
+<a href="/terms">Terms</a> · <a href="/refund">Refund</a> ·
+<a href="/cookies">Cookies</a> · <a href="/acceptable-use">Acceptable use</a></div></div>
 </body></html>"""
+
+
+def _market_page(title: str, desc: str, body: str, path: str) -> str:
+    """Shared renderer for the public marketing pages: canonical URL, OpenGraph
+    tags and (operator-gated, cookieless) Plausible analytics in <head>."""
+    base = _public_base()
+    canonical = (base + path) if base else ""
+    head = _og_head(title, canonical)
+    domain = os.environ.get("FLUXSWARM_ANALYTICS_DOMAIN", "").strip()
+    if domain:
+        head += (f'<script defer data-domain="{domain}" '
+                 f'src="https://plausible.io/js/script.js"></script>')
+    return _MARKET_BASE.format(title=title, desc=desc, head=head, css=_MARKET_CSS, body=body)
 
 
 @app.get("/pricing", response_class=HTMLResponse)
@@ -2091,18 +2120,21 @@ launch that fails before any work starts is refunded automatically.</p>
 <div class="plans">{rows}</div>
 <h2>Anything else?</h2>
 <details class="faq" open><summary>Can I try before paying?</summary><p>Yes — the Demo
-plan starts with 3 free credits, no card required, and there is a public demo board.</p></details>
+plan starts with 5 free credits, no card required, and there is a public demo board.</p></details>
 <details class="faq"><summary>How are credits used?</summary><p>One credit = one launched
 project = one live squad board. With BYOK you pay your provider's token rate directly;
 FluxSwarm still only charges the single credit.</p></details>
 <details class="faq"><summary>Do credits expire?</summary><p>No. Credits are prepaid and
 never expire.</p></details>
+<details class="faq"><summary>What is the Top-up pack?</summary><p>A quick credit refill
+($9 for 10 credits) for when you run low — it adds credits without changing your plan
+tier or parallel cap, and the credits never expire.</p></details>
 <details class="faq"><summary>What about refunds?</summary><p>Payments are processed by
 Paddle (merchant of record), which handles sales tax and VAT remittance. A merchant
 refund downgrades you to Demo and keeps your current balance. See the
-<a href="/refund-en">refund policy</a>. Prices are shown in USD; GBP pricing is applied
+<a href="/refund">refund policy</a>. Prices are shown in USD; GBP pricing is applied
 by Paddle at checkout for UK customers.</p></details>"""
-    return _MARKET_BASE.format(title="Pricing — FluxSwarm", desc="1 credit per launch, BYOK AI builders", css=_MARKET_CSS, body=body)
+    return _market_page("Pricing — FluxSwarm", "1 credit per launch, BYOK AI builders", body, "/pricing")
 
 
 @app.get("/how-it-works", response_class=HTMLResponse)
@@ -2140,7 +2172,7 @@ that drives the board, and ECC is an underlying open-source component (agent ski
 profiles) used inside it. Both are third-party components; FluxSwarm is not Hermes
 and does not own ECC. Their availability is required to run a launch, and their
 licences are their respective authors'.</p>"""
-    return _MARKET_BASE.format(title="How it works — FluxSwarm", desc="A 6-agent AI development squad on a live board, 1 credit per launch", css=_MARKET_CSS, body=body)
+    return _market_page("How it works — FluxSwarm", "A 6-agent AI development squad on a live board, 1 credit per launch", body, "/how-it-works")
 
 
 @app.get("/faq", response_class=HTMLResponse)
@@ -2161,11 +2193,12 @@ the board. ECC is an underlying open-source component: the agent skill profiles
 the squad uses. FluxSwarm is the product that orchestrates them; it is not Hermes
 and does not own ECC. Both are required to run a launch.</p>
 <h2>Does running cost me anything?</h2><p>Each launch costs 1 credit.
-The Demo plan starts you with 3 free credits (no card). Model tokens are paid by
+The Demo plan starts you with 5 free credits (no card). Model tokens are paid by
 your own key (BYOK) or by the network&rsquo;s configured provider; every plan pays the
 flat 1-credit coordination fee per launch.</p>
-<h2>How much do paid plans cost?</h2><p>Credit packs, not subscriptions. Starter
-$29/25 credits, Pro $99/120 credits, Scale $299/500 credits (USD; GBP applied at
+<h2>How much do paid plans cost?</h2><p>One-time credit packs, not subscriptions. Starter
+$19/20 credits, Pro $49/60 credits, Scale $149/200 credits, plus a $9/10 credit
+Top-up refill (USD; GBP applied at
 checkout by Paddle). Credits never expire. Billing runs through Paddle (merchant
 of record).</p>
 <h2>How fast are launches?</h2><p>Swarm duration depends on the goal, the model
@@ -2189,7 +2222,9 @@ to the terms of the AI provider you used and any third-party components). You ca
 also publish your own squad templates on the marketplace and earn a 50% author
 share on every sale, paid in credits.</p>
 <h2>How do referrals work?</h2><p>Share your referral link; when a referred account
-subscribes to a paid plan you earn 25 credits, once per referred email. Self-referral
+makes a first paid purchase you earn 15 credits (capped at 500 credits total per
+referrer), and the referred friend gets 10 bonus credits on that first paid
+purchase. Rewards are granted once per referred email. Self-referral
 and abusing the program (for example creating fake referrals) is prohibited and
 rewards may be clawed back.</p>
 <h2>Is my API key stored? Can FluxSwarm access my provider account?</h2><p>Keys are
@@ -2215,9 +2250,18 @@ statutory consumer rights are not waived.</p>
 <h2>What support is available?</h2><p>Email support at the contact address on the
 legal pages and in the app footer. Self-serve: this FAQ, the how-it-works guide,
 and the live board you can inspect during every launch.</p>"""
-    return _MARKET_BASE.format(title="FAQ — FluxSwarm", desc="Answers on pricing, credits, BYOK, privacy and the agent squad", css=_MARKET_CSS, body=body)
+    return _market_page("FAQ — FluxSwarm", "Answers on pricing, credits, BYOK, privacy and the agent squad", body, "/faq")
 @app.get("/acceptable-use", response_class=HTMLResponse)
 def acceptable_use_page():
+    return _acceptable_use_page("/acceptable-use")
+
+
+@app.get("/acceptable-use-en", response_class=HTMLResponse)
+def acceptable_use_page_en():
+    return _acceptable_use_page("/acceptable-use-en")
+
+
+def _acceptable_use_page(path: str):
     contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
     body = """<h1>Acceptable Use</h1>
 <p>By using FluxSwarm you agree that you will (1) not use the platform for unlawful, malicious, exploitative or infringing content (including intellectual property and others' rights); (2) not run a swarm aimed at harm, violence or fraud; (3) not resell credits or convert them to cash outside the refund policy; (4) not attempt unauthorized access, leak others' keys, or scrape the API beyond stated limits; (5) comply with the terms of the AI providers you use via BYOK.</p>
@@ -2228,22 +2272,7 @@ def acceptable_use_page():
     _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
     body += f'<p>Questions: <a href="mailto:{contact}">{contact}</a>'
     body += f" · {_phone}</p>" if _phone else "</p>"
-    return _LEGAL_BASE_EN.format(title="Acceptable Use", body=body)
-
-
-@app.get("/acceptable-use-en", response_class=HTMLResponse)
-def acceptable_use_page_en():
-    contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
-    body = """<h1>Acceptable Use</h1>
-<p>By using FluxSwarm you agree that you will (1) not use the platform for unlawful, malicious, exploitative or infringing content (including intellectual property and others' rights); (2) not run a swarm aimed at harm, violence or fraud; (3) not resell credits or convert them to cash outside the refund policy; (4) not attempt unauthorized access, leak others' keys, or scrape the API beyond stated limits; (5) comply with the terms of the AI providers you use via BYOK.</p>
-<p>Violating accounts may be suspended and suspicious activity may be reported to authorities; credits may be recovered following investigation per the <a href="/refund-en">refund policy</a>.</p>
-<p>Questions: <a href="mailto:{c}">{c}</a></p>"""
-    body = body.format(c=contact)
-    body += _legal_entity_block("en")
-    _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
-    body += f'<p>Questions: <a href="mailto:{contact}">{contact}</a>'
-    body += f" · {_phone}</p>" if _phone else "</p>"
-    return _LEGAL_BASE_EN.format(title="Acceptable Use", body=body)
+    return _legal_page("Acceptable Use", body, path)
 
 
 # ---------- compliance: CCPA/CPRA ADMT (uses /api/account/* + external review) ----------

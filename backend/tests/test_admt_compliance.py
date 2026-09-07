@@ -30,7 +30,7 @@ _ADMT_VERSION = "2026-09-04"
 def _fresh_user() -> tuple[str, str]:
     email = f"admtc-{uuid.uuid4().hex[:10]}@fluxswarm.test"
     r = client.post("/api/auth/register", json={
-        "email": email, "name": "ADMT User", "password": "pw-12345678",
+        "email": email, "name": "ADMT User", "password": "pw-12345678", "tos_accept": True,
     })
     assert r.status_code == 200, r.text
     tok = client.post("/api/auth/login", json={

@@ -138,7 +138,7 @@ def test_dev_complete_grants_and_shows_checkout_page():
     assert r.status_code == 200, r.text
     assert r.json()["paid"] is True
     assert db.get_user_by_id(1)["plan"] == "pro"
-    assert db.get_user_by_id(1)["credits"] == 120
+    assert db.get_user_by_id(1)["credits"] == db.PLANS["pro"]["credits"]
 
 
 def test_webhook_email_and_price_fallback():
@@ -189,12 +189,12 @@ def test_webhook_replay_is_idempotent():
     first = client.post("/api/payments/webhook", **kw)
     assert first.status_code == 200, first.text
     assert first.json()["deduplicated"] is False
-    assert db.get_user_by_id(uid)["credits"] == 25
+    assert db.get_user_by_id(uid)["credits"] == db.PLANS["starter"]["credits"]
 
     second = client.post("/api/payments/webhook", **kw)
     assert second.status_code == 200
     assert second.json()["deduplicated"] is True
-    assert db.get_user_by_id(uid)["credits"] == 25  # not double-granted
+    assert db.get_user_by_id(uid)["credits"] == db.PLANS["starter"]["credits"]  # not double-granted
 
 
 def test_webhook_rejects_bad_signature():
@@ -211,7 +211,7 @@ def test_refund_downgrades_plan_keeps_credits():
     r = client.post("/api/payments/webhook", headers={"Paddle-Signature": sig}, content=body)
     assert r.status_code == 200, r.text
     assert db.get_user_by_id(1)["plan"] == "demo"
-    assert db.get_user_by_id(1)["credits"] == 120  # never clawed back
+    assert db.get_user_by_id(1)["credits"] == db.PLANS["pro"]["credits"]  # never clawed back
 
 
 def test_mock_disabled_with_live_credentials(monkeypatch):
@@ -249,7 +249,7 @@ def test_adjustment_refund_maps_transaction_to_user():
     r = client.post("/api/payments/webhook", headers={"Paddle-Signature": sig}, content=body)
     assert r.status_code == 200, r.text
     assert db.get_user_by_id(uid)["plan"] == "demo"
-    assert db.get_user_by_id(uid)["credits"] == 120  # never clawed back
+    assert db.get_user_by_id(uid)["credits"] == db.PLANS["pro"]["credits"]  # never clawed back
 
 
 def test_account_export_delete_via_api():

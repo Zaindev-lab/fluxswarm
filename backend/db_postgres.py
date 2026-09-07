@@ -54,16 +54,20 @@ DB_TIMEOUT_S = int(os.environ.get("FLUXSWARM_DB_TIMEOUT_S", "60"))
 DB_POOL_MAX_QUERIES = int(os.environ.get("FLUXSWARM_DB_POOL_MAX_QUERIES", "50000"))
 DB_POOL_IDLE_LIFETIME_S = float(os.environ.get("FLUXSWARM_DB_POOL_IDLE_LIFETIME_S", "300.0"))
 
-# Plan catalogue (monthly). Must stay in sync with PLANS in db.py.
+# Plan catalogue — one-time credit packs, not subscriptions. Must stay in sync
+# with PLANS in db.py. "topup" is a pure credit refill (never changes plan tier).
 PLANS = {
-    "demo": {"name": "Demo", "price": 0, "credits": 3, "parallel": 1, "desc": "Limited free trial"},
-    "starter": {"name": "Starter", "price": 29, "credits": 25, "parallel": 2, "desc": "For freelancers and small projects"},
-    "pro": {"name": "Pro", "price": 99, "credits": 120, "parallel": 4, "desc": "For small teams"},
-    "scale": {"name": "Scale", "price": 299, "credits": 500, "parallel": 6, "desc": "For companies and agencies"},
+    "demo": {"name": "Demo", "price": 0, "credits": 5, "parallel": 1, "desc": "Free trial — no card required"},
+    "starter": {"name": "Starter", "price": 19, "credits": 20, "parallel": 2, "desc": "For freelancers and small projects"},
+    "pro": {"name": "Pro", "price": 49, "credits": 60, "parallel": 4, "desc": "For small teams"},
+    "scale": {"name": "Scale", "price": 149, "credits": 200, "parallel": 6, "desc": "For companies and agencies"},
+    "topup": {"name": "Top-up", "price": 9, "credits": 10, "parallel": 2, "desc": "Quick refill — credits never expire"},
 }
-PLAN_ORDER = ["demo", "starter", "pro", "scale"]
+PLAN_ORDER = ["demo", "starter", "pro", "scale", "topup"]
 
-REFERRAL_REWARD_CREDITS = 25
+REFERRAL_REWARD_CREDITS = 15
+FRIEND_BONUS_CREDITS = 10
+REFERRAL_REWARD_CAP = 500
 
 TELEGRAM_LINK_TTL = 600
 SESSION_MIN_TIME = 0
@@ -282,13 +286,14 @@ def seed_demo() -> None:
 
 # ---------- users ----------
 
-async def _create_user(email: str, name: str, password: str, ref_code: str | None) -> dict:
+async def _create_user(email: str, name: str, password: str, ref_code: str | None,
+                       tos_accepted_at: float | None = None) -> dict:
     email = email.lower().strip()
     pool = await get_pool()
     try:
         uid = await pool.fetchval(
-            "INSERT INTO users (email,name,pw_hash,plan,credits,ref_code,referred_by,created_at) "
-            "VALUES ($1,$2,$3,'demo',$4,$5,$6,$7) RETURNING id",
+            "INSERT INTO users (email,name,pw_hash,plan,credits,ref_code,referred_by,created_at,tos_accepted_at) "
+            "VALUES ($1,$2,$3,'demo',$4,$5,$6,$7,$8) RETURNING id",
             email,
             name,
             _make_pw_hash(password),
@@ -296,6 +301,7 @@ async def _create_user(email: str, name: str, password: str, ref_code: str | Non
             make_ref_code(),
             ref_code,
             int(time.time()),
+            int(tos_accepted_at) if tos_accepted_at else None,
         )
     except asyncpg.UniqueViolationError:
         raise ValueError("This email is already registered")
@@ -325,8 +331,9 @@ def update_user_name(user_id: int, name: str) -> bool:
     return _await(_update_user_name(user_id, name))
 
 
-def create_user(email: str, name: str, password: str, ref_code: str | None = None) -> dict:
-    return _await(_create_user(email, name, password, ref_code))
+def create_user(email: str, name: str, password: str, ref_code: str | None = None,
+                tos_accepted_at: float | None = None) -> dict:
+    return _await(_create_user(email, name, password, ref_code, tos_accepted_at))
 
 
 async def _authenticate(email: str, password: str) -> dict | None:
@@ -464,7 +471,9 @@ def deduct_credit(user_id: int) -> bool:
 
 
 async def _reward_referrer_once(referred_email: str) -> bool:
-    """Reward referrer exactly once per referred email (race-free via SKIP LOCKED)."""
+    """Reward referrer once per referred email (race-free via SKIP LOCKED), cap
+    referrer earnings at REFERRAL_REWARD_CAP, and grant the referred friend their
+    one-time welcome bonus — all inside the same transaction."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -480,9 +489,23 @@ async def _reward_referrer_once(referred_email: str) -> bool:
                 "SELECT id FROM users WHERE ref_code=$1", row["referrer_code"]
             )
             if ref_user:
+                held = await conn.fetchval(
+                    "SELECT credits FROM users WHERE id=$1", ref_user
+                ) or 0
+                grant = min(REFERRAL_REWARD_CREDITS,
+                            max(0, REFERRAL_REWARD_CAP - held))
+                if grant:
+                    await conn.execute(
+                        "UPDATE users SET credits = credits + $1 WHERE id=$2",
+                        grant, ref_user,
+                    )
+            friend = await conn.fetchval(
+                "SELECT id FROM users WHERE email=$1", referred_email
+            )
+            if friend:
                 await conn.execute(
                     "UPDATE users SET credits = credits + $1 WHERE id=$2",
-                    REFERRAL_REWARD_CREDITS, ref_user,
+                    FRIEND_BONUS_CREDITS, friend,
                 )
             claimed = await conn.execute(
                 "UPDATE referrals SET rewarded=1 WHERE id=$1 AND rewarded=0", row["id"]
@@ -490,6 +513,23 @@ async def _reward_referrer_once(referred_email: str) -> bool:
             if claimed == "UPDATE 0":
                 return False
             return bool(ref_user)
+
+
+def add_credits(user_id: int, credits: int) -> bool:
+    """Top-up a balance without touching the plan tier (topup pack)."""
+    try:
+        return _await(_add_credits(user_id, credits))
+    except Exception:
+        return False
+
+
+async def _add_credits(user_id: int, credits: int) -> bool:
+    pool = await get_pool()
+    res = await pool.fetchval(
+        "UPDATE users SET credits = credits + $1 WHERE id=$2 RETURNING id",
+        credits, user_id,
+    )
+    return res is not None
 
 
 def reward_referrer_once(referred_email: str) -> bool:

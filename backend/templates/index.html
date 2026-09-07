@@ -8,9 +8,12 @@
 <meta property="og:title" content="FluxSwarm — AI development squad" />
 <meta property="og:description" content="Type a goal. A 6-agent squad builds it on a live board. 1 credit per launch. Bring your own provider key." />
 <meta property="og:type" content="website" />
-<meta property="og:image" content="/static/brand/og.jpg" />
+<meta property="og:image" content="{{ og_image }}" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
 <meta name="twitter:card" content="summary_large_image" />
 {% if canonical %}<link rel="canonical" href="{{ canonical }}" />{% endif %}
+{% if analytics_domain %}<script defer data-domain="{{ analytics_domain }}" src="https://plausible.io/js/script.js"></script>{% endif %}
 <title>FluxSwarm — AI development squad</title>
 <style>
   @font-face{font-family:'Inter';font-style:normal;font-weight:400;font-display:swap;src:url('/static/fonts/Inter-400.woff2') format('woff2')}
@@ -97,6 +100,12 @@
   .refbox{background:var(--panel2);border:1px dashed var(--accent);border-radius:10px;padding:12px;font-size:13px}
   .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--panel);border:1px solid var(--border);padding:10px 16px;border-radius:10px;font-size:13px;display:none;z-index:60;max-width:92vw}
   .toast.show{display:block}
+  .consent{position:fixed;bottom:0;left:0;right:0;z-index:80;background:var(--panel);border-top:1px solid var(--border);padding:14px 20px;display:none;align-items:center;gap:14px;flex-wrap:wrap;box-shadow:0 -8px 30px rgba(0,0,0,.35)}
+  .consent.show{display:flex}
+  .consent p{margin:0;font-size:13px;color:var(--muted);flex:1;min-width:240px}
+  .consent button{border-radius:var(--radius-sm);padding:9px 16px;font-size:13px;cursor:pointer;border:1px solid var(--border);background:transparent;color:var(--fg)}
+  .consent button:hover{border-color:var(--accent);color:var(--accent)}
+  .consent button.primary{border:0;background:linear-gradient(90deg,var(--accent),var(--accent2));color:#fff}
   .pill{display:inline-block;font-size:11px;padding:2px 8px;border-radius:999px;background:var(--panel2);border:1px solid var(--border);color:var(--muted)}
   :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
   .skip-link{position:absolute;left:-9999px;top:0;z-index:100;background:var(--accent);color:#04121a;padding:8px 14px;border-radius:0 0 8px 0;text-decoration:none;font-weight:700}
@@ -263,13 +272,13 @@ Bring your own provider key for the strongest output — or a free OpenRouter ke
   </div>
 
   <!-- PRICING -->
-  <div class="card hidden" id="pricing">
+  <div class="card" id="pricing">
     <h2 class="section-title" data-i18n="pricing_title">Plans &amp; pricing</h2>
     <div class="grid" id="plansGrid"></div>
     <div class="hint" data-i18n="pricing_hint">Prepaid credit packs — no monthly fee. All plans include the full squad (6 agents); higher tiers add credits and parallel execution. Prices in USD; GBP is applied by Paddle at checkout for UK customers.</div>
     <div style="margin-top:12px">
       <details class="faq" open><summary>How are credits used?</summary><p>One launch = one project board = one credit. You buy nothing monthly — packs never expire.</p></details>
-      <details class="faq"><summary>Can I try before paying?</summary><p>Yes — the Demo plan includes 3 free credits, no card required. You can also bring your own provider key (BYOK) at any tier.</p></details>
+      <details class="faq"><summary>Can I try before paying?</summary><p>Yes — the Demo plan includes 5 free credits, no card required. You can also bring your own provider key (BYOK) at any tier.</p></details>
       <details class="faq"><summary>Which AI providers are supported?</summary><p>Claude, GPT, Gemini and Kimi via BYOK, plus a free OpenRouter option (GLM-5.2). Output strength follows the provider you use.</p></details>
       <details class="faq"><summary>What does the 1-credit launch fee cover?</summary><p>The squad execution itself. With BYOK you pay your provider's token rate directly; FluxSwarm still only charges the single credit.</p></details>
       <details class="faq"><summary>Refunds?</summary><p>Paddle handles payments; launches that fail before any work starts are auto-refunded in credits, and our refund policy covers unused credit packs.</p></details>
@@ -354,6 +363,11 @@ Bring your own provider key for the strongest output — or a free OpenRouter ke
 </main>
 
 <!-- AUTH MODAL -->
+<div class="consent" id="consentBar" role="region" aria-label="Storage notice">
+  <p data-i18n-html="consent_text">We use strictly necessary local storage only — the session token that keeps you signed in and your saved preferences. No tracking cookies, no ads. <a href="/cookies" style="color:var(--accent)">Learn more</a></p>
+  <button class="primary" data-onclick="dismissConsent" data-i18n="consent_ok">Got it</button>
+</div>
+
 <div class="modal" id="authModal" role="dialog" aria-modal="true" aria-label="Sign in or create an account">
   <div class="box">
     <div class="tabs">
@@ -370,6 +384,10 @@ Bring your own provider key for the strongest output — or a free OpenRouter ke
       <label for="r_email" data-i18n="lbl_email">Email</label><input id="r_email" placeholder="you@example.com" autocomplete="email" />
       <label for="r_pw" data-i18n="lbl_pw">Password</label><input id="r_pw" type="password" placeholder="———" autocomplete="new-password" />
       <label for="r_ref" data-i18n="lbl_ref">Referral code (optional)</label><input id="r_ref" placeholder="FLX-XXXXXXXX" />
+      <label style="display:flex;gap:8px;align-items:flex-start;margin-top:10px;font-size:12px;line-height:1.45">
+        <input id="r_tos" type="checkbox" style="width:auto;margin-top:2px" />
+        <span data-i18n-html="lbl_tos">I am at least 13 (16 in the UK/EU) and I accept the <a href="/terms" style="color:var(--accent)">Terms</a> &amp; <a href="/privacy" style="color:var(--accent)">Privacy Policy</a>.</span>
+      </label>
       <button class="primary" id="regBtn" data-onclick="doRegister" data-i18n="btn_register">Create account</button>
     </div>
   </div>
@@ -404,6 +422,8 @@ function errt(m){return m||"";}
 function gotoSection(id){["pricing","referrals","byok","market","projects","settings","results"].forEach(s=>{const el=document.getElementById(s);if(el)el.classList.toggle("hidden",s!==id);});const el=document.getElementById(id);if(el)window.scrollTo({top:el.offsetTop-60,behavior:"smooth"});}
 function openAuth(){document.getElementById("authModal").classList.add("open");document.getElementById("l_email").focus();}
 function switchTab(t){document.getElementById("tabLogin").classList.toggle("active",t==="login");document.getElementById("tabReg").classList.toggle("active",t==="reg");document.getElementById("loginForm").classList.toggle("hidden",t!=="login");document.getElementById("regForm").classList.toggle("hidden",t!=="reg");}
+function dismissConsent(){localStorage.setItem("fs-consent","1");document.getElementById("consentBar").classList.remove("show");}
+(function initConsent(){if(!localStorage.getItem("fs-consent")){document.getElementById("consentBar").classList.add("show");}}());
 
 async function loadSquad(){const g=document.getElementById("squadGrid");g.innerHTML='<div class="empty">Loading squad…</div>';try{const r=await fetch(API+"/api/squad");const d=await r.json();g.innerHTML="";[...d.workers,d.verifier,d.synthesizer].forEach(a=>{const div=document.createElement("div");div.className="agent";div.innerHTML=`<div class="role">${esc(a.role)}</div><div class="name">${esc(a.display||a.profile)}</div><div class="skills">${t("skills_lbl")} ${esc(a.skills.join(", "))}</div>`;g.appendChild(div);});}catch(e){g.innerHTML='<div class="empty">Could not load squad</div>';}}
 async function loadPlans(){const g=document.getElementById("plansGrid");g.innerHTML='<div class="empty">Loading plans…</div>';try{const r=await fetch(API+"/api/plans");const d=await r.json();g.innerHTML="";d.forEach(p=>{const div=document.createElement("div");div.className="plan"+(p.id==="pro"?" best":"");div.innerHTML=`${p.id==="pro"?'<div class="hot">MOST POPULAR</div>':""}<div class="pname">${esc(p.name)}</div><div class="price">$${p.price}<small> / ${t("per_pack")}</small></div><div class="credit">${fmt("credits_line",p.credits,p.parallel)}</div><ul><li><span class="tick">✓</span>${t("desc_"+p.id)}</li><li><span class="tick">✓</span>${t("feat_full")}</li><li><span class="tick">✓</span>${t("feat_credit")}</li><li><span class="tick">✓</span>${t("feat_live")}</li><li><span class="tick">✓</span>${t("feat_tg")}</li></ul><button class="ghost pbtn" data-onclick="subscribe" data-arg="${p.id}">${p.price==0?t("use_free"):t("subscribe_btn")}</button>`;g.appendChild(div);});}catch(e){g.innerHTML='<div class="empty">Could not load plans</div>';}}
@@ -412,7 +432,7 @@ function setUser(u){currentUser=u;const pill=document.getElementById("userPill")
 function clearUser(){currentUser=null;token=null;document.getElementById("userPill").classList.add("hidden");document.getElementById("navLogin").textContent=t("nav_login");document.getElementById("heroHint").textContent=t("hero_hint");document.getElementById("projectsList").innerHTML='<div class="empty">'+t("projects_login_empty")+'</div>';document.getElementById("settInfo").classList.remove("hidden");document.getElementById("settInfo").textContent=t("settings_login_empty");document.getElementById("settBody").classList.add("hidden");loadTelegram();}
 
 async function doLogin(){const email=document.getElementById("l_email").value.trim();const pw=document.getElementById("l_pw").value;const btn=document.getElementById("loginBtn");btn.disabled=true;try{const r=await fetch(API+"/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email,password:pw})});if(!r.ok){let d=null;try{d=await r.json();}catch(e){}toast(d&&d.detail?errt(d.detail):t("login_fail"));return;}const d=await r.json();token=d.token;setUser(d.user);document.getElementById("authModal").classList.remove("open");toast(t("login_ok"));}catch(e){toast(t("login_fail"));}finally{btn.disabled=false;}}
-async function doRegister(){const name=document.getElementById("r_name").value.trim();const email=document.getElementById("r_email").value.trim();const pw=document.getElementById("r_pw").value;const ref=document.getElementById("r_ref").value.trim()||null;const btn=document.getElementById("regBtn");btn.disabled=true;try{const r=await fetch(API+"/api/auth/register",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email,name,password:pw,ref})});if(!r.ok){let d=null;try{d=await r.json();}catch(e){}toast(t("reg_fail_prefix")+errt((d&&d.detail)||""));return;}const d=await r.json();token=d.token;setUser(d.user);document.getElementById("authModal").classList.remove("open");toast(t("reg_ok"));}catch(e){toast(t("reg_fail_prefix")+e.message);}finally{btn.disabled=false;}}
+async function doRegister(){const name=document.getElementById("r_name").value.trim();const email=document.getElementById("r_email").value.trim();const pw=document.getElementById("r_pw").value;const ref=document.getElementById("r_ref").value.trim()||null;if(!document.getElementById("r_tos").checked){toast(t("tos_err"));return;}const btn=document.getElementById("regBtn");btn.disabled=true;try{const r=await fetch(API+"/api/auth/register",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email,name,password:pw,ref,tos_accept:true})});if(!r.ok){let d=null;try{d=await r.json();}catch(e){}toast(t("reg_fail_prefix")+errt((d&&d.detail)||""));return;}const d=await r.json();token=d.token;setUser(d.user);document.getElementById("authModal").classList.remove("open");toast(t("reg_ok"));}catch(e){toast(t("reg_fail_prefix")+e.message);}finally{btn.disabled=false;}}
 function navLoginClick(){if(currentUser){clearUser();toast(t("logout_ok"));}else{openAuth();}}
 
 async function subscribe(plan){if(!token){openAuth();return;}const r=await fetch(API+`/api/subscribe/${plan}`,{method:"POST",headers:{Authorization:"Bearer "+token}});if(!r.ok){let msg=t("sub_fail");try{msg=(await r.json()).detail||msg;}catch(e){}toast(errt(msg));return;}const u=await r.json();setUser(u);toast(t("sub_ok_prefix")+" "+plan);}
@@ -616,7 +636,7 @@ const I18N = {
     nav_pricing:"Pricing", nav_ref:"Referrals", nav_byok:"My keys", nav_login:"Log in / Sign up", nav_market:"Marketplace",
     hero_title:"Launch a project with a <span class=\"grad\">full agent squad</span>", lbl_pname:"Project name", lbl_pgoal:"Build goal (the squad will execute it)",
     btn_launch:"🚀 Launch squad", btn_demo:"▶ Free Demo",
-    hero_hint:"Each launch uses 1 credit. Sign in to launch — the Demo plan starts with 3 free credits (no card).",
+    hero_hint:"Each launch uses 1 credit. Sign in to launch — the Demo plan starts with 5 free credits (no card).",
     about_title:"What is <span class=\"grad\">FluxSwarm</span>?",
     about_body:
       "Type a goal and a squad of 6 specialized agents — Planner, Architect, DevOps, TDD, Reviewer, Builder — plans, builds, tests, reviews and assembles it on a live task board you can watch. Generated files land in your project workspace, ready to use. Bring your own provider key for the strongest output — each launch is still a single credit. 1 credit per launch, credits never expire, no monthly fee.",
@@ -637,7 +657,7 @@ const I18N = {
     pricing_title:"Plans & pricing",
     pricing_hint:"Prepaid credit packs — no monthly fee. All plans include the full squad (6 agents); higher tiers add credits and parallel execution. Prices in USD; GBP is applied by Paddle at checkout for UK customers.",
     ref_title:"Referral Program", ref_login_empty:"Sign in to see your referral link.",
-    ref_your_link:"Your referral link:", ref_reward:"You earn {c} credits for each friend who subscribes to a paid plan.",
+    ref_your_link:"Your referral link:", ref_reward:"You earn {c} credits for each friend who makes a first paid purchase (they also get 10 bonus credits). Referral earnings are capped at 500 credits per account.",
     byok_title:"🔑 Your keys (BYOK)",
     byok_hint:"Add a Claude/GPT/Gemini/Kimi key for stronger output, or a free OpenRouter key (GLM-5.2) to trial it at zero cost — it pays your provider's token rate; FluxSwarm still only charges the 1-credit launch fee. A provider is only used after you accept its terms below. Keys are encrypted at rest and never shown back.",
     byok_login_empty:"Sign in to manage your keys.", byok_empty_none:"No keys yet — add a supported provider key.", byok_agree:"I accept this provider's terms (required before launch).", byok_agg_hint:"Saved keys are locked to the current provider terms version; accepting a new version refreshes it.", byok_agreed_yes:"✓ agreed", byok_agreed_no:"not agreed",
@@ -647,7 +667,7 @@ const I18N = {
     market_hint:"Publish your agent lineup as a template others buy with credits, or buy a ready-made squad from the community.",
     tpl_name:"Template name", tpl_price:"Price (credits)", tpl_desc:"Description", tpl_agents:"Agents (display names, comma separated)", market_list:"Available templates",
     skills_lbl:"Skills:", per_pack:"one-time credit pack", credits_line:"{c} credits · parallel x{p}",
-    desc_demo:"Limited free trial", desc_starter:"For freelancers & small projects", desc_pro:"For small teams", desc_scale:"For companies & agencies",
+    desc_demo:"Free trial — no card required", desc_starter:"For freelancers & small projects", desc_pro:"For small teams", desc_scale:"For companies & agencies", desc_topup:"Quick refill — credits never expire",
     feat_full:"Full squad (6 agents)", feat_credit:"1 credit per launch", feat_live:"Live board stream", feat_tg:"Telegram bot",
     use_free:"Use free", subscribe_btn:"Pay with card", creds:"credits", logout:"Log out",
     loggedin_hint:"Signed in — credits left for launches. Launch your swarm.",
@@ -665,6 +685,8 @@ const I18N = {
     buy_fail_prefix:"Buy failed: ", buy_done_prefix:"Purchased ✅ and squad launched:", buy_launchfail_prefix:"Paid but launch failed: ",
     tab_login:"Log in", tab_reg:"Sign up", btn_login:"Log in", btn_register:"Create account",
     lbl_email:"Email", lbl_pw:"Password", lbl_name:"Name", lbl_ref:"Referral code (optional)",
+    lbl_tos:"I am at least 13 (16 in the UK/EU) and I accept the <a href=\"/terms\" style=\"color:var(--accent)\">Terms</a> &amp; <a href=\"/privacy\" style=\"color:var(--accent)\">Privacy Policy</a>.", tos_err:"Please accept the Terms &amp; Privacy Policy to continue.",
+    consent_text:"We use strictly necessary local storage only — the session token that keeps you signed in and your saved preferences. No tracking cookies, no ads. <a href=\"/cookies\" style=\"color:var(--accent)\">Learn more</a>", consent_ok:"Got it",
     tg_title:"🤖 Link Telegram Bot", tg_hint:"Send your goal to the FluxSwarm Telegram bot and get live swarm results. Link your account so launches run under your credits and plan.",
     tg_login_hint:"Sign in to link Telegram to your account.", tg_link:"Link Telegram", tg_unlink:"Unlink", tg_code_min:"min.",
     tg_linked:"Linked to Telegram (chat)", tg_code_hint:"Open the FluxSwarm bot on Telegram and send:",

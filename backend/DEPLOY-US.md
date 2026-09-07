@@ -64,7 +64,7 @@ Endpoints:
 
 **Activation steps (you)**:
 1. Create a **Paddle Sandbox** account → Catalog → price ids for
-   starter/pro/scale.
+   starter/pro/scale (optionally the $9/10-credit Top-up refill → `PADDLE_PRICE_TOPUP`).
 2. Set env: `FLUXSWARM_PAYMENT_PROVIDER=paddle`, `PADDLE_API_BASE=https://sandbox-api.paddle.com`,
    sandbox `PADDLE_API_KEY`, `PADDLE_WEBHOOK_SECRET` (from the webhook you
    register), `PADDLE_PRICE_*`.

@@ -21,7 +21,7 @@ client = TestClient(app)
 def _fresh_user() -> tuple[str, str]:
     email = f"admt-{uuid.uuid4().hex[:10]}@fluxswarm.test"
     r = client.post("/api/auth/register", json={
-        "email": email, "name": "Original Name", "password": "pw-12345678",
+        "email": email, "name": "Original Name", "password": "pw-12345678", "tos_accept": True,
     })
     assert r.status_code == 200, r.text
     tok = client.post("/api/auth/login", json={

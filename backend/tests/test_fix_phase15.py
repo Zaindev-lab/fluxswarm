@@ -20,7 +20,7 @@ client = TestClient(main_mod.app)
 
 def _reg(email: str, pw: str = "passw0rd", name: str = "T"):
     return client.post("/api/auth/register",
-                       json={"email": email, "name": name, "password": pw})
+                       json={"email": email, "name": name, "password": pw, "tos_accept": True})
 
 
 def _demo_dispatch(tok: str, slug: str = "flux-demo-1"):

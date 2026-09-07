@@ -84,7 +84,7 @@ def _no_hermes(monkeypatch):
 
 def _register(email: str, name: str = "UX Tester"):
     r = client.post("/api/auth/register",
-                    json={"email": email, "name": name, "password": "s3cure-Pass-123"})
+                    json={"email": email, "name": name, "password": "s3cure-Pass-123", "tos_accept": True})
     assert r.status_code == 200, r.text
     return r.json()
 
@@ -147,7 +147,9 @@ def test_api_plans_match_db():
     for p in plans:
         assert p["credits"] == db_mod.PLANS[p["id"]]["credits"]
         assert p["price"] == db_mod.PLANS[p["id"]]["price"]
-    assert db_mod.REFERRAL_REWARD_CREDITS == 25
+    assert db_mod.REFERRAL_REWARD_CREDITS == 15
+    assert db_mod.REFERRAL_REWARD_CAP == 500
+    assert db_mod.FRIEND_BONUS_CREDITS == 10
 
 
 def test_faq_believes_product_claims():
@@ -156,9 +158,10 @@ def test_faq_believes_product_claims():
     # default is the operator-configured runtime — a key is optional, never free-silent
     assert "Does the squad need my AI key?" in r.text
     assert "operator-configured model" in r.text
-    # honest about the credit/plan model
-    assert "Credit packs, not subscriptions" in r.text
-    assert "$29/25 credits, Pro $99/120 credits, Scale $299/500 credits" in r.text
+    # honest about the credit/plan model (collapse HTML line-wraps before matching)
+    page = " ".join(r.text.split())
+    assert "One-time credit packs, not subscriptions" in page
+    assert "$19/20 credits, Pro $49/60 credits, Scale $149/200 credits, plus a $9/10 credit Top-up refill" in page
     # attribution + provider list + security facts
     assert "Hermes" in r.text and "ECC" in r.text
     assert "does not own ECC" in r.text
@@ -166,7 +169,7 @@ def test_faq_believes_product_claims():
     assert "Gemini" in r.text and "Kimi" in r.text
     assert "Fernet-encrypted" in r.text
     # referrals + template economics
-    assert "25 credits" in r.text
+    assert "15 credits" in r.text and "10 bonus credits" in r.text and "500" in r.text
     assert "50% author" in r.text
     # no stale BYOK-first framing
     assert "need a key" not in r.text.lower()
@@ -264,7 +267,7 @@ def test_full_journey_register_to_delete(_no_hermes):
     email = "g3journey@fluxswarm.test"
     u = _register(email, "UX Tester")
     uid = u["user"]["id"]
-    assert u["user"]["credits"] == db_mod.PLANS["demo"]["credits"]  # 3 free
+    assert u["user"]["credits"] == db_mod.PLANS["demo"]["credits"]  # 5 free
     tok = u["token"]
 
     # sign in again (customer-style)

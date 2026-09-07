@@ -90,7 +90,7 @@ def test_upgrade_plan_no_credit_clawback(tmp_db):
     c.execute("UPDATE users SET credits=? WHERE id=?", (100, u["id"]))
     c.commit()
     c.close()
-    tmp_db.upgrade_plan(u["id"], "starter")  # starter allowance is 25
+    tmp_db.upgrade_plan(u["id"], "starter")  # starter allowance is 20
     after = tmp_db.get_user_by_id(u["id"])
     assert after["plan"] == "starter"
     # credits preserved, never reset to the lower plan allowance
@@ -127,8 +127,8 @@ def test_buy_template_atomic_transfer(tmp_db):
     tid = tmp_db.publish_template(author["id"], "T2", "desc", ["Planner"], price_credits=10)
     assert tmp_db.buy_template(tid, buyer["id"]) is True
     assert tmp_db.get_user_by_id(buyer["id"])["credits"] == 40  # 50 - 10
-    # author starts with the demo plan's 3 credits, then earns 50% of price (5)
-    assert tmp_db.get_user_by_id(author["id"])["credits"] == 8  # 3 + 5
+    # author starts with the demo plan's 5 credits, then earns 50% of price (5)
+    assert tmp_db.get_user_by_id(author["id"])["credits"] == 10  # 5 + 5
     c = tmp_db._conn()
     rows = c.execute("SELECT * FROM template_purchases").fetchall()
     c.close()

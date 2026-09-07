@@ -400,7 +400,7 @@ def _first_price_id(obj: dict) -> str:
 def _env_price_map() -> dict[str, str]:
     """Map configured Paddle price ids -> plan name from PADDLE_PRICE_<PLAN>."""
     out = {}
-    for plan in ("starter", "pro", "scale"):
+    for plan in ("starter", "pro", "scale", "topup"):
         pid = _env(f"PADDLE_PRICE_{plan.upper()}").strip()
         if pid:
             out[pid] = plan

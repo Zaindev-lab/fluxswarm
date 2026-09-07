@@ -75,7 +75,7 @@ def test_credit_api_path_rejects_at_zero(monkeypatch):
     client = TestClient(main_mod.app)
     r = client.post("/api/auth/register",
                     json={"email": "nocred@fluxswarm.test", "name": "T",
-                          "password": "s3cure-Pass-123"})
+                          "password": "s3cure-Pass-123", "tos_accept": True})
     assert r.status_code == 200, r.text
     uid = r.json()["user"]["id"]
     token = r.json()["token"]

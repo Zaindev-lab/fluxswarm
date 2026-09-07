@@ -62,7 +62,7 @@
     </div>
     <div id="err" hidden></div>
   </div>
-  <a class="link" href="/">→ Full account: unlimited launches & paid plans</a>
+  <a class="link" href="/">→ Full account: 5 free credits & paid credit packs</a>
 </main>
 <script nonce="{{ csp_nonce }}">
 const $=id=>document.getElementById(id);
@@ -123,7 +123,7 @@ async function poll(){
       $("eta").textContent="Estimated time remaining: ~"+Math.max(0,d.estimated_remaining_seconds||0)+" seconds";
       setTimeout(poll,4000);
     }else{
-      $("eta").textContent="✅ Trial session complete. Sign up free to download the code and launch unlimited projects.";
+      $("eta").textContent="✅ Trial session complete. Sign up free to get 5 credits and launch more projects.";
       setTimeout(poll,10000);
     }
   }catch(e){setTimeout(poll,4000);}
