@@ -9,6 +9,9 @@
 .gitignore
 fluxswarm-docs.zip
 
+# Never include the (removed) vendored Hermes source in the build context.
+deploy/docker/hermes-src
+
 # FluxSwarm runtime app data is provided by a volume, never baked into images.
 backend/data
 

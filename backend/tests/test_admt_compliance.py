@@ -276,8 +276,9 @@ def test_pre_use_notice_i18n():
     ar = client.get("/api/account/admt-notice?lang=ar", headers=_auth(tok)).json()
     assert set(en.keys()) == set(ar.keys())
     assert "argo" not in en["description"] and en["description"].startswith("AI agents")
-    assert ar["description"] != en["description"] and ar["description"].strip()
-    assert ar["logic_summary"] and ar["logic_summary"] != en["logic_summary"]
+    # Platform is English-only: both lang params return the same English content.
+    assert ar["description"] == en["description"] and ar["description"].strip()
+    assert ar["logic_summary"] == en["logic_summary"]
     assert ar["last_updated"] == en["last_updated"] == _ADMT_VERSION
 
 
@@ -427,7 +428,7 @@ def test_demo_rate_limit_ip(monkeypatch):
     assert second.status_code == 429, second.text
     body = second.json()
     assert body["error"] == "demo_ip_limit"
-    assert "en" in body["message"] and "ar" in body["message"]
+    assert "en" in body["message"] and "ar" not in body["message"]
     assert body["retry_after_seconds"] == 3600
     assert body["upgrade_url"] == "/pricing"
 
@@ -449,7 +450,7 @@ def test_demo_rate_limit_global(monkeypatch):
     assert blocked.status_code == 429, blocked.text
     body = blocked.json()
     assert body["error"] == "demo_global_limit"
-    assert body["message"]["en"] and body["message"]["ar"]
+    assert body["message"]["en"] and "ar" not in body["message"]
 
 
 # 21 --------------------------------------------------------------------------

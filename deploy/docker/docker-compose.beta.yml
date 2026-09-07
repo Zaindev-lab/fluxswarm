@@ -66,7 +66,7 @@ services:
       # surface picks a healthy provider from provider_pool; production requires
       # a paid key (envguard). The key below feeds the pool's openrouter entries
       # (and user BYOK) — none of these defaults leak into production launches.
-      OPENROUTER_API_KEY: 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
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
       FLUXSWARM_PAYMENTS: "0"
       # No REDIS_URL => in-process rate limiting (single worker). Self-contained.
     volumes:

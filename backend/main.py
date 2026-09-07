@@ -216,7 +216,6 @@ _DEMO_LIMIT_DETAILS = {
         "error": "demo_ip_limit",
         "message": {
             "en": "Demo limit: 1 launch per hour. Sign up for unlimited access.",
-            "ar": "الحد: تجربة واحدة في الساعة. سجّل للوصول غير المحدود.",
         },
         "retry_after_seconds": _DEMO_IP_WINDOW,
         "upgrade_url": "/pricing",
@@ -225,7 +224,6 @@ _DEMO_LIMIT_DETAILS = {
         "error": "demo_global_limit",
         "message": {
             "en": "Daily demo quota exhausted. Try tomorrow or sign up.",
-            "ar": "الحصة اليومية انتهت. جرّب غداً أو سجّل.",
         },
         "retry_after_seconds": _DEMO_GLOBAL_WINDOW,
         "upgrade_url": "/pricing",
@@ -856,15 +854,15 @@ def get_current_user(request: Request) -> dict:
     ah = request.headers.get("Authorization", "")
     token = ah.replace("Bearer ", "") if ah.startswith("Bearer ") else request.cookies.get("fs_token")
     if not token:
-        raise HTTPException(status_code=401, detail="غير مصرّح")
+        raise HTTPException(status_code=401, detail="Unauthorized")
     payload = auth_mod.decode_token(token)
     if not payload:
-        raise HTTPException(status_code=401, detail="جلسة غير صالحة")
+        raise HTTPException(status_code=401, detail="Invalid session")
     user = db.get_user_by_id(payload["uid"])
     if not user:
-        raise HTTPException(status_code=401, detail="مستخدم غير موجود")
+        raise HTTPException(status_code=401, detail="User not found")
     if not _token_session_ok(user, payload):
-        raise HTTPException(status_code=401, detail="انتهت الجلسة — سجّل الدخول مجدداً")
+        raise HTTPException(status_code=401, detail="Session expired — please log in again")
     return user
 
 
@@ -960,14 +958,14 @@ def api_demo_launch(request: Request, goal: str = "Build a sample FastAPI notes 
     no longer a production default. An opted-out (ADMT) user is refused.
     """
     if _operator_maintenance():
-        raise HTTPException(status_code=503, detail="الخدمة في صيانة مؤقتة — حاول لاحقاً")
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable — please try again later")
     demo_user = _demo_user(request)
     if demo_user and db.get_admt_opt_out(demo_user["id"]):
         raise HTTPException(status_code=403,
                             detail="ADMT opt-out active. Human review required.")
     ip = _client_ip(request)
     if not limiter.ip_allowed(ip):
-        raise HTTPException(status_code=429, detail="محاولات كثيرة جداً — انتظر قليلاً")
+        raise HTTPException(status_code=429, detail="Too many attempts — please wait a moment")
     if not limiter.check(f"demo:ip:{ip}", _DEMO_IP_MAX, _DEMO_IP_WINDOW):
         raise HTTPException(status_code=429, detail=_DEMO_LIMIT_DETAILS["ip"])
     if not limiter.check("demo:global", _DEMO_GLOBAL_MAX, _DEMO_GLOBAL_WINDOW):
@@ -977,7 +975,6 @@ def api_demo_launch(request: Request, goal: str = "Build a sample FastAPI notes 
             "error": "demo_daily_limit",
             "message": {
                 "en": "Daily demo allowance used up. Sign up for unlimited access.",
-                "ar": "استهلكت حصتك اليومية من التجارب. سجّل للوصول غير المحدود.",
             },
             "retry_after_seconds": 86400,
             "upgrade_url": "/pricing",
@@ -1060,11 +1057,11 @@ def _micro_plan(goal: str) -> dict:
     """Deterministic planner-only output (no provider call; stays < 1 API cost)."""
     g = (goal or "").lower()
     if any(k in g for k in ("api", "web", "site", "saas", "dashboard", "billing",
-                            "panel", "analytics", "تطبيق", "خدمة")):
+                            "panel", "analytics")):
         stack = "FastAPI + PostgreSQL"
-    elif any(k in g for k in ("data", "sql", "database", "postgres", "بيانات", "قاعدة")):
+    elif any(k in g for k in ("data", "sql", "database", "postgres")):
         stack = "FastAPI + SQLite + Task queue"
-    elif any(k in g for k in ("todo", "script", "cli", "سكربت")):
+    elif any(k in g for k in ("todo", "script", "cli")):
         stack = "Flask + SQLite"
     else:
         stack = "Flask + SQLite"
@@ -1094,11 +1091,11 @@ def api_demo_progress(request: Request, board_slug: str):
     user = get_current_user_optional(request)
     if not board_slug.startswith("flux-demo-") and not (
             user and board_slug.startswith(f"u{user['id']}-")):
-        raise HTTPException(status_code=403, detail="غير مصرّح بالوصول لهذه اللوحة")
+        raise HTTPException(status_code=403, detail="Access denied to this board")
     try:
         tasks = hc.list_tasks(board_slug)
     except Exception:
-        raise HTTPException(status_code=404, detail="اللوحة غير موجودة")
+        raise HTTPException(status_code=404, detail="Board not found")
     agents = []
     for t in tasks or []:
         assignee = (t.get("assignee") or "").strip().lower()
@@ -1144,7 +1141,7 @@ def api_demo_logs(request: Request, board_slug: str, task_id: str):
     user = get_current_user_optional(request)
     if not board_slug.startswith("flux-demo-") and not (
             user and board_slug.startswith(f"u{user['id']}-")):
-        raise HTTPException(status_code=403, detail="غير مصرّح بالوصول لهذه اللوحة")
+        raise HTTPException(status_code=403, detail="Access denied to this board")
     try:
         logs = hc._task_activity_events(board_slug, task_id)
     except Exception:
@@ -1160,7 +1157,7 @@ def demo_landing(request: Request):
     base = os.environ.get("FLUXSWARM_PUBLIC_BASE_URL", "").strip().rstrip("/")
     return templates.TemplateResponse(
         request=request, name="demo.html",
-        context={"title": "جرب FluxSwarm مجاناً", "canonical": base + "/demo" if base else "",
+        context={"title": "Try FluxSwarm Free", "canonical": base + "/demo" if base else "",
                  "csp_nonce": request.state.csp_nonce})
 
 
@@ -1202,22 +1199,22 @@ def api_register(p: RegisterIn, request: Request):
     ip = _client_ip(request)
     limiter.hit_ip(ip)
     if not limiter.ip_allowed(ip):
-        raise HTTPException(status_code=429, detail="محاولات كثيرة جداً — انتظر قليلاً")
+        raise HTTPException(status_code=429, detail="Too many attempts — please wait a moment")
     if not limiter.register_allowed(ip):
-        raise HTTPException(status_code=429, detail="تجاوزت حد التسجيل — جرب لاحقاً")
+        raise HTTPException(status_code=429, detail="Registration limit reached — try again later")
     email = p.email.lower().strip()
     if "@" not in email or "." not in email.split("@")[-1]:
-        raise HTTPException(status_code=400, detail="بريد إلكتروني غير صالح")
+        raise HTTPException(status_code=400, detail="Invalid email address")
     if len(p.password) < 8:
-        raise HTTPException(status_code=400, detail="كلمة المرور قصيرة جداً (8 أحرف على الأقل)")
+        raise HTTPException(status_code=400, detail="Password too short (minimum 8 characters)")
     if not p.name or not p.name.strip():
-        raise HTTPException(status_code=400, detail="الاسم مطلوب")
+        raise HTTPException(status_code=400, detail="Name is required")
     try:
         user = db.create_user(p.email, p.name, p.password, p.ref)
-    except ValueError as e:
+    except ValueError:
         audit.audit("auth.register", email=p.email, ip=ip, outcome="fail",
                     reason="email_taken")
-        raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=409, detail="Email already registered")
     limiter.record_registration(ip)
     token = auth_mod.make_token(user)
     audit.audit("auth.register", uid=user["id"], email=user["email"], ip=ip, outcome="ok")
@@ -1230,15 +1227,15 @@ def api_login(p: LoginIn, request: Request):
     email = p.email.lower().strip()
     limiter.hit_ip(ip)
     if not limiter.ip_allowed(ip):
-        raise HTTPException(status_code=429, detail="محاولات كثيرة جداً — انتظر قليلاً")
+        raise HTTPException(status_code=429, detail="Too many attempts — please wait a moment")
     if not limiter.login_allowed(ip, email):
         audit.audit("auth.login", email=email, ip=ip, outcome="fail", reason="locked")
-        raise HTTPException(status_code=429, detail="محاولات دخول فاشلة متكررة — انتظر قبل المحاولة مرة أخرى")
+        raise HTTPException(status_code=429, detail="Too many failed logins — please wait before trying again")
     user = db.authenticate(p.email, p.password)
     if not user:
         limiter.record_login_failure(ip, email)
         audit.audit("auth.login", email=email, ip=ip, outcome="fail", reason="bad_credentials")
-        raise HTTPException(status_code=401, detail="بيانات غير صحيحة")
+        raise HTTPException(status_code=401, detail="Invalid credentials")
     limiter.clear_login_failures(ip, user["email"])
     token = auth_mod.make_token(user)
     audit.audit("auth.login", uid=user["id"], email=user["email"], ip=ip, outcome="ok")
@@ -1261,7 +1258,7 @@ def api_logout(request: Request, user: dict = Depends(get_current_user)):
     db.mark_logged_out(user["id"])
     audit.audit("auth.logout", uid=user["id"], email=user["email"],
                 ip=_client_ip(request), outcome="ok")
-    return {"ok": True, "note": "سُجّل خروجك — أزل الرمز من المتصفح"}
+    return {"ok": True, "note": "Logged out — remove the token from your browser"}
 
 
 @app.post("/api/auth/password")
@@ -1270,15 +1267,15 @@ def api_change_password(p: PasswordChangeIn, request: Request,
     """Authenticated password change: verify the current password, then set the
     new hash and invalidate all existing sessions (log out everywhere)."""
     if len(p.new) < 8:
-        raise HTTPException(status_code=400, detail="كلمة المرور الجديدة قصيرة جداً (8 أحرف على الأقل)")
+        raise HTTPException(status_code=400, detail="New password too short (minimum 8 characters)")
     if not db.authenticate(user["email"], p.current):
         audit.audit("auth.password", uid=user["id"], email=user["email"],
                     ip=_client_ip(request), outcome="fail", reason="bad_current")
-        raise HTTPException(status_code=401, detail="كلمة المرور الحالية غير صحيحة")
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
     db.set_password(user["id"], p.new)
     audit.audit("auth.password", uid=user["id"], email=user["email"],
                 ip=_client_ip(request), outcome="ok")
-    return {"ok": True, "note": "تغيّرت كلمة المرور وخرجت من كل الجلسات"}
+    return {"ok": True, "note": "Password changed — logged out of all sessions"}
 
 
 def _reset_self_service() -> bool:
@@ -1301,10 +1298,10 @@ def api_reset_request(p: ResetRequestIn, request: Request):
     ip = _client_ip(request)
     limiter.hit_ip(ip)
     if not limiter.ip_allowed(ip):
-        raise HTTPException(status_code=429, detail="محاولات كثيرة جداً — انتظر قليلاً")
+        raise HTTPException(status_code=429, detail="Too many attempts — please wait a moment")
     email = p.email.lower().strip()
     user = db.get_user_by_email(email)
-    data = {"ok": True, "detail": "إذا كان البريد مسجّلاً فيتلقّى رابط إعادة التعيين"}
+    data = {"ok": True, "detail": "If the email is registered, a reset link has been sent"}
     if user:
         raw = db.create_password_reset(user["id"])
         if _reset_self_service():
@@ -1321,15 +1318,15 @@ def api_reset(p: ResetIn, request: Request):
     """Complete a reset: consume the single-use token, set a new password and
     invalidate all existing sessions (also usable by an operator from support)."""
     if len(p.new_password) < 8:
-        raise HTTPException(status_code=400, detail="كلمة المرور قصيرة جداً (8 أحرف على الأقل)")
+        raise HTTPException(status_code=400, detail="Password too short (minimum 8 characters)")
     uid = db.consume_password_reset(p.token)
     if not uid:
-        raise HTTPException(status_code=400, detail="رمز إعادة التعيين غير صالح أو منتهٍ أو مستخدم من قبل")
+        raise HTTPException(status_code=400, detail="Reset token is invalid, expired, or already used")
     db.set_password(uid, p.new_password)
     u = db.get_user_by_id(uid)
     audit.audit("auth.reset", uid=uid, email=(u or {}).get("email", ""),
                 ip=_client_ip(request), outcome="ok")
-    return {"ok": True, "note": "أُعيد تعيين كلمة المرور — سجّل الدخول من جديد"}
+    return {"ok": True, "note": "Password reset — please log in again"}
 
 
 def public_user(u: dict) -> dict:
@@ -1351,14 +1348,14 @@ def api_create_project(payload: ProjectCreate, request: Request,
     # Basic input validation (goal drives a subprocess launch).
     goal = sanitize_goal(payload.goal)
     if not goal:
-        raise HTTPException(status_code=400, detail="اكتب هدف البناء")
+        raise HTTPException(status_code=400, detail="Please enter a build goal")
     if len(payload.goal or "") > 4000:
-        raise HTTPException(status_code=400, detail="الهدف أطول من الحد المسموح")
+        raise HTTPException(status_code=400, detail="Goal exceeds the maximum length")
     # CCPA/CPRA ADMT opt-out: manual project creation ONLY — no AI agents are
     # spawned, no credit is debited, and dispatch stays blocked for the user.
     if db.get_admt_opt_out(user["id"]):
         slug = make_project_slug(user["id"])
-        pid = db.add_project(user["id"], slug, payload.name or "مشروع", goal)
+        pid = db.add_project(user["id"], slug, payload.name or "Project", goal)
         audit.audit("project.create", uid=user["id"], email=user["email"],
                     ip=_client_ip(request), outcome="ok", slug=slug,
                     plan=user["plan"], mode="manual_no_ai")
@@ -1366,7 +1363,7 @@ def api_create_project(payload: ProjectCreate, request: Request,
                 "note": "ADMT opt-out active: project created manually (no AI agents)."}
     # Credit gating: each launch costs 1 credit.
     if not db.deduct_credit(user["id"]):
-        raise HTTPException(status_code=402, detail="نفدت الرصيد — حدّث باقتك أو استخدم رمز إحالة")
+        raise HTTPException(status_code=402, detail="Out of credits — upgrade your plan or use a referral code")
     slug = make_project_slug(user["id"])
     hc.ensure_board(slug)
     try:
@@ -1378,8 +1375,8 @@ def api_create_project(payload: ProjectCreate, request: Request,
         c.execute("UPDATE users SET credits = credits + 1 WHERE id=?", (user["id"],))
         c.commit()
         c.close()
-        raise HTTPException(status_code=500, detail=str(e))
-    pid = db.add_project(user["id"], slug, payload.name or "مشروع", goal)
+        raise HTTPException(status_code=500, detail="Failed to launch swarm")
+    pid = db.add_project(user["id"], slug, payload.name or "Project", goal)
     _fire_dispatch(slug, user["plan"], _user_provider_keys(user), pid=pid)
     audit.audit("project.create", uid=user["id"], email=user["email"], ip=_client_ip(request),
                 outcome="ok", slug=slug, plan=user["plan"])
@@ -1395,30 +1392,30 @@ def api_workspace(slug: str, user: dict = Depends(get_current_user)):
     # Same ownership rules as the task board: private boards require the owner,
     # demo boards are public showcase. Generated files are the user's "result".
     if not slug.startswith(f"u{user['id']}-") and not slug.startswith("flux-demo-"):
-        raise HTTPException(status_code=403, detail="غير مصرّح")
+        raise HTTPException(status_code=403, detail="Unauthorized")
     try:
         return {"slug": slug, "content": hc.read_workspace(slug)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to read workspace")
 
 
 @app.get("/api/projects/{slug}/tasks")
 def api_tasks(slug: str, user: dict = Depends(get_current_user)):
     # Only allow if the board belongs to this user (prefix guard).
     if not slug.startswith(f"u{user['id']}-") and not slug.startswith("flux-demo-"):
-        raise HTTPException(status_code=403, detail="غير مصرّح")
+        raise HTTPException(status_code=403, detail="Unauthorized")
     try:
         return hc.list_tasks(slug)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to list tasks")
 
 
 @app.post("/api/projects/{slug}/dispatch")
 def api_dispatch(slug: str, dry_run: bool = False, user: dict = Depends(get_current_user)):
     if not slug.startswith(f"u{user['id']}-") and not slug.startswith("flux-demo-"):
-        raise HTTPException(status_code=403, detail="غير مصرّح")
+        raise HTTPException(status_code=403, detail="Unauthorized")
     if _operator_maintenance():
-        raise HTTPException(status_code=503, detail="الخدمة في صيانة مؤقتة — حاول لاحقاً")
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable — please try again later")
     # CCPA/CPRA ADMT opt-out: the user forfeits AI-assisted dispatch.
     if db.get_admt_opt_out(user["id"]):
         raise HTTPException(status_code=403,
@@ -1428,7 +1425,6 @@ def api_dispatch(slug: str, dry_run: bool = False, user: dict = Depends(get_curr
             "error": "demo_daily_limit",
             "message": {
                 "en": "Daily demo allowance used up. Sign up for unlimited access.",
-                "ar": "استهلكت حصتك اليومية من التجارب. سجّل للوصول غير المحدود.",
             },
             "retry_after_seconds": 86400,
             "upgrade_url": "/pricing",
@@ -1436,11 +1432,11 @@ def api_dispatch(slug: str, dry_run: bool = False, user: dict = Depends(get_curr
     # Never re-arm an operator-final board: a sealed / finalized launch must not
     # be re-dispatched (its workers are dead and it would hold the host-cap).
     if _board_finalized(slug) or hc.board_is_sealed(slug):
-        raise HTTPException(status_code=409, detail="اللوحة منتهية/مختومة — لا يمكن إعادة الإطلاق")
+        raise HTTPException(status_code=409, detail="Board is finalized/sealed — cannot relaunch")
     try:
         return hc.dispatch(slug, max_spawn=db.PLANS[user["plan"]]["parallel"], dry_run=dry_run, timeout_s=hc.DISPATCH_TIMEOUT_S)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Dispatch failed")
 
 
 # ---------- BYOK keys ----------
@@ -1462,9 +1458,9 @@ def api_set_key(payload: dict, request: Request, user: dict = Depends(get_curren
     # Phase 3: real BYOK providers only — including the OpenRouter free tier,
     # which still requires a user key + agreement (no anonymous free provider).
     if prov not in hc.SUPPORTED_PROVIDERS:
-        raise HTTPException(status_code=400, detail="مزوّد غير مدعوم")
+        raise HTTPException(status_code=400, detail="Unsupported provider")
     if not tok:
-        raise HTTPException(status_code=400, detail="المفتاح فارغ")
+        raise HTTPException(status_code=400, detail="Key cannot be empty")
     vault.set_user_key(user["id"], prov, tok)
     audit.audit("keys.set", uid=user["id"], email=user["email"], ip=_client_ip(request),
                 outcome="ok", provider=prov)
@@ -1486,7 +1482,7 @@ def api_accept_agreement(provider: str, request: Request, user: dict = Depends(g
     """Record the user's acceptance of a provider's terms before launch."""
     prov = provider.strip().lower()
     if prov not in hc.SUPPORTED_PROVIDERS:
-        raise HTTPException(status_code=400, detail="مزوّد غير مدعوم")
+        raise HTTPException(status_code=400, detail="Unsupported provider")
     first = db.agree_provider(user["id"], prov, hc.PROVIDER_AGREEMENT_VERSION)
     audit.audit("agreements.accept", uid=user["id"], email=user["email"], ip=_client_ip(request),
                 outcome="ok", provider=prov, version=hc.PROVIDER_AGREEMENT_VERSION)
@@ -1524,7 +1520,7 @@ def api_referrals(user: dict = Depends(get_current_user)):
 @app.post("/api/subscribe/{plan}")
 def api_subscribe(plan: str, request: Request, user: dict = Depends(get_current_user)):
     if plan not in db.PLANS:
-        raise HTTPException(status_code=400, detail="باقة غير صالحة")
+        raise HTTPException(status_code=400, detail="Invalid plan")
     is_paid = db.PLANS[plan]["price"] > 0
     if not is_paid:
         db.upgrade_plan(user["id"], plan)
@@ -1540,7 +1536,7 @@ def api_subscribe(plan: str, request: Request, user: dict = Depends(get_current_
                     outcome="fail", reason="billing_gate_closed", plan=plan,
                     gateway=getattr(gw, "name", "none"))
         raise HTTPException(status_code=402,
-                            detail="الاشتراك المدفوع مقفل في وضع التطوير — يتم تفعيل بوابة الدفع قريباً")
+                            detail="Paid plans are locked in development mode — billing will be enabled soon")
     gw = payments_mod.get_gateway()
     if not getattr(gw, "operative", False):
         # Provider requested but neither credentials nor the explicit local
@@ -1549,7 +1545,7 @@ def api_subscribe(plan: str, request: Request, user: dict = Depends(get_current_
                     outcome="fail", reason="gateway_not_configured", plan=plan,
                     gateway=getattr(gw, "name", "none"))
         raise HTTPException(status_code=402,
-                            detail="بوابة الدفع لم تُضبط بعد — المرجو المحاولة لاحقاً")
+                            detail="Billing is not configured yet — please try again later")
     try:
         session = gw.create_checkout(
             plan=plan,
@@ -1559,11 +1555,11 @@ def api_subscribe(plan: str, request: Request, user: dict = Depends(get_current_
     except Exception as exc:  # provider down / misconfigured
         audit.audit("plan.subscribe", uid=user["id"], email=user["email"], ip=_client_ip(request),
                     outcome="fail", reason="checkout_error", plan=plan, error=str(exc)[:200])
-        raise HTTPException(status_code=502, detail="تعذر فتح جلسة الدفع — حاول مرة أخرى")
+        raise HTTPException(status_code=502, detail="Failed to create checkout session — please try again")
     audit.audit("plan.subscribe", uid=user["id"], email=user["email"], ip=_client_ip(request),
                 outcome="ok", plan=plan, mode="checkout", session_id=session.id, gateway=gw.name)
     return {"checkout_url": session.url, "session_id": session.id,
-            "plan": plan, "note": "الترقية تُفعَّل تلقائياً عند تأكيد الدفع"}
+            "plan": plan, "note": "Plan upgrade activates automatically after payment confirmation"}
 
 
 @app.post("/api/payments/webhook")
@@ -1587,7 +1583,7 @@ async def api_payments_webhook(request: Request):
     if not getattr(gw, "operative", False):
         audit.audit("payments.webhook", outcome="fail", reason="gateway_not_configured",
                     ip=_client_ip(request))
-        raise HTTPException(status_code=503, detail="webhook غير مهيأ")
+        raise HTTPException(status_code=503, detail="Webhook not configured")
     body = await request.body()
     signature = request.headers.get("Paddle-Signature")
     processed = _process_paddle_payload(body, signature, request)
@@ -1610,7 +1606,7 @@ def _process_paddle_payload(body: bytes, signature: str | None, request: Request
     if not receipt.get("ok"):
         audit.audit("payments.webhook", outcome="fail", reason=receipt.get("reason", "rejected"),
                     ip=_client_ip(request))
-        raise HTTPException(status_code=400, detail="webhook مرفوض")
+        raise HTTPException(status_code=400, detail="Webhook rejected")
     event_id = receipt["event_id"] or receipt["idempotency_key"]
     if not db.record_payment_event(
         event_id, gateway=receipt["gateway"], kind=receipt["event"],
@@ -1628,7 +1624,7 @@ def _process_paddle_payload(body: bytes, signature: str | None, request: Request
         if not uid or not receipt.get("plan"):
             audit.audit("payments.webhook", outcome="fail", reason="incomplete_receipt",
                         ip=_client_ip(request), **detail_inner)
-            raise HTTPException(status_code=422, detail="بيانات الدفع ناقصة")
+            raise HTTPException(status_code=422, detail="Incomplete payment data")
         db.upgrade_plan(uid, receipt["plan"])
         u2 = db.get_user_by_id(uid)
         if u2 and u2.get("referred_by") and receipt.get("plan"):
@@ -1775,7 +1771,7 @@ def mock_checkout_page(user_id: int, plan: str):
     if not _mock_active():
         raise HTTPException(status_code=404, detail="not found")
     if plan not in db.PLANS:
-        raise HTTPException(status_code=404, detail="باقة غير صالحة")
+        raise HTTPException(status_code=404, detail="Invalid plan")
     price = db.PLANS[plan]["price"]
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><title>FluxSwarm · Simulated payment</title></head>
 <body style="font-family:system-ui;max-width:560px;margin:60px auto;text-align:center;line-height:1.8">
@@ -1797,7 +1793,7 @@ def dev_complete_mock_payment(request: Request, user_id: int, plan: str, aud: st
     if not _mock_active():
         raise HTTPException(status_code=404, detail="not found")
     if plan not in db.PLANS:
-        raise HTTPException(status_code=404, detail="باقة غير صالحة")
+        raise HTTPException(status_code=404, detail="Invalid plan")
     import hashlib
     import hmac
     import base64
@@ -1824,17 +1820,13 @@ def dev_complete_mock_payment(request: Request, user_id: int, plan: str, aud: st
 
 
 # ---------- compliance: public legal pages ----------
-_LEGAL_BASE = """<!doctype html><html lang="ar"><head><meta charset="utf-8">
+_LEGAL_BASE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
  <meta name="viewport" content="width=device-width, initial-scale=1"><title>{title}</title>
  <style>body{{font-family:system-ui,sans-serif;max-width:760px;margin:40px auto;padding:0 16px;
  line-height:1.7;color:#222}}h1{{font-size:1.6rem}}a{{color:#0b59c5}}</style></head>
- <body><p style="color:#777;font-size:.85rem">آخر تحديث: 30 أغسطس 2026</p>{body}</body></html>"""
+ <body><p style="color:#777;font-size:.85rem">Last updated: 30 August 2026</p>{body}</body></html>"""
 
-_LEGAL_BASE_EN = '<!doctype html><html lang="en"><head><meta charset="utf-8">\n' \
-    '<meta name="viewport" content="width=device-width, initial-scale=1"><title>{title}</title>\n' \
-    '<style>body{{font-family:system-ui,sans-serif;max-width:760px;margin:40px auto;padding:0 16px;\n' \
-    'line-height:1.7;color:#222}}h1{{font-size:1.6rem}}a{{color:#0b59c5}}</style></head>\n' \
-    '<body><p style="color:#777;font-size:.85rem">Last updated: 30 August 2026</p>{body}</body></html>'
+_LEGAL_BASE_EN = _LEGAL_BASE
 
 
 def _legal_entity_block(lang: str) -> str:
@@ -1849,34 +1841,34 @@ def _legal_entity_block(lang: str) -> str:
     if lang == "en":
         labels = ("Commercial registry no.", "Tax ID", "Registered office", "Phone")
     else:
-        labels = ("السجل التجاري", "الرقم الضريبي", "المقر المسجّل", "الهاتف")
+        labels = ("Commercial registry no.", "Tax ID", "Registered office", "Phone")
     vals = [os.environ.get(k, "").strip() for k in
             ("FLUXSWARM_LEGAL_REGISTRY_NO", "FLUXSWARM_LEGAL_TAX_ID",
              "FLUXSWARM_LEGAL_ADDRESS", "FLUXSWARM_LEGAL_PHONE")]
     bits = [f"{lab}: <b>{v}</b>" for lab, v in zip(labels, vals) if v]
     suffix = (" — " + " · ".join(bits)) if bits else ""
-    heading = "Operating entity" if lang == "en" else "الكيان التشغيلي"
+    heading = "Operating entity" if lang == "en" else "Operating entity"
     return f"<h2>{heading}</h2><p><b>{ent}</b>{suffix}</p>"
 
 
 @app.get("/privacy", response_class=HTMLResponse)
 def privacy_page():
     contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
-    body = """<h1>سياسة الخصوصية (Privacy Policy)</h1>
-<p>تُجمع البيانات التالية لتشغيل الخدمة فقط: البريد الإلكتروني والاسم وكلمات المرور (مشفّرة Argon2id) ومفاتيح مزوّدي الذكاء الاصطناعي (مشفّرة فورياً بـ Fernet) وأهداف المشاريع ومخرجاتها وسجلُّ الاستخدام والتدقيق ومعلومات الدفع الأساسية.</p>
-<p>لا تُباع البيانات ولا تُستخدم في الإعلانات. نشاركها فقط: (1) مع معالج الدفع Paddle (تاجر السجلّ) لإتمام المعاملات، و(2) مع مزوّد الذكاء الاصطناعي الذي تختاره أنت عند تشغيل السرب (BYOK) لتنفيذ هدفك، وفق شروط ذلك المزوّد. لا تدرب المنصة على بياناتك.</p>
-<p>حقوقك (CCPA/CPRA): حق الاطلاع على بياناتك عبر <code>GET /api/account/export</code> (أو من لوحة الحساب)، وحق التصحيح عبر <code>PATCH /api/account</code> (تعديل الاسم المعروض)، وحق الحذف الكامل عبر <code>DELETE /api/account</code> وحذف مفاتيحك فوراً، ولن تمرّ طلبات التصحيح الأخرى وسيلة <a href="mailto:{c}">{c}</a>. سياق بيانات التخزين: عند الإطلاق تُستضاف الخوادم في أمريكا الشمالية؛ اخترنا هذا الموقع لحوسبة الدفع والتشفير — راجع/ي «النقل الدولي» في النسخة الإنجليزية.</p>
-<p>سجلّ التدقيق الأمني (Append-only) مستبعد من الحذف: يُحتفظ به للأغراض الأمنية والتحقيقية فقط ولا يستخدم تسويقياً ولا للتدريب، وقد تتضمن مدخلاته البريد الإلكتروني وعنوان IP تلقائياً لأغراض التحقيق في إساءة الاستخدام، وهي غير قابلة للمحو. الأثاث الناتج عن تشغيل السرب (ملفات المنتج المولّدة على القرص) تُحذف عند حذف الحساب في الإصدارات اللاحقة؛ إلى حينه يمكنك طلب الحذف عبر البريد. تفاصيل الملفات المنقولة وعوامل الاحتفاظ موجودة في صفحة <a href="/cookies">ملفات تعريف الارتباط والتتبّع</a> واسترداد الأموال في <a href="/refund">سياسة الاسترداد والرصيد</a>.</p>
-<p>انات المملكة المتحدة والاتحاد الأوروبي (إضافة بريطانية/أوروبية): الأساس القانوني للمعالجة هو تنفيذ العقد، والمصلحة المشروعة (أمان النظام ومكافحة الاحتيال)، والالتزام القانوني (سجلات الفوترة). حقوقك تشمل الوصول والتصحيح والمحو ونقل البيانات والاعتراض على المعالجة وشكوى لدى سلطة حماية البيانات (في بريطانيا: مكتب مفوّض المعلومات). قد تُنقل بياناتك إلى مزوّدي الذكاء الاصطناعي خارج المملكة/الاتحاد وفق شروطهم؛ ولا ننقلها لأغراض تسويقية.</p>"""
+    body = """<h1>Privacy Policy</h1>
+<p>We process only the data needed to operate the service: email, name, password (hashed with Argon2id), user-supplied AI provider keys (encrypted immediately with Fernet), project goals and generated outputs, usage and audit records, and minimal payment information.</p>
+<p>We do not sell your data and do not use it for advertising. We share it only (1) with Paddle (merchant of record) to complete transactions, and (2) with the AI provider you choose when you launch a swarm (BYOK) to execute your goal under that provider's terms. We do not train on your data.</p>
+<p>Your rights (CCPA/CPRA): the right to access your data via <code>GET /api/account/export</code> (or from the account panel), the right to rectification via <code>PATCH /api/account</code> (update your display name), and the right to full erasure via <code>DELETE /api/account</code> (including immediate deletion of your keys). Other correction requests can be sent to <a href="mailto:{c}">{c}</a>. Data storage context: on launch, servers are hosted in North America; we selected this location for compute and encryption — see the section on transfers in this policy.</p>
+<p>The security audit log (append-only) is excluded from erasure: it is retained for security and investigation purposes only, never for marketing or training; its entries may include your email address and IP address automatically, and they cannot be erased. Board artifacts generated by a swarm run (generated product files on disk) are deleted when the account is deleted in later versions; until then you may request deletion by email. Details on cookies and retention appear on the <a href="/cookies">cookies and tracking</a> page, and refunds are described on the <a href="/refund">refund policy</a> page.</p>
+<p>UK and EU users (British/European addendum): the lawful bases for processing are performance of the contract, legitimate interest (system security and fraud prevention), and legal obligation (billing records). Your rights include access, rectification, erasure, data portability, the right to object to processing, and the right to lodge a complaint with your data-protection authority (in the UK: the Information Commissioner's Office). Your data may be transferred to AI providers outside the UK/EU under their terms; we do not transfer it for marketing purposes.</p>"""
     body = body.format(c=contact)
-    body += '<h2>الذكاء الاصطناعي — الإفصاح والتحقق (ADMT)</h2><p>عند إطلاق مشروع بمساعدة آليّة، تحلل المنصة هدفك عبر سرب من الوكلاء (المخطط، المهندس المعماري، ديفأوبس، TDD، المراجع، المنفّذ) وتولّد كوداً مسوّداً يتطلب مراجعتك. لديك الحق في الانسحاب من اتخاذ القرار الآلي (ADMT) في أي وقت من حسابك — يوقف ذلك كل عمليات الإطلاق الآلي مع بقاء الإنشاء اليدوي للمشاريع متاحاً — وإعادة التفعيل بعد إعادة الإقرار بالإشعار المحدّث. الإشعار الكامل: <a href="/admt-notice">صفحة إشعار ADMT</a>.</p>'
-    body += '<h2>مزوّدو المعالجة (بيان)</h2><p>يُرسل وصف مشروعك فقط إلى مزوّد الذكاء الاصطناعي الذي تختاره لتنفيذ هدفك وفق شروط ذلك المزوّد: <a href="https://cloud.google.com/terms/data-processing-addendum">Google DPA</a> · <a href="https://www.anthropic.com/legal/data-processing-addendum">Anthropic DPA</a> · <a href="https://openai.com/policies/data-processing-addendum/">OpenAI DPA</a>. لا ندرّب النماذج على بياناتك.</p>'
-    body += '<h2>الاحتفاظ بالبيانات</h2><p>يُحتفظ بالبيانات القابلة للتحديد 90 يوماً بعد حذف الحساب لأغراض الامتثال والتدقيق؛ سجلّ التدقيق مستبعد من الحذف كما هو موصوف أعلاه. التواصل بخصوص ADMT: <a href="mailto:privacy@fluxswarm.ai">privacy@fluxswarm.ai</a>.</p>'
-    body += _legal_entity_block("ar")
+    body += '<h2>AI Decision-Making Transparency (ADMT)</h2><p>When you launch an AI-assisted project, the platform analyses your goal through a squad of agents (Planner, Architect, DevOps, TDD, Reviewer, Builder) and generates draft code that requires your review. You have the right to opt out of automated decision-making (ADMT) at any time from your account — this stops all AI-assisted launches while manual project creation remains available — and to opt back in after re-acknowledging the updated notice. Full notice: <a href="/admt-notice">ADMT Notice page</a>.</p>'
+    body += '<h2>Processing providers (disclosure)</h2><p>Only your project description is sent to the AI provider you choose to execute your goal, subject to that provider\u2019s terms: <a href="https://cloud.google.com/terms/data-processing-addendum">Google DPA</a> \u00b7 <a href="https://www.anthropic.com/legal/data-processing-addendum">Anthropic DPA</a> \u00b7 <a href="https://openai.com/policies/data-processing-addendum/">OpenAI DPA</a>. We do not train on your data.</p>'
+    body += '<h2>Data retention</h2><p>Identifiable data is retained for 90 days after account deletion for compliance and audit purposes; the audit log remains excluded from erasure as described above. ADMT contact: <a href="mailto:privacy@fluxswarm.ai">privacy@fluxswarm.ai</a>.</p>'
+    body += _legal_entity_block("en")
     _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
-    body += f'<p>أسئلة: <a href="mailto:{contact}">{contact}</a>'
+    body += f'<p>Questions: <a href="mailto:{contact}">{contact}</a>'
     body += f" · {_phone}</p>" if _phone else "</p>"
-    return _LEGAL_BASE.format(title="سياسة الخصوصية", body=body)
+    return _LEGAL_BASE_EN.format(title="Privacy Policy", body=body)
 
 
 @app.get("/privacy-en", response_class=HTMLResponse)
@@ -1902,23 +1894,23 @@ def privacy_page_en():
 @app.get("/terms", response_class=HTMLResponse)
 def terms_page():
     contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
-    body = """<h1>شروط الاستخدام (Terms of Service)</h1>
-<p>تُقدَّم الخدمة «كما هي». تُعالَج المدفوعات بواسطة Paddle (تاجر السجلّ) وفق شروطها، وتشمل الضرائب وضريبة القيمة المضافة حيثما انطبق.</p>
-<h2>الائتمانات</h2><p>الائتمانات رصيد خدمة مسبق الدفع يُمنح فقط بعد تأكيد الدفع. كل إطلاق مشروع يكلّف رصيداً واحداً ولا تنتهي صلاحية الائتمانات. يُعاد الرصيد تلقائياً عند فشل الإطلاق قبل استهلاك أي عمل، وفي حال استرداد مبلغ من Paddle تُحوَّل الباقة إلى Demo ويبقى الرصيد الحالي.</p>
-<h2>بياناتك ومفاتيحك</h2><p>أنت مسؤول عن الأهداف التي ترسلها وعن مفاتيح المزوّدين التي تخزّنها (راجع سياسة الخصوصية لطريقة حمايتها). تُستخدم المفاتيح فقط لتنفيذ إطلاقك الخاص.</p>
-<h2>المخرجات</h2><p>مخرجات السرب ملكك، وفق شروط مزوّدي الذكاء الاصطناعي المستخدمين وأي مكونات طرف ثالث داخلها. تستخدم الخدمة برمجيات تشغيل ومهارات وكلاء مفتوحة المصدر (Hermes؛ ECC) وتراخيصها تعود لمؤلفيها.</p>
-<h2>الاستخدام المقبول</h2><p>إساءة الاستخدام أو المحتوى غير القانوني أو النشاط الضار ممنوع وقد يؤدي لإيقاف الحساب (انظر <a href="/acceptable-use">سياسة الاستخدام المقبول</a>).</p>
-<h2>التوفر وإنهاء الحساب</h2><p>نعمل على إبقاء الخدمة متاحة دون ضمان استمرارية غير منقطعة. يمكنك حذف حسابك (وكل بياناته ومجالسه) من التطبيق في أي وقت، وقد نعلّق الحسابات المخالفة.</p>
-<h2>تحديد المسؤولية</h2><p>إلى أقصى حد يسمح به القانون، تُقدَّم الخدمة «كما هي» دون ضمانات، وتُحدَّد المسؤولية عن الخدمة ومخرجاتها كما يسمح به القانون؛ ولا يُسقَط ما لا يمكن إسقاطه قانوناً ولا حقوق المستهلك الإلزامية (بما فيها في المملكة المتحدة والاتحاد الأوروبي).</p>
-<h2>القانون الحاكم والاختصاص</h2><p>تخضع هذه الشروط للقانون المعمول به؛ حقوق المستهلك الإلزامية في بلدك لا تتأثر. تُراجع تفاصيل الاختصاص قانونياً مع توسع الخدمة. أسئلة: <a href="mailto:{c}">{c}</a>.</p>"""
+    body = """<h1>Terms of Service</h1>
+<p>The service is provided &quot;as is&quot;. Payments are processed by Paddle (merchant of record) under its own terms, including taxes and VAT where applicable.</p>
+<h2>Credits</h2><p>Credits are a prepaid service balance granted only after payment is confirmed. Each project launch costs one credit and credits never expire. A launch that fails before any work is consumed refunds the credit automatically, and if you obtain a refund from Paddle your plan is downgraded to Demo while your current credit balance stays.</p>
+<h2>Your data and your keys</h2><p>You are responsible for the goals you submit and for the provider keys you store (see the privacy policy for how they are protected). Keys are used only to execute your own launches.</p>
+<h2>Outputs</h2><p>Swarm outputs are yours, subject to the terms of the AI providers used and to any third-party components included in them. The service uses open-source execution software and agent skill profiles (Hermes; ECC), whose licences belong to their respective authors.</p>
+<h2>Acceptable use</h2><p>Abuse, unlawful content, or harmful activity is prohibited and may result in account suspension (see the <a href="/acceptable-use">acceptable-use policy</a>).</p>
+<h2>Availability and termination</h2><p>We work to keep the service available but do not guarantee uninterrupted availability. You can delete your account (and all of its data and boards) from the app at any time, and we may suspend accounts that violate these terms.</p>
+<h2>Limitation of liability</h2><p>To the maximum extent permitted by applicable law, the service is provided &quot;as is&quot; without warranties, and liability for the service and its outputs is limited as permitted by law. Nothing here limits or excludes liability that cannot be limited or excluded by law, nor affects your mandatory statutory consumer rights (including in the UK and the EU).</p>
+<h2>Governing law and jurisdiction</h2><p>These terms are governed by applicable law; your mandatory consumer rights in your country are not affected. Jurisdiction specifics are kept under legal review as the service expands. Questions: <a href="mailto:{c}">{c}</a>.</p>"""
     body = body.format(c=contact)
-    body += '<h2>استخدام الذكاء الاصطناعي (ADMT)</h2><p>بإطلاقك مشروعاً بمساعدة آليّة أنت تقرّ الإشعار المسبق (<a href="/admt-notice">إشعار ADMT</a>). يمكنك الانسحاب من ADMT في أي وقت من حسابك مع بقاء الإنشاء اليدوي متاحاً. المراجعة البشرية متاحة عند الطلب وتُنجز خلال 48 ساعة من رفع الطلب.</p>'
-    body += '<h2>المسؤولية عن الكود المولّد آلياً</h2><p>المخرجات المولّدة بالذكاء الاصطناعي مسوّدات تتطلب مراجعتك واختبارها قبل الاستخدام؛ تُقدَّم دون ضمان بأنها خالية من الأخطاء أو مناسبة لكل حالة. تتحمل مسؤولية التحقق النهائي، وفق قيود المسؤولية العامة في هذه الشروط وشروط المزوّد المستخدم.</p>'
-    body += _legal_entity_block("ar")
+    body += '<h2>Use of AI (ADMT)</h2><p>By launching an AI-assisted project you acknowledge the pre-use notice (<a href="/admt-notice">ADMT Notice</a>). You may opt out of ADMT at any time from your account while keeping manual project creation available. Human review is available on request and is completed within 48 hours of submission.</p>'
+    body += '<h2>AI-generated code liability</h2><p>AI-generated outputs are drafts that require your review and testing before use; they are provided without warranty of being error-free or fit for every purpose. Final verification remains your responsibility, subject to the general limitation of liability in these terms and to the terms of the provider used.</p>'
+    body += _legal_entity_block("en")
     _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
-    body += f'<p>اتصل بنا: <a href="mailto:{contact}">{contact}</a>'
+    body += f'<p>Contact: <a href="mailto:{contact}">{contact}</a>'
     body += f" · {_phone}</p>" if _phone else "</p>"
-    return _LEGAL_BASE.format(title="شروط الاستخدام", body=body)
+    return _LEGAL_BASE_EN.format(title="Terms of Service", body=body)
 
 
 @app.get("/terms-en", response_class=HTMLResponse)
@@ -1971,21 +1963,21 @@ specifics are kept under legal review as the service expands. Questions: <a href
 @app.get("/refund", response_class=HTMLResponse)
 def refund_page():
     contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
-    body = """<h1>سياسة الاسترداد والرصيد</h1>
-<p>الرصيد (الائتمانات) هومنتج عضوياً: لا تنتهي صلاحيته ولا يمكن شحنه خارج الخدمة.</p>
-<p>متى تُسترد الأموال تلقائياً:</p>
+    body = """<h1>Refund &amp; Credit Policy</h1>
+<p>Credits are service credits: they never expire and cannot be withdrawn outside the service.</p>
+<p>Automatic refunds:</p>
 <ul>
-<li>عند فشل إطلاق السرب ولم يُستهلك أي عمل — يُعاد الرصيد تلقائياً إلى حسابك.</li>
-<li>عند استرداد مبلغ من Paddle — تُحوَّل باقتك إلى Demo ويبقى رصيدك الحالي بحوزتك.</li>
+<li>If a swarm launch fails and no work was consumed, the credit is refunded to your account automatically.</li>
+<li>If you obtain a monetary refund from Paddle, your plan is downgraded to Demo and your current credit balance stays with you.</li>
 </ul>
-<p>متى يُنظر في استرداد نقدي (استثمارية، خلال 14 يوماً من أول تفعيل لأي باقة مدفوعة، بعد خصم العمل المستهلَك): لا استرداد كامل تلقائياً؛ المتاجر الإلكترونية إن كانت قد حدّت استخدامك. الطلبات خلال 14 يوماً من الشراء تُعالج قبل سحب الرصيد المستهلك. بعد 14 يوماً: لا استرداد نقدي للاستخدام المستهلك، لكن الرصيد غير المستهلَك قابل للاسترداد النقدي حسب <a href="mailto:{c}">{c}</a> وحسب شروط Paddle.</p>
-<p>العمليات تتم حصراً عبر Paddle (تاجر السجلّ) وسياسة الاسترداد التي تفرضها قوانين بلدك (بما فيها حقوق المستهلك في المملكة المتحدة والاتحاد الأوروبي) لا تُسقَط هذه البنود. لمطالبات نزاعات: <a href="mailto:{c}">{c}</a>.</p>"""
+<p>When a monetary refund is considered (at our discretion, within 14 days of your first paid activation, net of consumed work): there is no automatic full refund; online merchants may have limited your usage. Requests within 14 days of purchase are processed before deducting consumed credits. After 14 days, no monetary refund for consumed usage, but any unconsumed credit balance may be refunded via <a href="mailto:{c}">{c}</a> and subject to Paddle's process.</p>
+<p>All payments are handled exclusively by Paddle (merchant of record). Your statutory consumer rights imposed by the laws of your country (including UK and EU consumer rights) are not waived by these terms. Disputes: <a href="mailto:{c}">{c}</a>.</p>"""
     body = body.format(c=contact)
-    body += _legal_entity_block("ar")
+    body += _legal_entity_block("en")
     _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
-    body += f'<p>استفسارات: <a href="mailto:{contact}">{contact}</a>'
+    body += f'<p>Questions: <a href="mailto:{contact}">{contact}</a>'
     body += f" · {_phone}</p>" if _phone else "</p>"
-    return _LEGAL_BASE.format(title="سياسة الاسترداد والرصيد", body=body)
+    return _LEGAL_BASE_EN.format(title="Refund &amp; Credit Policy", body=body)
 
 
 @app.get("/refund-en", response_class=HTMLResponse)
@@ -2012,16 +2004,16 @@ def refund_page_en():
 @app.get("/cookies", response_class=HTMLResponse)
 def cookies_page():
     contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
-    body = """<h1>ملفات تعريف الارتباط والتتبّع</h1>
-<p>لا يضع الخادم أي ملفات تعريف ارتباط للتتبع؛ الجلسة تعتمد رمز JWT يُحفظ في <code>localStorage</code> ويتلاشى خلال 7 أيام أو عند خروجك. القيمة المحلية الوحيدة الأخرى هي <code>flux-lang</code> (تفضيل اللغة).</p>
-<p>لا أدوات تحليلات، لا إعلانات، لا بكسل تتبّع، ولا أطراف ثالثة متتبّعة. منذ أن لا نستخدم ملفات تعريف ارتباط للإعلان أو التحليلات، لا يُشترَط لافتة موافقة مسبقة بموجب لوائح الكوكيز البريطانية (PECR) على موقعنا. عند الدفع ينشئ Paddle ملفات تعريف ارتباط على نطاقه الخاص فقط، وليس على نطاقنا.</p>
-<p>لمزيد: <a href="/refund">الاسترداد</a> · <a href="/privacy">الخصوصية</a> · <a href="/acceptable-use">الاستخدام المقبول</a>.</p>"""
+    body = """<h1>Cookies &amp; Tracking</h1>
+<p>The server sets no tracking cookies; the session relies on a JWT held in <code>localStorage</code> that expires after 7 days or when you log out. The only other local value is <code>flux-lang</code> (language preference).</p>
+<p>There is no analytics, no advertising, no tracking pixels, and no third-party trackers. Because we do not use cookies for advertising or analytics, no prior consent banner is required under UK cookie regulations (PECR) on our site. When you pay, Paddle sets cookies on its own domain only, never ours.</p>
+<p>See also <a href="/refund">refund</a> · <a href="/privacy">privacy</a> · <a href="/acceptable-use">acceptable use</a>.</p>"""
     body = body.format(c=contact)
-    body += _legal_entity_block("ar")
+    body += _legal_entity_block("en")
     _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
-    body += f'<p>استفسارات: <a href="mailto:{contact}">{contact}</a>'
+    body += f'<p>Questions: <a href="mailto:{contact}">{contact}</a>'
     body += f" · {_phone}</p>" if _phone else "</p>"
-    return _LEGAL_BASE.format(title="ملفات تعريف الارتباط والتتبّع", body=body)
+    return _LEGAL_BASE_EN.format(title="Cookies &amp; Tracking", body=body)
 
 
 @app.get("/cookies-en", response_class=HTMLResponse)
@@ -2210,16 +2202,16 @@ and the live board you can inspect during every launch.</p>"""
 @app.get("/acceptable-use", response_class=HTMLResponse)
 def acceptable_use_page():
     contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
-    body = """<h1>الاستخدام المقبول</h1>
-<p>باستخدامك FluxSwarm تقرّ بأنك: (1) لن تستخدم المنصة في المحتوى غير القانوني أو الخبيث أو الاستغلالي أو انتهاك الحقوق (بما فيها الملكية الفكرية وحقوق الغير)؛ (2) لن تشغّل سرباً يهدف لإحداث ضرر أو أي أنشطة عنيفة أو احتيالية؛ (3) لن تعيد بيع الائتمانات أو تحويلها نقداً خارج سياسة الاسترداد؛ (4) لن تحاول الوصول غير المصرّح به أو تسريب مفاتيح الغير أو كشط الواجهة آلياً بما يتجاوز الحدود؛ (5) ستلتزم بشروط مزوّدي الذكاء الاصطناعي الذين تستخدمهم عبر BYOK.</p>
-<p>قد تُعلّق الحسابات المخالفة وتُحال التفاصيل المشبوهة للجهات المختصة، وقد تُستردّ الائتمانات عبر التحقيق وفق <a href="/refund">سياسة الاسترداد</a>.</p>
-<p>استفسارات: <a href="mailto:{c}">{c}</a></p>"""
+    body = """<h1>Acceptable Use</h1>
+<p>By using FluxSwarm you agree that you will (1) not use the platform for unlawful, malicious, exploitative or infringing content (including intellectual property and others' rights); (2) not run a swarm aimed at harm, violence or fraud; (3) not resell credits or convert them to cash outside the refund policy; (4) not attempt unauthorized access, leak others' keys, or scrape the API beyond stated limits; (5) comply with the terms of the AI providers you use via BYOK.</p>
+<p>Violating accounts may be suspended and suspicious activity may be reported to the relevant authorities; credits may be recovered following investigation per the <a href="/refund">refund policy</a>.</p>
+<p>Questions: <a href="mailto:{c}">{c}</a></p>"""
     body = body.format(c=contact)
-    body += _legal_entity_block("ar")
+    body += _legal_entity_block("en")
     _phone = os.environ.get("FLUXSWARM_LEGAL_PHONE", "").strip()
-    body += f'<p>أسئلة: <a href="mailto:{contact}">{contact}</a>'
+    body += f'<p>Questions: <a href="mailto:{contact}">{contact}</a>'
     body += f" · {_phone}</p>" if _phone else "</p>"
-    return _LEGAL_BASE.format(title="الاستخدام المقبول", body=body)
+    return _LEGAL_BASE_EN.format(title="Acceptable Use", body=body)
 
 
 @app.get("/acceptable-use-en", response_class=HTMLResponse)
@@ -2252,16 +2244,13 @@ ADMT_NOTICE = {
 }
 _ADMT_NOTICE_VERSION = ADMT_NOTICE["last_updated"]
 
-# Localized description / logic_summary (AR + EN). Structure stays identical so
-# i18n never changes the API contract.
+# Localized description / logic_summary. Structure stays identical so i18n
+# never changes the API contract. Platform is English-only — the "ar" branch
+# was removed; any lang falls back to the English base notice.
 _ADMT_NOTICE_L10N = {
     "en": {
         "description": ADMT_NOTICE["description"],
         "logic_summary": ADMT_NOTICE["logic_summary"],
-    },
-    "ar": {
-        "description": "يعمل وكلاء الذكاء الاصطناعي على توليد كود بناءً على وصفك. المخرجات مسوّدات تتطلب مراجعة بشرية.",
-        "logic_summary": "المخطّط يحلّل الهدف ← المهندس المعماري يختار الحزمة التقنية ← ديفأوبس يصمّم البنية التحتية ← TDD يكتب الاختبارات ← المراجع(ة) يفحص الجودة ← المنفّذ يولّد الكود",
     },
 }
 
@@ -2282,11 +2271,11 @@ def _admt_goal_flags(goal: str) -> dict:
     g = (goal or "").lower()
     return {
         "scalability": any(k in g for k in (
-            "scale", "scalab", "traffic", "concurr", "million", "توسع", "ترافيك", "ملايين", "متزامن")),
+            "scale", "scalab", "traffic", "concurr", "million")),
         "web_api": any(k in g for k in (
-            "web", "api", "site", "saas", "خدمة", "موقع", "واجهة", "استضافة")),
+            "web", "api", "site", "saas")),
         "data": any(k in g for k in (
-            "database", "sql", "postgres", "data", "storage", "قاعدة", "بيانات", "تخزين")),
+            "database", "sql", "postgres", "data", "storage")),
     }
 
 
@@ -2400,7 +2389,7 @@ def get_admin(request: Request):
     ah = request.headers.get("Authorization", "")
     presented = ah.replace("Bearer ", "") if ah.startswith("Bearer ") else ""
     if not expected or not presented or not secrets.compare_digest(expected, presented):
-        raise HTTPException(status_code=401, detail="غير مصرّح")
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 @app.get("/api/account/admt-notice")
@@ -2434,10 +2423,10 @@ def api_admt_opt_in(payload: AdmtOptInIn, request: Request,
                     user: dict = Depends(get_current_user)):
     if not payload.acknowledge:
         raise HTTPException(status_code=400,
-                            detail="إعادة قراءة إشعار ADMT مطلوبة قبل إعادة التفعيل")
+                            detail="Re-reading the ADMT notice is required before re-enabling")
     if (payload.last_updated or "").strip() != _ADMT_NOTICE_VERSION:
         raise HTTPException(status_code=400,
-                            detail="إشعار ADMT المحدّث يجب إعادة قراءته وإقراره (أرسل نسخته الحالية)")
+                            detail="The updated ADMT notice must be read and acknowledged (send its current version)")
     db.record_admt_notice_ack(user["id"])
     db.set_admt_opt_out(user["id"], False)
     audit.audit("admt.optin", uid=user["id"], email=user["email"],
@@ -2450,7 +2439,7 @@ def api_request_human_review(project_id: int, request: Request,
                              user: dict = Depends(get_current_user)):
     proj = _get_project_row(project_id)
     if not proj or proj["user_id"] != user["id"]:
-        raise HTTPException(status_code=404, detail="المشروع غير موجود")
+        raise HTTPException(status_code=404, detail="Project not found")
     review_id = db.request_human_review(user["id"], project_id)
     audit.audit("admt.review.request", uid=user["id"], email=user["email"],
                 ip=_client_ip(request), outcome="ok",
@@ -2495,13 +2484,13 @@ def api_admin_update_review(review_id: int, payload: HumanReviewUpdateIn,
                             request: Request, _: None = Depends(get_admin)):
     status = (payload.status or "").strip()
     if status not in ("approved", "rejected", "needs_changes"):
-        raise HTTPException(status_code=422, detail="حالة مراجعة غير صالحة")
+        raise HTTPException(status_code=422, detail="Invalid review status")
     review = db.get_human_review(review_id)
     if not review:
-        raise HTTPException(status_code=404, detail="الطلب غير موجود")
+        raise HTTPException(status_code=404, detail="Request not found")
     notes = (payload.reviewer_notes or "").strip()
     if not db.update_human_review(review_id, status, notes):
-        raise HTTPException(status_code=409, detail="الطلب نُفّذ من قبل")
+        raise HTTPException(status_code=409, detail="Request already processed")
     notified = _notify_human_review(review, status, notes)
     audit.audit("admt.review.update", uid=review["user_id"], email=review["user_email"],
                 ip=_client_ip(request), outcome="ok", review_id=review_id,
@@ -2513,9 +2502,9 @@ def api_admin_update_review(review_id: int, payload: HumanReviewUpdateIn,
 def api_project_admt_logic(project_id: int, user: dict = Depends(get_current_user)):
     proj = _get_project_row(project_id)
     if not proj:
-        raise HTTPException(status_code=404, detail="المشروع غير موجود")
+        raise HTTPException(status_code=404, detail="Project not found")
     if proj["user_id"] != user["id"]:
-        raise HTTPException(status_code=403, detail="غير مصرّح")
+        raise HTTPException(status_code=403, detail="Unauthorized")
     goal = proj.get("goal") or ""
     runtime = _project_runtime_info(user)
     return {
@@ -2541,7 +2530,7 @@ def _admt_notice_view(lang: str) -> dict:
 def admt_notice_page(request: Request):
     return templates.TemplateResponse(
         request=request, name="admt_notice.html",
-        context={"title": "إشعار الذكاء الاصطناعي — FluxSwarm", "lang": "ar",
+        context={"title": "ADMT Notice — FluxSwarm", "lang": "ar",
                  "notice": _admt_notice_view("ar"), "api_base": "",
                  "csp_nonce": request.state.csp_nonce})
 
@@ -2561,9 +2550,9 @@ def api_account_update(payload: AccountUpdateIn, request: Request,
     """Right to correct (CCPA/CPRA): replace the display name on the account."""
     name = (payload.name or "").strip()
     if not name:
-        raise HTTPException(status_code=422, detail="الاسم فارغ")
+        raise HTTPException(status_code=422, detail="Name is empty")
     if not db.update_user_name(user["id"], name):
-        raise HTTPException(status_code=404, detail="الحساب غير موجود")
+        raise HTTPException(status_code=404, detail="Account not found")
     audit.audit("account.rectify", uid=user["id"], email=user["email"],
                 ip=_client_ip(request), outcome="ok")
     refreshed = db.get_user_by_id(user["id"]) or {}
@@ -2596,7 +2585,7 @@ def api_account_delete(request: Request, user: dict = Depends(get_current_user))
             boards_deleted = -1  # DB already erased; disk cleanup stays best-effort
     audit.audit("account.delete", uid=uid, email=user["email"], ip=_client_ip(request),
                 outcome="ok" if removed else "missing", boards_deleted=boards_deleted)
-    return {"ok": removed, "note": "تم حذف الحساب وكل البيانات المرتبطة به",
+    return {"ok": removed, "note": "Account and all associated data have been deleted",
             "boards_deleted": boards_deleted}
 
 
@@ -2660,35 +2649,35 @@ def _clean_text(s: str, *, name: str, max_len: int) -> str:
     a sensible printable set, and additionally cap length as a hard input limit.
     """
     if s is None:
-        raise HTTPException(status_code=400, detail=f"{name} فارغ")
+        raise HTTPException(status_code=400, detail=f"{name} is empty")
     # Keep real whitespace (space, tab, newline, carriage return) plus printable.
     allowed = set(" \t\n\r")
     s = "".join(ch for ch in s if ch in allowed or ch.isprintable())
     s = s.strip()
     if not s:
-        raise HTTPException(status_code=400, detail=f"{name} فارغ")
+        raise HTTPException(status_code=400, detail=f"{name} is empty")
     # Reject oversized input up-front (don't silently truncate a user's
     # submission — the caller's contract is validation, and a truncated goal/name
     # would be surprising and could break downstream length assumptions).
     if len(s) > max_len:
-        raise HTTPException(status_code=400, detail=f"{name} أطول من الحد ({max_len})")
+        raise HTTPException(status_code=400, detail=f"{name} exceeds the limit ({max_len})")
     if any(ch in s for ch in "<>") or "script" in s.lower() \
             or "javascript:" in s.lower() or "onerror=" in s.lower():
-        raise HTTPException(status_code=400, detail=f"{name} يحتوي وسوم/سكربتات غير مسموحة")
+        raise HTTPException(status_code=400, detail=f"{name} contains disallowed tags/scripts")
     return s
 
 
 def _validate_template(payload: TemplateIn):
-    payload.name = _clean_text(payload.name, name="اسم القالب", max_len=_TPL_NAME_MAX)
+    payload.name = _clean_text(payload.name, name="template name", max_len=_TPL_NAME_MAX)
     desc = (payload.description or "").strip()
     if desc:
-        payload.description = _clean_text(desc, name="الوصف", max_len=_TPL_DESC_MAX)
+        payload.description = _clean_text(desc, name="description", max_len=_TPL_DESC_MAX)
     else:
         payload.description = ""
     if not payload.agents:
-        raise HTTPException(status_code=400, detail="أضف وكلاء للقالب")
+        raise HTTPException(status_code=400, detail="Add agents to the template")
     if len(payload.agents) > _TPL_AGENTS_MAX:
-        raise HTTPException(status_code=400, detail=f"الحد الأقصى {_TPL_AGENTS_MAX} وكلاء لكل قالب")
+        raise HTTPException(status_code=400, detail=f"Maximum of {_TPL_AGENTS_MAX} agents per template")
     seen = set()
     resolved = []
     for name in payload.agents:
@@ -2696,19 +2685,19 @@ def _validate_template(payload: TemplateIn):
         if not name:
             continue
         if name in seen:
-            raise HTTPException(status_code=400, detail=f"وكيل مكرر: {name}")
+            raise HTTPException(status_code=400, detail=f"Duplicate agent: {name}")
         seen.add(name)
         if name not in hc.AGENT_REGISTRY:
             raise HTTPException(status_code=400,
-                                detail=f"وكيل غير معروف: {name} — المرخّصون: {', '.join(hc.AGENT_REGISTRY)}")
+                                detail=f"Unknown agent: {name} — allowed: {', '.join(hc.AGENT_REGISTRY)}")
         resolved.append(name)
     if not resolved:
-        raise HTTPException(status_code=400, detail="لا يوجد وكلاء صالحين في القالب")
+        raise HTTPException(status_code=400, detail="No valid agents in the template")
     payload.agents = resolved
     if payload.price_credits < _TEMPLATE_LIMITS["price_min"] or \
        payload.price_credits > _TEMPLATE_LIMITS["price_max"]:
         raise HTTPException(status_code=400,
-                            detail=f"السعر بين {_TEMPLATE_LIMITS['price_min']} و {_TEMPLATE_LIMITS['price_max']} رصيد")
+                            detail=f"Price between {_TEMPLATE_LIMITS['price_min']} and {_TEMPLATE_LIMITS['price_max']} credits")
 
 
 @app.post("/api/templates")
@@ -2738,21 +2727,21 @@ def api_buy_template(tid: int, payload: BuyIn, request: Request,
                      user: dict = Depends(get_current_user)):
     tpl = db.get_template(tid)
     if not tpl:
-        raise HTTPException(status_code=404, detail="القالب غير موجود")
+        raise HTTPException(status_code=404, detail="Template not found")
     if tpl.get("author_id") == user["id"]:
         audit.audit("template.buy", uid=user["id"], email=user["email"], ip=_client_ip(request),
                     outcome="fail", reason="own_template", template_id=tid)
-        raise HTTPException(status_code=400, detail="لا يمكنك شراء قالبك الخاص")
+        raise HTTPException(status_code=400, detail="You cannot buy your own template")
     # Burst guard: max template purchases per user per hour (prevents runaway
     # parallel squad spawns while keeping the store usable).
     if not limiter.purchase_allowed(user["id"]):
         audit.audit("template.buy", uid=user["id"], email=user["email"], ip=_client_ip(request),
                     outcome="fail", reason="burst_limit", template_id=tid)
-        raise HTTPException(status_code=429, detail="تجاوزت حد الشراء (5 قوالب/ساعة) — انتظر قليلاً")
+        raise HTTPException(status_code=429, detail="Purchase limit reached (5 templates/hour) — please wait a moment")
     if not db.buy_template(tid, user["id"]):
         audit.audit("template.buy", uid=user["id"], email=user["email"], ip=_client_ip(request),
                     outcome="fail", reason="insufficient_credits", template_id=tid)
-        raise HTTPException(status_code=402, detail="رصيد غير كافٍ لشراء هذا القالب")
+        raise HTTPException(status_code=402, detail="Insufficient credits to buy this template")
     limiter.record_purchase(user["id"])
     audit.audit("template.buy", uid=user["id"], email=user["email"], ip=_client_ip(request),
                 outcome="ok", template_id=tid, author_id=tpl.get("author_id"),
@@ -2797,7 +2786,7 @@ def api_security(slug: str, include_llm: bool = False, user: dict | None = Depen
     if slug.startswith("flux-demo-"):
         pass
     elif not (user and (slug.startswith(f"u{user['id']}-"))):
-        raise HTTPException(status_code=403, detail="غير مصرّح")
+        raise HTTPException(status_code=403, detail="Unauthorized")
     goal = ""
     try:
         goal = hc.list_tasks(slug)[0].get("title", "") if hc.list_tasks(slug) else ""
@@ -2808,7 +2797,8 @@ def api_security(slug: str, include_llm: bool = False, user: dict | None = Depen
         res["label"] = security.severity_label(res.get("score", 0))
         return res
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        audit.audit("security.scan", slug=slug, outcome="error", reason=str(e)[:200])
+        raise HTTPException(status_code=500, detail="Security scan failed")
 @app.websocket("/ws/{slug}")
 async def ws_board(websocket: WebSocket, slug: str):
     # Token auth via query param. Strict, fail-closed rules:

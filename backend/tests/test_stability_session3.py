@@ -232,7 +232,7 @@ def test_demo_landing_page_served():
     with TestClient(main_mod.app) as c:
         r = c.get("/demo")
         assert r.status_code == 200
-        assert "جرب FluxSwarm" in r.text
+        assert "Try FluxSwarm" in r.text
         assert "/api/demo/launch" in r.text
 
 

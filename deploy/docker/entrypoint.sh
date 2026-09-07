@@ -8,6 +8,11 @@ set -eu
 PORT="${PORT:-8787}"
 DATA_DIR="${DATA_DIR:-/app/backend/data}"
 
+if [ -z "${HERMES_HOME:-}" ] || [ "${HERMES_HOME}" = "/" ]; then
+  echo "FATAL: HERMES_HOME is unset or points to /" >&2
+  exit 1
+fi
+
 # Ensure FluxSwarm persistent data dir exists (users.db, .jwt_secret live here
 # and are provided by a volume; created lazily in demo mode).
 mkdir -p "$DATA_DIR"
@@ -25,4 +30,4 @@ mkdir -p "$HERMES_HOME/kanban/boards" \
 
 echo "FluxSwarm starting on 0.0.0.0:${PORT} (HERMES_HOME=${HERMES_HOME} FLUXSWARM_DEMO_MODE=${FLUXSWARM_DEMO_MODE:-0})"
 
-exec python -m uvicorn main:app --host 0.0.0.0 --port "$PORT" --log-level info
+exec python -m uvicorn main:app --host 0.0.0.0 --port "$PORT" --log-level info --timeout-graceful-shutdown 30

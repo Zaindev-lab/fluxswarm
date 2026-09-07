@@ -202,12 +202,13 @@ def test_legal_pages_cover_consumer_rights_and_entity():
 
 
 def test_legal_pages_stable_translation_pairs():
-    ar = client.get("/terms").text
-    en = client.get("/terms-en").text
-    assert "شروط الاستخدام" in ar
+    # Platform is English-only: /terms and /terms-en both serve English.
+    en = client.get("/terms").text
+    en2 = client.get("/terms-en").text
     assert "Terms of Service" in en
-    assert "القانون الحاكم" in ar
     assert "Governing law" in en
+    assert "Terms of Service" in en2
+    assert "Governing law" in en2
 
 
 def test_squad_api_shape():
