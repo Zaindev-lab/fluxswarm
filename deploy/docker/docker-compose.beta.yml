@@ -62,6 +62,9 @@ services:
       HERMES_HOME: /app/hermes_home
       FLUXSWARM_HERMES_BIN: /usr/local/bin/hermes
       FLUXSWARM_DEMO_MODE: "1"
+      # Known demo login for the friends-beta: demo@fluxswarm.ai / demo-shared-2026
+      # (seed_demo re-pins this password on every boot when the env is set).
+      FLUXSWARM_DEMO_PASSWORD: "${FLUXSWARM_DEMO_PASSWORD:-demo-shared-2026}"
       # Session 3: memory-derived swarm concurrency + reaper tuning + dispatch window.
       # P0.1: 450MB syncs with the 512M cgroup limit above (MAX_IN_PROGRESS=2).
       FLUXSWARM_MEM_TOTAL_MB: "450"
