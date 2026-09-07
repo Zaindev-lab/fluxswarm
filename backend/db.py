@@ -37,10 +37,10 @@ DB.parent.mkdir(exist_ok=True)
 
 # Plan catalogue (monthly). Demo is free and pre-seeded.
 PLANS = {
-    "demo": {"name": "Demo", "price": 0, "credits": 3, "parallel": 1, "desc": "تجربة مجانية محدودة"},
-    "starter": {"name": "Starter", "price": 29, "credits": 25, "parallel": 2, "desc": "للمستقلين والمشاريع الصغيرة"},
-    "pro": {"name": "Pro", "price": 99, "credits": 120, "parallel": 4, "desc": "للفرق الصغيرة"},
-    "scale": {"name": "Scale", "price": 299, "credits": 500, "parallel": 6, "desc": "للشركات والوكالات"},
+    "demo": {"name": "Demo", "price": 0, "credits": 3, "parallel": 1, "desc": "Limited free trial"},
+    "starter": {"name": "Starter", "price": 29, "credits": 25, "parallel": 2, "desc": "For freelancers and small projects"},
+    "pro": {"name": "Pro", "price": 99, "credits": 120, "parallel": 4, "desc": "For small teams"},
+    "scale": {"name": "Scale", "price": 299, "credits": 500, "parallel": 6, "desc": "For companies and agencies"},
 }
 PLAN_ORDER = ["demo", "starter", "pro", "scale"]
 
@@ -298,7 +298,18 @@ def create_user(email: str, name: str, password: str, ref_code: str | None = Non
             c.commit()
         return get_user_by_id(uid)
     except sqlite3.IntegrityError:
-        raise ValueError("البريد مسجّل مسبقاً")
+        raise ValueError("This email is already registered")
+    finally:
+        c.close()
+
+
+def update_user_password(email: str, password: str) -> bool:
+    email = email.lower().strip()
+    c = _conn()
+    try:
+        cur = c.execute("UPDATE users SET pw_hash=? WHERE email=?", (_make_pw_hash(password), email))
+        c.commit()
+        return cur.rowcount > 0
     finally:
         c.close()
 
@@ -504,7 +515,7 @@ def reward_referrer_once(referred_email: str) -> bool:
 
 def upgrade_plan(user_id: int, plan: str):
     if plan not in PLANS:
-        raise ValueError("باقة غير صالحة")
+        raise ValueError("Invalid plan")
     # Grant the plan's credit allowance without ever clawing back credits the
     # user already holds, and without refilling on repeated subscriptions to the
     # same tier (closes the infinite-credit-refill exploit once billing is live).
@@ -1175,10 +1186,25 @@ def add_credit(user_id: int, amount: int = 1) -> bool:
 
 
 # Pre-seed a demo account so visitors can try instantly.
+# The demo password is never a public constant: it comes from the operator
+# (FLUXSWARM_DEMO_PASSWORD) or is a fresh random token no human knows. The
+# demo account exists to back anonymous /api/demo/launch runs, not for
+# interactive login, so its secret is disposable by design.
 def seed_demo():
     c = _conn()
-    if not c.execute("SELECT 1 FROM users WHERE email=?", ("demo@fluxswarm.ai",)).fetchone():
-        create_user("demo@fluxswarm.ai", "Demo User", "demo1234")
+    existing = c.execute("SELECT 1 FROM users WHERE email=?", ("demo@fluxswarm.ai",)).fetchone()
+    pw = os.environ.get("FLUXSWARM_DEMO_PASSWORD")
+    if not existing:
+        pw = pw or secrets.token_urlsafe(18)
+        create_user("demo@fluxswarm.ai", "Demo User", pw)
+    elif pw:
+        # An operator/test pinned FLUXSWARM_DEMO_PASSWORD after a prior seed:
+        # re-pin the account so callers that log into the demo user cannot be
+        # stranded by an earlier random secret (deterministic test sandboxes).
+        stored = c.execute(
+            "SELECT pw_hash FROM users WHERE email=?", ("demo@fluxswarm.ai",)).fetchone()[0]
+        if stored and not _verify_password(pw, stored):
+            update_user_password("demo@fluxswarm.ai", pw)
     c.close()
 
 

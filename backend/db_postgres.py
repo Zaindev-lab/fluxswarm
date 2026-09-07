@@ -56,10 +56,10 @@ DB_POOL_IDLE_LIFETIME_S = float(os.environ.get("FLUXSWARM_DB_POOL_IDLE_LIFETIME_
 
 # Plan catalogue (monthly). Must stay in sync with PLANS in db.py.
 PLANS = {
-    "demo": {"name": "Demo", "price": 0, "credits": 3, "parallel": 1, "desc": "تجربة مجانية محدودة"},
-    "starter": {"name": "Starter", "price": 29, "credits": 25, "parallel": 2, "desc": "للمستقلين والمشاريع الصغيرة"},
-    "pro": {"name": "Pro", "price": 99, "credits": 120, "parallel": 4, "desc": "للفرق الصغيرة"},
-    "scale": {"name": "Scale", "price": 299, "credits": 500, "parallel": 6, "desc": "للشركات والوكالات"},
+    "demo": {"name": "Demo", "price": 0, "credits": 3, "parallel": 1, "desc": "Limited free trial"},
+    "starter": {"name": "Starter", "price": 29, "credits": 25, "parallel": 2, "desc": "For freelancers and small projects"},
+    "pro": {"name": "Pro", "price": 99, "credits": 120, "parallel": 4, "desc": "For small teams"},
+    "scale": {"name": "Scale", "price": 299, "credits": 500, "parallel": 6, "desc": "For companies and agencies"},
 }
 PLAN_ORDER = ["demo", "starter", "pro", "scale"]
 
@@ -188,6 +188,20 @@ def _verify_password(password: str, stored: str) -> bool:
     return False
 
 
+def _hash_password(password: str) -> str:
+    return _make_pw_hash(password)
+
+
+async def _update_user_password(email: str, password: str) -> None:
+    email = email.lower().strip()
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE users SET pw_hash=$1 WHERE email=$2",
+        _hash_password(password),
+        email,
+    )
+
+
 def _needs_rehash(stored: str) -> bool:
     if not stored.startswith("$argon2"):
         return True
@@ -247,8 +261,19 @@ async def _seed_demo() -> None:
     exists = await pool.fetchval(
         "SELECT 1 FROM users WHERE email=$1", "demo@fluxswarm.ai"
     )
+    pw = os.environ.get("FLUXSWARM_DEMO_PASSWORD")
     if not exists:
-        await _create_user("demo@fluxswarm.ai", "Demo User", "demo1234", None)
+        # Never a public constant: operator override or a fresh random token.
+        pw = pw or secrets.token_urlsafe(18)
+        await _create_user("demo@fluxswarm.ai", "Demo User", pw, None)
+    elif pw:
+        # Deterministic test sandboxes pin the demo password via env; re-pin the
+        # account so a prior random seed cannot strand logins.
+        current = await pool.fetchval(
+            "SELECT pw_hash FROM users WHERE email=$1", "demo@fluxswarm.ai"
+        )
+        if current and current != _hash_password(pw):
+            await _update_user_password("demo@fluxswarm.ai", pw)
 
 
 def seed_demo() -> None:
@@ -273,7 +298,7 @@ async def _create_user(email: str, name: str, password: str, ref_code: str | Non
             int(time.time()),
         )
     except asyncpg.UniqueViolationError:
-        raise ValueError("البريد مسجّل مسبقاً")
+        raise ValueError("This email is already registered")
     if ref_code:
         await pool.execute(
             "INSERT INTO referrals (referrer_code,referred_email,rewarded,created_at) "
@@ -473,7 +498,7 @@ def reward_referrer_once(referred_email: str) -> bool:
 
 async def _upgrade_plan(user_id: int, plan: str) -> None:
     if plan not in PLANS:
-        raise ValueError("باقة غير صالحة")
+        raise ValueError("Invalid plan")
     pool = await get_pool()
     current = await pool.fetchval("SELECT credits FROM users WHERE id=$1", user_id) or 0
     new_credits = max(current, PLANS[plan]["credits"])

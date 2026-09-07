@@ -32,6 +32,9 @@ _SANDBOX = {
     "FLUXSWARM_PAYMENT_PROVIDER": "paddle",
     "FLUXSWARM_PADDLE_MOCK": "1",
     "PADDLE_WEBHOOK_SECRET": "sandbox-webhook-secret",
+    # Pin the demo seed password so _login() can authenticate the seeded
+    # demo user deterministically (seed_demo reads this env).
+    "FLUXSWARM_DEMO_PASSWORD": "demo1234",
 }
 
 
@@ -45,6 +48,10 @@ def _sandbox_env():
             os.environ[k] = v
     os.environ.pop("PADDLE_API_KEY", None)
     os.environ.pop("PADDLE_API_BASE", None)
+    # The demo user may already exist from a previous seed (persistent DB or an
+    # earlier FLUXSWARM_DB). Re-pin the seeded demo password after _SANDBOX is
+    # applied so _login() is deterministic regardless of when db was imported.
+    db.seed_demo()
     yield
     # restore
     for k, v in saved.items():
@@ -76,7 +83,12 @@ def _secret() -> str:
 
 
 def _login() -> str:
-    r = client.post("/api/auth/login", json={"email": "demo@fluxswarm.ai", "password": "demo1234"})
+    # The demo seed password is operator-supplied or random (see db.seed_demo);
+    # tests pin it via env (part of _SANDBOX) so a hard-coded guess can never
+    # be the production credential.
+    pw = os.environ.get("FLUXSWARM_DEMO_PASSWORD")
+    assert pw, "FLUXSWARM_DEMO_PASSWORD must be set for demo login"
+    r = client.post("/api/auth/login", json={"email": "demo@fluxswarm.ai", "password": pw})
     assert r.status_code == 200, r.text
     return r.json()["token"]
 

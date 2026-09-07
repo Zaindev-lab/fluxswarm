@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from pathlib import Path
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
@@ -22,8 +23,11 @@ import db
 import hermes_client as hc
 
 # Token: reuse the one already present in Hermes .env (loaded automatically below).
+_HERMES_HOME = os.environ.get("HERMES_HOME") or str(hc.HERMES_HOME)
+
+
 def _load_hermes_env():
-    p = os.path.join("C:/Users/DELL/AppData/Local/hermes", ".env")
+    p = Path(_HERMES_HOME) / ".env"
     if os.path.exists(p):
         for line in open(p, encoding="utf-8", errors="ignore"):
             line = line.strip()
@@ -32,6 +36,7 @@ def _load_hermes_env():
             k, v = line.split("=", 1)
             k, v = k.strip(), v.strip().strip('"').strip("'")
             os.environ.setdefault(k, v)
+
 
 _load_hermes_env()
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("BOT_TOKEN")
@@ -43,16 +48,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user:
         plan = db.PLANS.get(user["plan"], db.PLANS["demo"])
         await update.message.reply_text(
-            f"⚡ أهلاً {user['name']}!\n\n"
-            f"حسابك مربوط بالبوت (باقة {plan['name']}: {user['credits']} رصيد).\n"
-            "أرسل هدف بناء وسيُطلق سرب الوكلاء بحسابك مع خصم نقطة من الرصيد."
+            f"⚡ Welcome {user['name']}!\n\n"
+            f"Your account is linked to this bot ({plan['name']} plan, "
+            f"{user['credits']} credits left).\n"
+            "Send a build goal and the agent squad will launch on your account, "
+            "costing 1 credit."
         )
         return
     await update.message.reply_text(
-        "⚡ أهلاً بك في FluxSwarm!\n\n"
-        "لربط حسابك أولاً: سجّل الدخول في الموقع ← لوحة التحكم ← «ربط تيليغرام» ←"
-        " سيظهر رمز مرّره هنا عبر /link <رمز>.\n"
-        "بدون ربط يعمل البوت بوضع تجريبي مجاني."
+        "⚡ Welcome to FluxSwarm!\n\n"
+        "Link your account first: log in on the website → Dashboard → "
+        "'Link Telegram' → paste the code here via /link <code>.\n"
+        "Without linking, the bot runs in a free trial mode."
     )
 
 
@@ -61,19 +68,19 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat.id
     if not code:
         await update.message.reply_text(
-            "أرسل الرمز هكذا:\n/link 4F8A2C\n"
-            "الرمز تجده في لوحة التحكم ← «ربط تيليغرام» (صالح 10 دقائق)."
+            "Send the code like this:\n/link 4F8A2C\n"
+            "You will find it in the Dashboard under 'Link Telegram' (valid 10 minutes)."
         )
         return
     user = db.consume_telegram_link_code(code, chat)
     if not user:
-        await update.message.reply_text("❌ رمز غير صالح أو منتهٍ أو مستخدم مسبقًا. اطلب رمزًا جديدًا من لوحة التحكم.")
+        await update.message.reply_text("❌ The code is invalid, expired or already used. Request a new one from the Dashboard.")
         return
     audit.audit("telegram.link", uid=user["id"], telegram_chat_id=chat, outcome="ok")
     plan = db.PLANS.get(user["plan"], db.PLANS["demo"])
     await update.message.reply_text(
-        f"✅ تم ربط الدردشة بحساب {user['name']} (باقة {plan['name']}).\n"
-        "أرسل هدفًا الآن وسيُطلق السرب بحسابك."
+        f"✅ Chat linked to {user['name']} ({plan['name']} plan).\n"
+        "Send a goal now and the squad will launch on your account."
     )
 
 
@@ -83,22 +90,22 @@ async def _run_for_user(update: Update, context: ContextTypes.DEFAULT_TYPE, chat
     user = db.get_user_by_telegram_chat(chat)
     if not user:
         await update.message.reply_text(
-            "أرسل الخطة هكذا أو اربط حسابك أولاً عبر /link <رمز>."
+            "Send a goal like that, or link your account first via /link <code>."
         )
         return
     plan = db.PLANS.get(user["plan"], db.PLANS["demo"])
     if not db.deduct_credit(user["id"]):
         await update.message.reply_text(
-            f"❌ لا رصيد كافٍ في حسابك (الرصيد المتبقي {db.get_user_credits(user['id'])}).\n"
-            "اشترك أو اشترِ اعتمادات من الموقع للاستمرار."
+            f"❌ Not enough credits in your account ({db.get_user_credits(user['id'])} left).\n"
+            "Subscribe or buy credits on the website to continue."
         )
         return
     slug = f"u{user['id']}-tg-{int(time.time())}"
     db.add_project(user["id"], slug, goal[:60], goal)
     audit.audit("telegram.goal", uid=user["id"], telegram_chat_id=chat, goal=goal[:500], outcome="ok")
     await update.message.reply_text(
-        f"🚀 تم استلام الهدف — السرب ينطلق بحسابك (باقة {plan['name']}).\n"
-        f"الرصيد بعد الخصم: {db.get_user_credits(user['id'])}"
+        f"🚀 Goal received — the squad is launching on your account ({plan['name']} plan).\n"
+        f"Credit balance after deduction: {db.get_user_credits(user['id'])}"
     )
     try:
         hc.ensure_board(slug)
@@ -107,12 +114,12 @@ async def _run_for_user(update: Update, context: ContextTypes.DEFAULT_TYPE, chat
     except Exception as e:
         db.add_credit(user["id"], 1)  # do not charge for a failed launch
         audit.audit("telegram.goal", uid=user["id"], telegram_chat_id=chat, goal=goal[:500], outcome="failed")
-        await update.message.reply_text(f"❌ خطأ عند الإطلاق (ردّت نقطة الرصيد): {e}")
+        await update.message.reply_text(f"❌ Launch failed (credit refunded): {e}")
         return
     await update.message.reply_text(
-        f"✅ السرب يعمل على المجلس {slug}\n"
-        f"• عمال: {len(swarm.worker_ids)}\n• مُراجع + مُركّب بانتظار المخرجات.\n"
-        "سأرسل تحديثاً عند الاكتمال."
+        f"✅ Squad running on board {slug}\n"
+        f"• Workers: {len(swarm.worker_ids)}\n• Reviewer + synthesizer waiting on outputs.\n"
+        "I will send an update when it completes."
     )
     # Poll the board and notify on completion.
     for _ in range(60):  # up to ~10 min
@@ -124,9 +131,9 @@ async def _run_for_user(update: Update, context: ContextTypes.DEFAULT_TYPE, chat
         done = sum(1 for t in tasks if t.get("state") == "done")
         if done >= len(tasks):
             summary = "\n".join(f"• {t['assignee']}: {t['state']}" for t in tasks)
-            await context.bot.send_message(chat, f"🏁 اكتمل السرب!\n\n{summary}")
+            await context.bot.send_message(chat, f"🏁 Squad completed!\n\n{summary}")
             return
-    await context.bot.send_message(chat, "⏳ لا يزال السرب يعمل في الخلفية. تحقّق من لوحة FluxSwarm.")
+    await context.bot.send_message(chat, "⏳ The squad is still running in the background. Check the FluxSwarm dashboard.")
 
 
 async def handle_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -139,18 +146,18 @@ async def handle_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     # Anonymous mode: fully free, ad-hoc board (no account, no credits).
     slug = f"tg-{chat}-{int(time.time())}"
-    await update.message.reply_text("🚀 تم استلام الهدف — جارٍ إطلاق سرب الوكلاء (وضع تجريبي)...")
+    await update.message.reply_text("🚀 Goal received — launching the agent squad (trial mode)...")
     try:
         hc.ensure_board(slug)
         swarm = hc.launch_swarm(slug, goal)
         hc.dispatch(slug, max_spawn=8)
     except Exception as e:
-        await update.message.reply_text(f"❌ خطأ عند الإطلاق: {e}")
+        await update.message.reply_text(f"❌ Launch failed: {e}")
         return
     await update.message.reply_text(
-        f"✅ السرب يعمل على المجلس {slug}\n"
-        f"• عمال: {len(swarm.worker_ids)}\n• مُراجع + مُركّب بانتظار المخرجات.\n"
-        "سأرسل تحديثاً عند الاكتمال."
+        f"✅ Squad running on board {slug}\n"
+        f"• Workers: {len(swarm.worker_ids)}\n• Reviewer + synthesizer waiting on outputs.\n"
+        "I will send an update when it completes."
     )
     # Poll the board and notify on completion.
     for _ in range(60):  # up to ~10 min
@@ -162,9 +169,9 @@ async def handle_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         done = sum(1 for t in tasks if t.get("state") == "done")
         if done >= len(tasks):
             summary = "\n".join(f"• {t['assignee']}: {t['state']}" for t in tasks)
-            await context.bot.send_message(chat, f"🏁 اكتمل السرب!\n\n{summary}")
+            await context.bot.send_message(chat, f"🏁 Squad completed!\n\n{summary}")
             return
-    await context.bot.send_message(chat, "⏳ لا يزال السرب يعمل في الخلفية. تحقّق من لوحة FluxSwarm.")
+    await context.bot.send_message(chat, "⏳ The squad is still running in the background. Check the FluxSwarm dashboard.")
 
 
 def main():

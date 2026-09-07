@@ -289,15 +289,21 @@ class TestRuntimePinningIntact:
 
 
 class TestDemoLaunchRuntime:
-    def test_demo_launch_uses_operator_runtime(self, monkeypatch):
-        """Phase 3: the public demo no longer pins a free runtime — it passes
-        provider_keys=None so the operator-configured default is used, and it
-        never references a free provider sentinel."""
+    def test_demo_launch_uses_requestscoped_runtime_pin(self, monkeypatch):
+        """P0.5: a healthy pool pick is threaded as EXPLICIT provider/model kwargs
+        (request-scoped pin) — provider_keys stays None (keys never minted) and
+        the process-global os.environ is never mutated."""
         import main as main_mod
         seen = {}
 
-        def fake_launch(board, goal, provider_keys=None):
+        def fake_pick():
+            return {"provider": "google", "model": "gemini-1.5-flash",
+                    "requires_key": False}
+
+        def fake_launch(board, goal, provider_keys=None, provider=None, model=None):
             seen["keys"] = provider_keys
+            seen["provider"] = provider
+            seen["model"] = model
             return type("S", (), {
                 "root_id": "r1", "worker_ids": [], "verifier_id": "v", "synthesizer_id": "s",
             })()
@@ -305,15 +311,39 @@ class TestDemoLaunchRuntime:
         def fake_fire(slug, plan, provider_keys=None, pid=None):
             seen["fire_k"] = provider_keys
 
+        monkeypatch.setattr(main_mod.provider_pool, "pick_demo_provider", fake_pick)
         monkeypatch.setattr(main_mod, "_client_ip", lambda request: "127.0.0.1")
         monkeypatch.setattr(main_mod.hc, "ensure_board", lambda slug: True)
         monkeypatch.setattr(main_mod.hc, "launch_swarm", fake_launch)
         monkeypatch.setattr(main_mod, "_fire_dispatch", fake_fire)
 
+        env_before = {
+            "FLUXSWARM_DEFAULT_PROVIDER": os.environ.get("FLUXSWARM_DEFAULT_PROVIDER"),
+            "FLUXSWARM_DEFAULT_MODEL": os.environ.get("FLUXSWARM_DEFAULT_MODEL"),
+        }
         resp = main_mod.api_demo_launch(None)
         assert resp["demo"] is True
         assert seen["keys"] is None
+        assert seen["provider"] == "gemini"          # resolve_provider_key("google")
+        assert seen["model"] == "gemini-1.5-flash"
         assert seen["fire_k"] is None
+        # env-flip regression guard: the demo NEVER pins the runtime via the
+        # process-global os.environ (concurrent launches would cross-pollute).
+        assert os.environ.get("FLUXSWARM_DEFAULT_PROVIDER") == env_before["FLUXSWARM_DEFAULT_PROVIDER"]
+        assert os.environ.get("FLUXSWARM_DEFAULT_MODEL") == env_before["FLUXSWARM_DEFAULT_MODEL"]
+
+    def test_demo_launch_pool_unavailable_returns_structured_body(self, monkeypatch):
+        """P0.5: exhausted pool (and no operator default) -> a structured body,
+        never a raw 500 or a mutated process env."""
+        import main as main_mod
+        monkeypatch.setattr(main_mod.provider_pool, "pick_demo_provider", lambda: None)
+        monkeypatch.setattr(main_mod, "_client_ip", lambda request: "127.0.0.1")
+        monkeypatch.setattr(main_mod.hc, "ensure_board", lambda slug: True)
+
+        resp = main_mod.api_demo_launch(None)
+        assert resp["demo"] is True
+        assert resp["error"] == "demo_provider_unavailable"
+        assert "en" in resp["message"]
 
 
 class TestVaultSecretFailFast:

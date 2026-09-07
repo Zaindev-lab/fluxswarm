@@ -333,7 +333,8 @@ def test_launch_functions_call_verifier_provisioning(monkeypatch, tmp_path):
         })()
 
     monkeypatch.setattr(hc_mod, "_run", fake_run)
-    monkeypatch.setattr(hc_mod, "_pin_runtime", lambda board, keys=None: None)
+    monkeypatch.setattr(hc_mod, "_pin_runtime",
+                        lambda board, keys=None, provider=None, model=None: None)
     # Phase 3 has no free fallback: supply an explicit BYOK runtime.
     monkeypatch.setenv("FLUXSWARM_MODEL_OPENAI", "gpt-verifier-test")
 
