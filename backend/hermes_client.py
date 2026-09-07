@@ -122,10 +122,15 @@ class ProviderConfigError(RuntimeError):
 DISPATCH_TIMEOUT_S = int(os.environ.get("FLUXSWARM_DISPATCH_TIMEOUT_S", "900"))
 
 
-def _resolve_runtime(provider_keys: Optional[dict]):
+def _resolve_runtime(provider_keys: Optional[dict], provider: Optional[str] = None,
+                     model: Optional[str] = None):
     """Return (model, provider) to pin every squad task to.
 
     Phase 3: there is NO free tier. Priority:
+      0. An explicit request-scoped pin (provider/model passed by the caller):
+         the demo path resolves a concrete healthy pool entry and passes it
+         here as kwargs — a deliberate, race-free choice that never mutates the
+         process-global ``os.environ``.
       1. User BYOK key -> use that provider's model (Claude/GPT/...). The model
          itself is resolved at pin time from the operator's env overrides.
       2. Nothing supplied -> the DEPLOYMENT default: operator-configured
@@ -133,6 +138,8 @@ def _resolve_runtime(provider_keys: Optional[dict]):
          An unconfigured runtime raises ProviderConfigError — there is no
          silent fallback to a free model, in any mode.
     """
+    if provider:
+        return model, provider
     if provider_keys:
         for prov in _KEYED_PROVIDERS:
             if provider_keys.get(prov):
@@ -189,12 +196,24 @@ def _operator_model_for(provider: str) -> Optional[str]:
     return None
 
 
-def _resolve_launch_runtime(provider_keys: Optional[dict]) -> tuple[str, str]:
+def _resolve_launch_runtime(provider_keys: Optional[dict], provider: Optional[str] = None,
+                            model: Optional[str] = None) -> tuple[str, str]:
     """Resolve a concrete, pinnable (model, provider) for a launch.
 
-    BYOK providers get their model from the operator's env overrides; a launch
+    An explicit request-scoped ``provider`` (with its ``model``) is used as-is —
+    no env involvement, so concurrent launches cannot cross-pollute. BYOK
+    providers get their model from the operator's env overrides; a launch
     whose runtime cannot be pinned fails fast BEFORE any board/worker exists.
     """
+    if provider:
+        m = model or _operator_model_for(provider)
+        if not m:
+            raise ProviderConfigError(
+                f"cannot resolve a model for provider={provider!r}: set "
+                "FLUXSWARM_MODEL_<PROVIDER> or FLUXSWARM_DEFAULT_MODEL. "
+                "Refusing to fall back silently (free or paid)."
+            )
+        return m, provider
     model, provider = _resolve_runtime(provider_keys)
     if not model:
         model = _operator_model_for(provider)
@@ -468,10 +487,13 @@ def _ensure_verifier_skill() -> Path:
     return target
 
 
-def launch_swarm(board: str, goal: str, provider_keys: Optional[dict] = None) -> SwarmResult:
+def launch_swarm(board: str, goal: str, provider_keys: Optional[dict] = None,
+                 provider: Optional[str] = None, model: Optional[str] = None) -> SwarmResult:
     # Keys are passed via subprocess environment only (never written to disk).
     # Fail fast BEFORE any board/worker exists when no runtime is configured.
-    _resolve_launch_runtime(provider_keys)
+    # An explicit `provider`/`model` (demo pool pick) is honored as a
+    # request-scoped pin; not passing them falls back to BYOK/env as before.
+    _resolve_launch_runtime(provider_keys, provider, model)
     _raise_preflight()
     cleanup_profile_keys()
     # The swarm CLI hard-codes the verifier skill; make sure it resolves under
@@ -492,7 +514,7 @@ def launch_swarm(board: str, goal: str, provider_keys: Optional[dict] = None) ->
     data = json.loads(r.stdout)
     # Pin a concrete model/provider on every task so the dispatcher never
     # falls back to a keyless default that would mark the card blocked.
-    _pin_runtime(board, provider_keys)
+    _pin_runtime(board, provider_keys, provider, model)
     return SwarmResult(
         root_id=data["root_id"],
         worker_ids=data.get("worker_ids", []),
@@ -501,7 +523,8 @@ def launch_swarm(board: str, goal: str, provider_keys: Optional[dict] = None) ->
     )
 
 
-def _pin_runtime(board: str, provider_keys: Optional[dict]):
+def _pin_runtime(board: str, provider_keys: Optional[dict], provider: Optional[str] = None,
+                 model: Optional[str] = None):
     """Set --model/--provider on every squad task via `kanban set-model`.
 
     Pinning an explicit model/provider is what fixes the 'blocked' issue: the
@@ -510,13 +533,13 @@ def _pin_runtime(board: str, provider_keys: Optional[dict]):
     (operator default / Demo free / BYOK) — never a silent fallback — and any
     `set-model` failure stops the launch loudly.
     """
-    model, provider = _resolve_launch_runtime(provider_keys)
+    pinned_model, pinned_provider = _resolve_launch_runtime(provider_keys, provider, model)
     tasks = list_tasks(board)
     for t in tasks:
         tid = t.get("id")
         if not tid:
             continue
-        args = ["set-model", tid, model, "--provider", provider]
+        args = ["set-model", tid, pinned_model, "--provider", pinned_provider]
         r = _run(args, board=board, provider_keys=provider_keys, capture=True)
         if r.returncode != 0:
             detail = (r.stderr or r.stdout or "").strip()
@@ -526,13 +549,15 @@ def _pin_runtime(board: str, provider_keys: Optional[dict]):
 
 
 def launch_from_template(board: str, goal: str, agents: list[str],
-                          provider_keys: Optional[dict] = None) -> SwarmResult:
+                          provider_keys: Optional[dict] = None,
+                          provider: Optional[str] = None,
+                          model: Optional[str] = None) -> SwarmResult:
     """Launch a squad built from a marketplace template's display-name agents.
 
     Each name in `agents` is resolved via AGENT_REGISTRY to (profile, skills, role).
     """
     # Fail fast BEFORE any board/worker exists when no runtime is configured.
-    _resolve_launch_runtime(provider_keys)
+    _resolve_launch_runtime(provider_keys, provider, model)
     workers, verifier, synthesizer = [], None, None
     for name in agents:
         rec = AGENT_REGISTRY.get(name.strip())
@@ -546,7 +571,7 @@ def launch_from_template(board: str, goal: str, agents: list[str],
         elif role == "synthesizer":
             synthesizer = (prof, name, f"{name} assemble")
     if not workers:
-        raise ValueError("القالب لا يحتوي وكلاء صالحين")
+        raise ValueError("the template contains no valid agents")
     verifier = verifier or VERIFIER
     synthesizer = synthesizer or SYNTHESIZER
 
@@ -568,7 +593,7 @@ def launch_from_template(board: str, goal: str, agents: list[str],
     if r.returncode != 0:
         raise RuntimeError(f"swarm launch failed: {r.stderr}")
     data = json.loads(r.stdout)
-    _pin_runtime(board, provider_keys)
+    _pin_runtime(board, provider_keys, provider, model)
     return SwarmResult(
         root_id=data["root_id"],
         worker_ids=data.get("worker_ids", []),
@@ -1487,6 +1512,8 @@ def show_task(board: str, task_id: str) -> dict:
 
 def read_workspace(board: str) -> str:
     """Collect generated files from the board's task workspaces for review."""
+    if not _SAFE_SLUG_RE.match(board):
+        raise ValueError(f"unsafe board slug: {board!r}")
     ws_root = Path(HERMES_HOME) / "kanban" / "boards" / board / "workspaces"
     out = []
     try:

@@ -11,7 +11,11 @@
 #      * /app/hermes_home/memories-> agent memories
 #      * /app/hermes_home/state   -> runtime state DBs
 #      * /app/hermes_home/pairing -> pairing records
-#    The ECC profiles/skills/config seed stays in the image layer (static).
+#    The ECC profiles/skills/config seed stays in the image layer (static);
+#    the base HERMES_HOME itself is a named volume (Docker copies the baked
+#    seed into it on first creation) because Hermes writes session DBs and the
+#    board kanban.db/.init.lock at the ROOT of HERMES_HOME, not only in kanban/.
+#    Keep root writable via volume while read_only:true hardening stays on.
 services:
   fluxswarm:
     build:
@@ -34,14 +38,16 @@ services:
     # Hardening: explicit memory budget + least-privilege runtime. FLUXSWARM_MEM_TOTAL_MB /
     # MEMORY_GUARD_MB_PER_WORKER below derive the backend-side concurrency cap
     # (MAX_IN_PROGRESS) and MUST stay in sync with `deploy.resources.limits.memory`.
+    # P0.1: Render free tier is 512MB — an 8G/4G budget gets OOM-killed on deploy.
+    #   512M limit -> MAX_IN_PROGRESS = max(2, 450//384) = 2 workers max.
     deploy:
       resources:
         limits:
-          cpus: '4.0'
-          memory: 8G
+          cpus: '1.0'
+          memory: 512M
         reservations:
-          cpus: '2.0'
-          memory: 4G
+          cpus: '0.25'
+          memory: 128M
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -57,7 +63,8 @@ services:
       FLUXSWARM_HERMES_BIN: /usr/local/bin/hermes
       FLUXSWARM_DEMO_MODE: "1"
       # Session 3: memory-derived swarm concurrency + reaper tuning + dispatch window.
-      FLUXSWARM_MEM_TOTAL_MB: "8192"
+      # P0.1: 450MB syncs with the 512M cgroup limit above (MAX_IN_PROGRESS=2).
+      FLUXSWARM_MEM_TOTAL_MB: "450"
       MEMORY_GUARD_MB_PER_WORKER: "384"
       FLUXSWARM_REAPER_MAX_SPAWN: "16"
       FLUXSWARM_REAPER_ENABLED: "1"
@@ -71,6 +78,7 @@ services:
       # No REDIS_URL => in-process rate limiting (single worker). Self-contained.
     volumes:
       - fluxswarm_data:/app/backend/data
+      - hermes_home:/app/hermes_home
       - hermes_kanban:/app/hermes_home/kanban
       - hermes_logs:/app/hermes_home/logs
       - hermes_memories:/app/hermes_home/memories
@@ -80,6 +88,7 @@ services:
 
 volumes:
   fluxswarm_data:
+  hermes_home:
   hermes_kanban:
   hermes_logs:
   hermes_memories:

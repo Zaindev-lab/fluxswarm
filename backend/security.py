@@ -19,8 +19,11 @@ from pathlib import Path
 
 import hermes_client as hc
 
-HERMES_BIN = Path("C:/Users/DELL/AppData/Local/hermes/bin/hermes.exe")
-HERMES_HOME = "C:/Users/DELL/AppData/Local/hermes"
+# Canonical runtime paths come from hermes_client (env-overridable via
+# FLUXSWARM_HERMES_BIN / HERMES_HOME), never hardcoded developer-machine paths:
+# AgentShield must resolve the REAL hermes runtime on Linux/Docker/Render too.
+HERMES_BIN = hc.HERMES_BIN
+HERMES_HOME = hc.HERMES_HOME
 
 # Patterns that, if present in generated code, are flagged immediately.
 LEAK_PATTERNS = {

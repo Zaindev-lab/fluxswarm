@@ -81,10 +81,15 @@ WORKDIR /app/backend
 
 ENV FLUXSWARM_HERMES_BIN=/usr/local/bin/hermes \
     FLUXSWARM_DEMO_MODE=1 \
-    FLUXSWARM_DEFAULT_PROVIDER=openrouter \
-    FLUXSWARM_DEFAULT_MODEL=z-ai/glm-5.2:free \
     REDIS_URL= \
     FLUXSWARM_PAYMENTS=0
+
+# P0.0: deliberately NO baked FLUXSWARM_DEFAULT_PROVIDER / *_MODEL. Baking a
+# provider (OpenRouter free or otherwise) as the image default defeats the
+# "no silent free tier / no operator default" rule (provider.py Phase 3): the
+# free-tier demo surface picks a healthy provider from provider_pool at launch,
+# and production must supply a paid key via the environment (envguard). An
+# operator who explicitly wants a default injects it in the deployment env.
 
 # The platform may provide PORT; the entrypoint binds 0.0.0.0:$PORT.
 ENV PORT=8787
