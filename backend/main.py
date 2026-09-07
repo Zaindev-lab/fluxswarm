@@ -989,30 +989,26 @@ def api_demo_launch(request: Request, goal: str = "Build a sample FastAPI notes 
     goal = sanitize_goal(goal)
     slug = "flux-demo-" + str(int(time.time()))
     hc.ensure_board(slug)
-    # Session 2: pick a healthy demo provider (free pool) first; fall back to
-    # the operator-configured runtime. The pool result is applied as an
-    # ephemeral launch-pin on this request's process env, exactly like an
-    # operator default would be, then restored.
+    # Session 2 + P0.5: pick a healthy demo provider (free pool) and thread it
+    # as an EXPLICIT request-scoped pin (provider/model kwargs). The pool is
+    # never applied by mutating the process-global os.environ — concurrent
+    # demo launches otherwise race and can dispatch each other's credentials
+    # and models. When the pool is exhausted and no operator default exists,
+    # fail with a structured, user-facing body (never a raw 500).
     pool_pick = provider_pool.pick_demo_provider()
-    prev_provider = os.environ.get("FLUXSWARM_DEFAULT_PROVIDER")
-    prev_model = os.environ.get("FLUXSWARM_DEFAULT_MODEL")
-    if pool_pick:
-        os.environ["FLUXSWARM_DEFAULT_PROVIDER"] = provider_pool.resolve_provider_key(pool_pick["provider"])
-        os.environ["FLUXSWARM_DEFAULT_MODEL"] = pool_pick["model"]
-    try:
-        swarm = hc.launch_swarm(slug, goal, provider_keys=None)
-        _fire_dispatch(slug, plan, None)
-    finally:
-        if pool_pick:
-            for name, saved in (("FLUXSWARM_DEFAULT_PROVIDER", prev_provider),
-                                ("FLUXSWARM_DEFAULT_MODEL", prev_model)):
-                if saved is None:
-                    os.environ.pop(name, None)
-                else:
-                    os.environ[name] = saved
+    if not pool_pick:
+        return {
+            "error": "demo_provider_unavailable",
+            "message": {"en": "All demo AI providers are temporarily unavailable — please try again in a moment."},
+            "demo": True,
+        }
+    pool_provider = provider_pool.resolve_provider_key(pool_pick["provider"])
+    pool_model = pool_pick["model"]
+    swarm = hc.launch_swarm(slug, goal, provider_keys=None,
+                            provider=pool_provider, model=pool_model)
+    _fire_dispatch(slug, plan, None)
     audit.audit("demo.launch", uid=demo["id"] if demo else None, ip="internal",
-                outcome="ok", slug=slug, plan=plan,
-                provider=pool_pick["provider"] if pool_pick else None)
+                outcome="ok", slug=slug, plan=plan, provider=pool_provider)
     return {"slug": slug, "root_id": swarm.root_id, "demo": True}
 
 
@@ -1369,12 +1365,12 @@ def api_create_project(payload: ProjectCreate, request: Request,
     try:
         swarm = hc.launch_swarm(slug, goal, provider_keys=_user_provider_keys(user))
     except Exception as e:
-        # refund credit on failure
-        import sqlite3
-        c = db._conn()
-        c.execute("UPDATE users SET credits = credits + 1 WHERE id=?", (user["id"],))
-        c.commit()
-        c.close()
+        # Refund the launch credit via the idempotent, audited helper — never
+        # by ad-hoc SQL (double-refund risk) and never leaking internal detail.
+        audit.audit("project.launch_failed", uid=user["id"], email=user["email"],
+                    ip=_client_ip(request), slug=slug, reason=str(e)[:300],
+                    outcome="error")
+        db.refund_launch_credit(user["id"])
         raise HTTPException(status_code=500, detail="Failed to launch swarm")
     pid = db.add_project(user["id"], slug, payload.name or "Project", goal)
     _fire_dispatch(slug, user["plan"], _user_provider_keys(user), pid=pid)
@@ -2033,22 +2029,34 @@ def cookies_page_en():
 
 
 # ---------- marketing: public product pages ----------
-_MARKET_CSS = """body{font-family:ui-sans-serif,system-ui,"Segoe UI",Tahoma;margin:0;background:#0a0c11;color:#eef1f6;line-height:1.6}
+_MARKET_CSS = """@font-face{font-family:'Inter';font-weight:400;font-display:swap;src:url('/static/fonts/Inter-400.woff2') format('woff2')}
+@font-face{font-family:'Inter';font-weight:600;font-display:swap;src:url('/static/fonts/Inter-600.woff2') format('woff2')}
+@font-face{font-family:'Inter';font-weight:700;font-display:swap;src:url('/static/fonts/Inter-700.woff2') format('woff2')}
+@font-face{font-family:'Inter';font-weight:800;font-display:swap;src:url('/static/fonts/Inter-800.woff2') format('woff2')}
+@font-face{font-family:'Space Grotesk';font-weight:700;font-display:swap;src:url('/static/fonts/SpaceGrotesk-700.woff2') format('woff2')}
+body{font-family:'Inter',ui-sans-serif,system-ui,"Segoe UI",Tahoma;margin:0;background:#0b0f1a;color:#eef1fb;line-height:1.6}
 .wrap{max-width:980px;margin:0 auto;padding:28px 20px 60px}
-.top{display:flex;align-items:center;gap:14px;padding:14px 20px;border-bottom:1px solid #232837;background:#0e1117}
-.top .logo{font-weight:800;background:linear-gradient(90deg,#6d7cfa,#9d8bff);-webkit-background-clip:text;background-clip:text;color:transparent;font-size:19px}
-.top nav{margin-left:auto;display:flex;gap:16px} .top nav a{color:#98a0af;text-decoration:none;font-size:14px} .top nav a:hover{color:#6d7cfa}
-h1{font-size:30px;margin:18px 0 6px;letter-spacing:-.3px} h2{font-size:20px;margin:26px 0 8px;color:#cdd4e2}
-p{color:#98a0af} a{color:#6d7cfa} li{color:#98a0af;margin:5px 0}
-.plans{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin:20px 0}
-.pl{background:#0e1117;border:1px solid #232837;border-radius:14px;padding:18px}
-.pl.hot{border-color:#6d7cfa;box-shadow:0 0 0 1px #6d7cfa}
-.pl .n{font-size:17px;font-weight:800} .pl .p{font-size:24px;font-weight:800;margin:6px 0}
-.pl .p small{color:#98a0af;font-weight:400;font-size:13px} .pl ul{list-style:none;padding:0;margin:8px 0;font-size:13px}
-.cmp{width:100%;border-collapse:collapse;font-size:14px} .cmp th,.cmp td{border:1px solid #232837;padding:10px 12px;text-align:left}
-.cmp th{color:#cdd4e2} .cmp td{color:#98a0af}
-.foot{border-top:1px solid #232837;padding:16px 0;font-size:13px;color:#7a8699}
-.foot a{color:#6d7cfa}"""
+.top{position:sticky;top:0;z-index:40;display:flex;align-items:center;gap:14px;padding:14px 20px;border-bottom:1px solid #25304a;background:rgba(15,20,36,.82);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
+.top .logo{font-weight:800;background:linear-gradient(90deg,#22d3ee,#7c3aed);-webkit-background-clip:text;background-clip:text;color:transparent;font-size:19px}
+.top nav{margin-left:auto;display:flex;gap:16px} .top nav a{color:#8b96b3;text-decoration:none;font-size:14px} .top nav a:hover{color:#22d3ee}
+h1{font-family:'Space Grotesk','Inter',sans-serif;font-size:32px;margin:22px 0 8px;letter-spacing:-.5px} h2{font-size:20px;margin:26px 0 8px;color:#cdd4e2}
+p{color:#8b96b3} a{color:#22d3ee} li{color:#8b96b3;margin:5px 0}
+.plans{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin:22px 0}
+.pl{position:relative;background:linear-gradient(180deg,#141a2c,#0f1424);border:1px solid #25304a;border-radius:16px;padding:20px}
+.pl.hot{border-color:#22d3ee;box-shadow:0 0 0 1px #22d3ee,0 16px 40px rgba(34,211,238,.10)}
+.pl .n{font-size:17px;font-weight:800} .pl .p{font-size:28px;font-weight:800;margin:8px 0;font-family:'Space Grotesk','Inter',sans-serif}
+.pl .p small{color:#8b96b3;font-weight:400;font-size:12px} .pl ul{list-style:none;padding:0;margin:8px 0;font-size:13px}
+.cmp{width:100%;border-collapse:collapse;font-size:14px} .cmp th,.cmp td{border:1px solid #25304a;padding:10px 12px;text-align:left}
+.cmp th{color:#cdd4e2} .cmp td{color:#8b96b3}
+.foot{border-top:1px solid #25304a;padding:16px 0;font-size:13px;color:#7a8699}
+.foot a{color:#22d3ee}
+.pill{display:inline-block;font-size:11px;letter-spacing:1px;font-weight:800;padding:4px 12px;border-radius:999px;background:linear-gradient(92deg,#22d3ee,#7c3aed);color:#0b0f1a;margin-bottom:12px}
+details.faq{border:1px solid #25304a;border-radius:12px;background:#0f1424;padding:14px 16px;margin-top:10px}
+details.faq summary{cursor:pointer;font-weight:700;font-size:14px;list-style:none;color:#eef1fb}
+details.faq summary::-webkit-details-marker{display:none}
+details.faq summary::after{content:"+";float:right;color:#22d3ee;font-weight:800}
+details.faq[open] summary::after{content:"–"}
+details.faq p{margin:8px 0 0;color:#8b96b3}"""
 
 _MARKET_BASE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -2068,23 +2076,32 @@ def pricing_page():
     rows = "".join(
         f'<div class="pl {"hot" if p["name"].lower() == "pro" else ""}">'
         f'<div class="n">{p["name"]}</div>'
-        f'<div class="p">${p["price"]}<small> /once (credit pack)</small></div>'
-        f'<ul><li>{p["credits"]} credits · 1 credit = 1 swarm launch</li>'
-        f'<li>{p["parallel"]}-agent parallel cap</li>'
-        f'<li>{p["desc"]}</li></ul></div>'
+        f'<div class="p">${p["price"]}<small> per credit pack</small></div>'
+        f'<ul><li>✓ {p["credits"]} credits · 1 credit = 1 launch</li>'
+        f'<li>✓ up to {p["parallel"]} parallel agents</li>'
+        f'<li>✓ {p["desc"]}</li></ul></div>'
         for p in plans)
-    body = f"""<h1>Simple pricing, no token meters</h1>
-<p>Every launch costs exactly <strong>1 credit</strong>. Bring your own AI key and
+    body = f"""<p class="pill">1 CREDIT = 1 LAUNCH</p>
+<h1>Prepaid packs — no monthly fee</h1>
+<p>Every launch costs exactly <strong>1 credit</strong> — no token meters, no monthly
+fee. Bring your own AI key and
 you pay only your provider's token rate — FluxSwarm charges the flat 1-credit
-coordination fee per launched project and nothing else. No key yet? The edge
-default runs the squad on the operator-configured model (deployment-wide),
-and the public demo uses the network's configured runtime.</p>
+coordination fee per launched project and nothing else. Credits never expire, and a
+launch that fails before any work starts is refunded automatically.</p>
 <div class="plans">{rows}</div>
-<p>Credits are prepaid and never expire; a failed launch is refunded automatically.
-Payments are processed by Paddle (merchant of record), which handles sales tax and
-VAT remittance. A merchant refund downgrades you to Demo and keeps your current
-balance. See the <a href="/refund-en">refund policy</a>. Prices are shown in USD;
-GBP pricing is applied by Paddle at checkout for UK customers.</p>"""
+<h2>Anything else?</h2>
+<details class="faq" open><summary>Can I try before paying?</summary><p>Yes — the Demo
+plan starts with 3 free credits, no card required, and there is a public demo board.</p></details>
+<details class="faq"><summary>How are credits used?</summary><p>One credit = one launched
+project = one live squad board. With BYOK you pay your provider's token rate directly;
+FluxSwarm still only charges the single credit.</p></details>
+<details class="faq"><summary>Do credits expire?</summary><p>No. Credits are prepaid and
+never expire.</p></details>
+<details class="faq"><summary>What about refunds?</summary><p>Payments are processed by
+Paddle (merchant of record), which handles sales tax and VAT remittance. A merchant
+refund downgrades you to Demo and keeps your current balance. See the
+<a href="/refund-en">refund policy</a>. Prices are shown in USD; GBP pricing is applied
+by Paddle at checkout for UK customers.</p></details>"""
     return _MARKET_BASE.format(title="Pricing — FluxSwarm", desc="1 credit per launch, BYOK AI builders", css=_MARKET_CSS, body=body)
 
 
@@ -2530,8 +2547,8 @@ def _admt_notice_view(lang: str) -> dict:
 def admt_notice_page(request: Request):
     return templates.TemplateResponse(
         request=request, name="admt_notice.html",
-        context={"title": "ADMT Notice — FluxSwarm", "lang": "ar",
-                 "notice": _admt_notice_view("ar"), "api_base": "",
+        context={"title": "ADMT Notice — FluxSwarm", "lang": "en",
+                 "notice": _admt_notice_view("en"), "api_base": "",
                  "csp_nonce": request.state.csp_nonce})
 
 
@@ -2765,7 +2782,11 @@ def api_buy_template(tid: int, payload: BuyIn, request: Request,
         launched = True
     except Exception as e:
         launched = False
-        launch_error = str(e)
+        # Never leak internal paths/versions/credential detail to the client
+        # (P0.4): map to a stable generic category; the full detail is audited.
+        audit.audit("template.launch_failed", uid=user["id"], email=user["email"],
+                    slug=slug, tid=tid, reason=str(e)[:300], outcome="error")
+        launch_error = "provider_unavailable"
         # The purchase already debited the buyer (and paid the author). If the
         # squad failed to launch, refund so the user isn't charged for nothing.
         try:
@@ -2838,13 +2859,16 @@ async def ws_board(websocket: WebSocket, slug: str):
     _SUBS.setdefault(slug, set()).add(websocket)
     try:
         try:
-            await websocket.send_json({"type": "snapshot", "tasks": hc.list_tasks(slug)})
+            # list_tasks shells out to the hermes CLI (subprocess): run it on a
+            # worker thread so it never blocks the event loop for other clients.
+            await websocket.send_json({"type": "snapshot",
+                                       "tasks": await asyncio.to_thread(hc.list_tasks, slug)})
         except Exception:
             pass
         while True:
             await asyncio.sleep(4)
             try:
-                tasks = hc.list_tasks(slug)
+                tasks = await asyncio.to_thread(hc.list_tasks, slug)
                 await websocket.send_json({"type": "update", "tasks": tasks})
             except Exception:
                 await websocket.send_json({"type": "error", "detail": "board poll failed"})
