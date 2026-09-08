@@ -808,6 +808,20 @@ def has_provider_agreement(user_id: int, provider: str) -> bool:
     return _await(_has_provider_agreement(user_id, provider))
 
 
+async def _provider_agreements_summary() -> list[dict]:
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT pa.provider, pa.agreed_at, pa.version, u.email "
+        "FROM provider_agreements pa JOIN users u ON u.id = pa.user_id "
+        "ORDER BY pa.agreed_at DESC"
+    )
+    return [dict(r) for r in rows]
+
+
+def provider_agreements_summary() -> list[dict]:
+    return _await(_provider_agreements_summary())
+
+
 # ---------- CCPA/CPRA ADMT (Phase 5) ----------
 
 async def _record_admt_notice_ack(user_id: int) -> int:
@@ -1124,9 +1138,23 @@ def _conn():
     couple of low-level blocks. With asyncpg we cannot expose a real DB-API
     cursor, so we return a minimal facade that dispatches to the pool; it only
     supports the ``execute``->``fetchone``/``fetchall`` pattern used in
-    :mod:`main`. ``.close()`` is a no-op (pool-managed).
+    :mod:`main`. ``?`` positional placeholders (SQLite style) are translated to
+    ``$1, $2, ...`` so the same SQL strings work under both engines.
+    ``.close()`` is a no-op (pool-managed).
     """
     return _ConnFacade()
+
+
+def _translate_placeholders(sql: str, params):
+    """Rewrite SQLite-style ``?`` positional params to asyncpg ``$1..$n``."""
+    if "?" not in sql or not params:
+        return sql, params
+    parts = sql.split("?")
+    out = [parts[0]]
+    for i, chunk in enumerate(parts[1:], start=1):
+        out.append(f"${i}")
+        out.append(chunk)
+    return "".join(out), params
 
 
 class _ConnFacade:
@@ -1141,8 +1169,7 @@ class _ConnFacade:
 
 class _QueryResult:
     def __init__(self, sql: str, params):
-        self._sql = sql
-        self._params = params
+        self._sql, self._params = _translate_placeholders(sql, params)
 
     def fetchone(self):
         return _await(self._fetchrow())

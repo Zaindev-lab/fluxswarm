@@ -35,7 +35,13 @@ import envguard
 envguard.assert_production_secrets()
 
 import auth as auth_mod
-import db
+# Persistence backend: PostgreSQL (Neon) when FLUXSWARM_DATABASE_URL is set,
+# otherwise the local SQLite fallback (demo/dev). db_postgres mirrors db.py's
+# API surface so the rest of main.py is engine-agnostic.
+if (os.getenv("FLUXSWARM_DATABASE_URL") or "").startswith("postgres"):
+    import db_postgres as db
+else:
+    import db
 import hermes_client as hc
 import notify
 import serverlock
@@ -52,6 +58,18 @@ templates = Jinja2Templates(directory=str(BASE / "templates"))
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    # Ensure the data layer is ready before serving traffic: SQLite creates its
+    # schema lazily, and the PostgreSQL path must apply Alembic migrations +
+    # seed the demo account here (db.py does it at import; db_postgres defers
+    # to a running event loop for the async pool).
+    try:
+        db.init_db()
+    except Exception as e:  # never take the app down on a DB hiccup at boot
+        print(f"[lifespan] db.init_db() failed: {e}", flush=True)
+    try:
+        db.seed_demo()
+    except Exception as e:
+        print(f"[lifespan] db.seed_demo() failed: {e}", flush=True)
     # Start the persistent reconciliation reaper once the server is up (NOT at
     # import, so a pytest import of this module never launches the loop).
     threading.Thread(target=_reaper_loop, daemon=True).start()
