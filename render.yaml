@@ -77,6 +77,11 @@ services:
         value: support@fluxswarm.ai
       - key: FLUXSWARM_PUBLIC_BASE_URL
         sync: false
+      # Demo account password used by seed_demo() to re-pin the demo login
+      # (demo@fluxswarm.ai). Set via dashboard/Render API so it never ships in
+      # the blueprint; sync:false guards it from blueprint syncs.
+      - key: FLUXSWARM_DEMO_PASSWORD
+        sync: false
       - key: FLUXSWARM_RESEND_API_KEY
         sync: false
       - key: FLUXSWARM_ANALYTICS_DOMAIN
