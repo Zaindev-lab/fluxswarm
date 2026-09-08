@@ -65,7 +65,8 @@ async def _lifespan(app: FastAPI):
     try:
         db.init_db()
     except Exception as e:  # never take the app down on a DB hiccup at boot
-        print(f"[lifespan] db.init_db() failed: {e}", flush=True)
+        import traceback
+        print(f"[lifespan] db.init_db() failed: {e}\n{traceback.format_exc()}", flush=True)
     try:
         db.seed_demo()
     except Exception as e:
