@@ -29,11 +29,21 @@ import provider_guard as guard
 # Provider -> probe key in provider.py's endpoint table (name drift handled here).
 _PROBE_KEY = {"google": "gemini"}
 
+# Demo free-tier pool, verified live BEFORE listing (2026-09-08):
+#   - nvidia/nemotron-3.5-lightning:free is the ONLY OpenRouter :free chat model
+#     that returned a real completion (HTTP 200, ~1.8s) on that date. Slots that
+#     used to work are dead today: google/gemini-flash-1.5:free -> 404 "No
+#     endpoints found", meta-llama/llama-3.1-8b-instruct:free -> 404 "only paid".
+#   - The legacy google/gemini-1.5-flash slot refused launches silently because
+#     it was pickable WITHOUT a Google credential (requires_key was false) and
+#     then died with AUTH_ERROR on every call. It now requires GEMINI_API_KEY
+#     (Phase G canonical name) so it only counts when it can actually run.
+# Free-tier availability FLUCTUATES; this pool is opportunistic capacity, not
+# guaranteed infrastructure — re-verify slots before relying on them.
 DEMO_PROVIDERS = [
-    {"provider": "google", "model": "gemini-1.5-flash", "requires_key": False},
-    {"provider": "openrouter", "model": "google/gemini-flash-1.5:free",
-     "requires_key": True, "key_env": "OPENROUTER_API_KEY"},
-    {"provider": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free",
+    {"provider": "google", "model": "gemini-1.5-flash",
+     "requires_key": True, "key_env": "GEMINI_API_KEY"},
+    {"provider": "openrouter", "model": "nvidia/nemotron-3.5-lightning:free",
      "requires_key": True, "key_env": "OPENROUTER_API_KEY"},
 ]
 
