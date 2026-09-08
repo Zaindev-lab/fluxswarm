@@ -67,6 +67,13 @@ _PROVIDER_ENV_KEYS: dict[str, str] = {
     "openrouter": "OPENROUTER_API_KEY",
 }
 
+# Phase G: Gemini credentials accept the legacy Google key name as an alias so
+# an operator who configured GOOGLE_API_KEY (instead of the canonical
+# GEMINI_API_KEY) is not silently treated as unconfigured.
+_PROVIDER_ENV_ALIASES: dict[str, tuple[str, ...]] = {
+    "gemini": ("GOOGLE_API_KEY",),
+}
+
 def check_provider_health(
     provider: str,
     model: Optional[str] = None,
@@ -106,6 +113,11 @@ def check_provider_health(
     cred = credential
     if not cred and env_key:
         cred = os.environ.get(env_key, "")
+        if not cred:
+            for alias in _PROVIDER_ENV_ALIASES.get(provider, ()):
+                cred = os.environ.get(alias, "")
+                if cred:
+                    break
     if not cred:
         return ProviderHealth(
             status=ProviderStatus.AUTH_ERROR,

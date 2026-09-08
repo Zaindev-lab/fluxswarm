@@ -172,10 +172,26 @@ def init_db():
             FOREIGN KEY(user_id) REFERENCES users(id),
             FOREIGN KEY(project_id) REFERENCES projects(id)
         );
+        CREATE TABLE IF NOT EXISTS provider_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at REAL NOT NULL,
+            day TEXT NOT NULL,
+            surface TEXT NOT NULL,
+            runtime_source TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            ok INTEGER,
+            runtime_s INTEGER,
+            tasks INTEGER,
+            slug TEXT
+        );
         CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_id);
         CREATE INDEX IF NOT EXISTS idx_purchases_template ON template_purchases(template_id);
         CREATE INDEX IF NOT EXISTS idx_purchases_buyer ON template_purchases(buyer_id);
         CREATE INDEX IF NOT EXISTS idx_referrals_code ON referrals(referrer_code);
+        CREATE INDEX IF NOT EXISTS idx_provider_usage_day ON provider_usage(day);
+        CREATE INDEX IF NOT EXISTS idx_provider_usage_surface ON provider_usage(surface);
+        CREATE INDEX IF NOT EXISTS idx_provider_usage_slug ON provider_usage(slug);
         """
     )
     c.commit()
@@ -456,6 +472,118 @@ def bump_demo_usage(who: str, day: str) -> int:
         return int(row["count"])
     finally:
         c.close()
+
+
+def _usage_day() -> str:
+    """Local calendar day (YYYY-MM-DD) — the period key for usage ledgers."""
+    return time.strftime("%Y-%m-%d")
+
+
+def record_provider_usage(surface: str, runtime_source: str, provider: str,
+                          model: str, *, ok: int | None = None,
+                          runtime_s: int | None = None, tasks: int | None = None,
+                          slug: str | None = None) -> int:
+    """Append one provider-usage ledger row (Phase F observability).
+
+    ``surface`` = "demo" | "project"; ``runtime_source`` = "pool" |
+    "paid_fallback" | "byok" | "default". ``ok`` stays NULL until the launch
+    finalizes (outcome update keys on the unique board slug). This is an
+    after-the-fact record — it never gates spend (provider_guard does that).
+    """
+    c = _conn()
+    try:
+        cur = c.execute(
+            "INSERT INTO provider_usage(created_at, day, surface, runtime_source, "
+            "provider, model, ok, runtime_s, tasks, slug) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (time.time(), _usage_day(), surface, runtime_source, provider, model,
+             ok, runtime_s, tasks, slug),
+        )
+        c.commit()
+        return int(cur.lastrowid)
+    finally:
+        c.close()
+
+
+def update_provider_usage_outcome(slug: str, *, ok: int | None = None,
+                                  runtime_s: int | None = None,
+                                  tasks: int | None = None) -> bool:
+    """Fill the terminal outcome on the latest open attempt for *slug*.
+
+    No-op when no open (ok IS NULL) row exists for the slug; returns whether
+    anything was updated. Best-effort: callers must never fail a launch when
+    the ledger write fails.
+    """
+    c = _conn()
+    try:
+        sets, params = [], []
+        if ok is not None:
+            sets.append("ok = ?")
+            params.append(int(ok))
+        if runtime_s is not None:
+            sets.append("runtime_s = ?")
+            params.append(int(runtime_s))
+        if tasks is not None:
+            sets.append("tasks = ?")
+            params.append(int(tasks))
+        if not sets:
+            return False
+        params.append(slug)
+        cur = c.execute(
+            "UPDATE provider_usage SET {} WHERE id = "
+            "(SELECT id FROM provider_usage WHERE slug = ? AND ok IS NULL "
+            "ORDER BY id DESC LIMIT 1)".format(", ".join(sets)),
+            params,
+        )
+        c.commit()
+        return cur.rowcount > 0
+    finally:
+        c.close()
+
+
+def provider_usage_summary(day: str | None = None) -> dict:
+    """Per-day provider-usage totals for /health and ops visibility.
+
+    Aggregates attempts/final outcomes by runtime_source and surface. Never
+    gates anything; informative only.
+    """
+    day = day or _usage_day()
+    c = _conn()
+    try:
+        rows = c.execute(
+            "SELECT surface, runtime_source, ok, COUNT(*) AS n FROM provider_usage "
+            "WHERE day=? GROUP BY surface, runtime_source, ok", (day,),
+        ).fetchall()
+    finally:
+        c.close()
+    total = finalized = ok_count = not_ok = 0
+    by_source: dict[str, dict] = {}
+    by_surface: dict[str, dict] = {}
+    for r in rows:
+        src, surf, okf, n = r["runtime_source"], r["surface"], r["ok"], r["n"]
+        total += n
+        bs = by_source.setdefault(src, {"attempts": 0, "ok": 0})
+        bs["attempts"] += n
+        bb = by_surface.setdefault(surf, {"attempts": 0, "ok": 0})
+        bb["attempts"] += n
+        if okf is not None:
+            finalized += n
+            if okf:
+                ok_count += n
+                bs["ok"] += n
+                bb["ok"] += n
+            else:
+                not_ok += n
+    return {
+        "day": day,
+        "total_attempts": total,
+        "finalized": finalized,
+        "ok": ok_count,
+        "not_ok": not_ok,
+        "pending_attempts": total - finalized,
+        "by_runtime_source": by_source,
+        "by_surface": by_surface,
+    }
 
 
 def list_user_projects(user_id: int) -> list[dict]:

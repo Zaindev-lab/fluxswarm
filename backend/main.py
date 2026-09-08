@@ -49,6 +49,7 @@ import vault
 import security
 import payments as payments_mod
 import provider_pool
+import provider_guard
 import support_agent
 from ratelimit import limiter
 
@@ -219,6 +220,34 @@ def _operator_maintenance() -> bool:
     """Operator kill-switch (FIX-1): when FLUXSWARM_KILL_SWITCH=1, ALL
     cost-bearing/demo surfaces reject with 503. Default off."""
     return os.environ.get("FLUXSWARM_KILL_SWITCH", "").strip().lower() in ("1", "true", "yes")
+
+
+def _paid_fallback_runtime():
+    """Paid last-resort runtime for the demo surface (operator opt-in only).
+
+    OFF by default: without an explicit FLUXSWARM_PAID_FALLBACK_ENABLED=1 the
+    demo never spends money — an exhausted pool fails with the structured
+    ``demo_provider_unavailable`` body. When enabled, the fallback is exactly
+    the operator-configured default runtime (FLUXSWARM_DEFAULT_PROVIDER + model);
+    a fallback that cannot be resolved returns None (we never guess a runtime).
+    Returns (model, provider) to match hermes_client._default_runtime().
+    """
+    if not provider_guard.paid_fallback_enabled():
+        return None
+    try:
+        return hc._default_runtime()
+    except Exception:
+        return None
+
+
+def _provider_usage_summary_safe():
+    """Per-day provider-usage totals for /health (best-effort, never raises)."""
+    try:
+        return db.provider_usage_summary()
+    except Exception:
+        return {"day": _today(), "total_attempts": 0, "finalized": 0, "ok": 0,
+                "not_ok": 0, "pending_attempts": 0,
+                "by_runtime_source": {}, "by_surface": {}}
 
 
 _DEMO_DAILY_CAP = int(os.environ.get("FLUXSWARM_DEMO_DAILY_CAP", "25"))
@@ -432,6 +461,14 @@ def snapshot_health() -> dict:
             # one we advertise "unknown" instead of inventing a number.
             "quota_remaining": "unknown",
         })
+    try:
+        capacity = provider_pool.pool_capacity()
+    except Exception:
+        capacity = {"state": "unknown", "providers": []}
+    try:
+        budget_ceilings = provider_guard.budget_ceilings()
+    except Exception:
+        budget_ceilings = {}
     g_total = _DEMO_GLOBAL_MAX
     g_used = limiter.count("demo:global", _DEMO_GLOBAL_WINDOW)
     bstats = _board_stats_cached()
@@ -447,7 +484,12 @@ def snapshot_health() -> dict:
         "hermes_bin_ok": hc.HERMES_BIN.exists(),
         "hermes_image": os.getenv("FLUXSWARM_RUNNER_IMAGE", "fluxswarm/hermes-runner:latest"),
         "limiter_backend": getattr(limiter, "backend", "memory"),
-        "provider_pool": {"demo_providers": prov},
+        "provider_pool": {"demo_providers": prov, "capacity": capacity.get("state", "unknown"),
+                          "providers": capacity.get("providers", []),
+                          "entries": capacity.get("entries", [])},
+        "paid_fallback_enabled": provider_guard.paid_fallback_enabled(),
+        "budget": budget_ceilings,
+        "provider_usage": _provider_usage_summary_safe(),
         "demo_quota_remaining": max(0, g_total - g_used),
         "demo_quota_total": g_total,
         "active_boards": bstats["active"],
@@ -578,6 +620,11 @@ def _bg_dispatch(slug: str, plan: str, provider_keys=None, pid: int | None = Non
                         timed_out=bool(res.get("timed_out")))
         except Exception:
             pass
+        try:
+            db.update_provider_usage_outcome(
+                slug, ok=int(bool(res.get("converged") or res.get("outcome") == "ok")))
+        except Exception:
+            pass
         if not res.get("converged") and (res.get("outcome") != "ok"
                                          or res.get("timed_out")):
             # Demo launches carry no project row (``_board_finalized`` can't
@@ -627,6 +674,12 @@ def _finalize_launch(slug: str, pid: int, *, status: str, outcome: str, reason: 
                         except Exception:
                             pass
         db.set_launch_outcome(pid, status, outcome, reason, refunded=refunded)
+        # Phase F: fill the terminal outcome on the provider-usage ledger row.
+        # Best-effort: a ledger write failure must never change launch behavior.
+        try:
+            db.update_provider_usage_outcome(slug, ok=int(status == "ok"))
+        except Exception:
+            pass
         if outcome != "converged":
             # Seal the board NOW: kill any leftover workers and park its non-
             # terminal tasks as blocked, so the abandoned board stops holding
@@ -1061,19 +1114,59 @@ def api_demo_launch(request: Request, goal: str = "Build a sample FastAPI notes 
     # and models. When the pool is exhausted and no operator default exists,
     # fail with a structured, user-facing body (never a raw 500).
     pool_pick = provider_pool.pick_demo_provider()
+    runtime_source = "pool"
     if not pool_pick:
+        # Paid last-resort is OFF by default: unless the operator explicitly
+        # enabled a fallback runtime AND configured one, the demo fails with a
+        # structured, user-facing body (never a raw 500).
+        paid = _paid_fallback_runtime()
+        if paid:
+            # _default_runtime() returns (model, provider).
+            pool_model, pool_provider = paid
+            runtime_source = "paid_fallback"
+        else:
+            capacity_state = "unknown"
+            try:
+                capacity_state = provider_pool.pool_capacity()["state"]
+            except Exception:
+                pass
+            return {
+                "error": "demo_provider_unavailable",
+                "message": {"en": "All demo AI providers are temporarily unavailable — please try again in a moment."},
+                "demo": True,
+                "capacity": capacity_state,
+            }
+    else:
+        pool_provider = provider_pool.resolve_provider_key(pool_pick["provider"])
+        pool_model = pool_pick["model"]
+    # Fail-closed operator budget gate (provider_guard): when the configured
+    # execution ceilings are exhausted, refuse explicitly instead of silently
+    # spending operator capacity. Default ceilings are never "unlimited".
+    budget = provider_guard.budget_gate()
+    if not budget.ok:
         return {
-            "error": "demo_provider_unavailable",
-            "message": {"en": "All demo AI providers are temporarily unavailable — please try again in a moment."},
+            "error": "budget_exhausted",
+            "message": {"en": "The demo service is unavailable right now — please try again later."},
             "demo": True,
+            "reason": budget.reason,
         }
-    pool_provider = provider_pool.resolve_provider_key(pool_pick["provider"])
-    pool_model = pool_pick["model"]
+    pool_probe_key = pool_pick.get("probe_key") or pool_provider if pool_pick else pool_provider
+    # Phase F: append the provider-usage ledger row BEFORE the launch so every
+    # attempt (including any paid fallback) is observable even when the launch
+    # never finalizes. Best-effort: accounting must never break a launch.
+    try:
+        db.record_provider_usage(
+            surface="demo", runtime_source=runtime_source,
+            provider=pool_probe_key, model=pool_model, slug=slug,
+        )
+    except Exception:
+        pass
     swarm = hc.launch_swarm(slug, goal, provider_keys=None,
                             provider=pool_provider, model=pool_model)
     _fire_dispatch(slug, plan, None)
     audit.audit("demo.launch", uid=demo["id"] if demo else None, ip="internal",
-                outcome="ok", slug=slug, plan=plan, provider=pool_provider)
+                outcome="ok", slug=slug, plan=plan, provider=pool_probe_key,
+                runtime=runtime_source)
     return {"slug": slug, "root_id": swarm.root_id, "demo": True}
 
 
@@ -1457,6 +1550,15 @@ def api_create_project(payload: ProjectCreate, request: Request,
                     plan=user["plan"], mode="manual_no_ai")
         return {"slug": slug, "project_id": pid, "manual": True,
                 "note": "ADMT opt-out active: project created manually (no AI agents)."}
+    # Fail-closed operator budget gate (provider_guard): refuse before any
+    # credit is debited when the configured execution ceilings are exhausted.
+    budget = provider_guard.budget_gate()
+    if not budget.ok:
+        raise HTTPException(status_code=429, detail={
+            "error": "budget_exhausted",
+            "message": {"en": "Agent launch capacity is temporarily exhausted — please try again later."},
+            "reason": budget.reason,
+        })
     # Credit gating: each launch costs 1 credit.
     if not db.deduct_credit(user["id"]):
         raise HTTPException(status_code=402, detail="Out of credits — upgrade your plan or use a referral code")
@@ -1464,8 +1566,24 @@ def api_create_project(payload: ProjectCreate, request: Request,
         notify.send_depletion_async(user["email"], user["name"])
     slug = make_project_slug(user["id"])
     hc.ensure_board(slug)
+    keys = _user_provider_keys(user)
+    # Phase F: append the provider-usage ledger row with the ACTUAL resolved
+    # runtime (BYOK beats operator default) before the launch. Best-effort:
+    # accounting must never change launch behavior.
+    runtime_source = "byok" if keys else "default"
     try:
-        swarm = hc.launch_swarm(slug, goal, provider_keys=_user_provider_keys(user))
+        model, prov = hc._resolve_launch_runtime(keys)
+    except Exception:
+        model = prov = None
+    if prov:
+        try:
+            db.record_provider_usage(
+                surface="project", runtime_source=runtime_source,
+                provider=prov, model=model or "", slug=slug)
+        except Exception:
+            pass
+    try:
+        swarm = hc.launch_swarm(slug, goal, provider_keys=keys)
     except Exception as e:
         # Refund the launch credit via the idempotent, audited helper — never
         # by ad-hoc SQL (double-refund risk) and never leaking internal detail.

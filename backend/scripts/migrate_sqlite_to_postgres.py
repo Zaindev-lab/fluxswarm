@@ -44,6 +44,7 @@ TABLES = (
     "password_resets",
     "demo_usage",
     "provider_agreements",
+    "provider_usage",
 )
 
 

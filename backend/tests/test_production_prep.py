@@ -436,12 +436,38 @@ class TestEnvGuardStartup:
         monkeypatch.setenv("FLUXSWARM_JWT_SECRET", "b")
         monkeypatch.setenv("FLUXSWARM_DATABASE_URL", "postgresql://u:p@h/db")
         monkeypatch.setenv("FLUXSWARM_KMS_BACKEND", "aws_kms")
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
+                  "KIMI_API_KEY", "OPENROUTER_API_KEY", "GOOGLE_API_KEY"):
+            monkeypatch.delenv(k, raising=False)
         with pytest.raises(RuntimeError) as ei:
             envguard.assert_production_secrets()
         assert "paid AI provider" in str(ei.value)
+
+    def test_production_gemini_key_ok(self, monkeypatch):
+        """GEMINI_API_KEY (the name provider.py actually reads) satisfies."""
+        monkeypatch.delenv("FLUXSWARM_DEMO_MODE", raising=False)
+        monkeypatch.setenv("FLUXSWARM_FERNET_KEY", "a")
+        monkeypatch.setenv("FLUXSWARM_JWT_SECRET", "b")
+        monkeypatch.setenv("FLUXSWARM_DATABASE_URL", "postgresql://u:p@h/db")
+        monkeypatch.setenv("FLUXSWARM_KMS_BACKEND", "aws_kms")
+        monkeypatch.setenv("GEMINI_API_KEY", "sk-gem-prod-test")
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        assert envguard.assert_production_secrets() is None
+
+    def test_production_google_alias_key_ok(self, monkeypatch):
+        """Legacy GOOGLE_API_KEY also satisfies the paid-key gate (Phase G)."""
+        monkeypatch.delenv("FLUXSWARM_DEMO_MODE", raising=False)
+        monkeypatch.setenv("FLUXSWARM_FERNET_KEY", "a")
+        monkeypatch.setenv("FLUXSWARM_JWT_SECRET", "b")
+        monkeypatch.setenv("FLUXSWARM_DATABASE_URL", "postgresql://u:p@h/db")
+        monkeypatch.setenv("FLUXSWARM_KMS_BACKEND", "aws_kms")
+        monkeypatch.setenv("GOOGLE_API_KEY", "sk-gem-prod-test")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        assert envguard.assert_production_secrets() is None
 
     def test_production_paid_provider_only_ok(self, monkeypatch):
         monkeypatch.delenv("FLUXSWARM_DEMO_MODE", raising=False)

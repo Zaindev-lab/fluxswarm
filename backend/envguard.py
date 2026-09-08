@@ -60,12 +60,22 @@ def assert_production_secrets() -> None:
     # zero-cost runtime from provider_pool (keys still required per entry), so a
     # production deployment without a paid key is refused instead of silently
     # defaulting anywhere.
+    #
+    # Phase G (key-name accuracy): the env names here must match what provider.py
+    # actually reads (`_PROVIDER_ENV_KEYS`): openai/anthropic/gemini/kimi/
+    # openrouter. Google's Gemini credential is canonically GEMINI_API_KEY;
+    # GOOGLE_API_KEY is accepted as the legacy alias (provider.py falls back to
+    # it when GEMINI_API_KEY is unset).
     if not any(
         os.environ.get(k, "").strip()
-        for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY")
+        for k in (
+            "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
+            "KIMI_API_KEY", "OPENROUTER_API_KEY", "GOOGLE_API_KEY",
+        )
     ):
         raise RuntimeError(
             "production startup refused: at least one paid AI provider API key is "
-            "required (set ANTHROPIC_API_KEY, OPENAI_API_KEY or GOOGLE_API_KEY). "
+            "required (set ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY — or "
+            "its legacy alias GOOGLE_API_KEY —, KIMI_API_KEY or OPENROUTER_API_KEY). "
             "Demo/free defaults are disabled outside demo mode."
         )

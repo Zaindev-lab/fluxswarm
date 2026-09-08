@@ -8,7 +8,7 @@
 - [ ] PostgreSQL 15+ يعمل مع النسخ الاحتياطي (`FLUXSWARM_DATABASE_URL` يحقق `db_postgres.init_db()`)
 - [ ] Redis يعمل (للـ rate limiting متعدد العمليات — `REDIS_URL`/`FLUXSWARM_REDIS_URL`)
 - [ ] KMS backend مُضبوط (AWS/Azure/HashiCorp) — `FLUXSWARM_KMS_BACKEND` غير `file` في الإنتاج
-- [ ] جميع مفاتيح مزودي AI مُختبرة (`ANTHROPIC_API_KEY`/`OPENAI_API_KEY`/`GOOGLE_API_KEY` — envguard يرفض الإنتاج بدون واحد منها)
+- [ ] جميع مفاتيح مزودي AI مُختبرة (`ANTHROPIC_API_KEY`/`OPENAI_API_KEY`/`GEMINI_API_KEY` (أو alias قديم `GOOGLE_API_KEY`)/`KIMI_API_KEY`/`OPENROUTER_API_KEY` — envguard يرفض الإنتاج بدون واحدة منها، والأسماء تطابق ما يقرؤه provider.py فعلياً)
 - [ ] مفاتيح Paddle Live مُضبوطة (`FLUXSWARM_PAYMENTS=1` + `PADDLE_API_KEY`/`PADDLE_WEBHOOK_SECRET`/`PADDLE_CLIENT_TOKEN` + أسعار `PADDLE_PRICE_*`)
 - [ ] `ALERT_WEBHOOK_URL` مضبوط (Slack/Discord incoming webhook)
 - [ ] شهادة SSL مُثبتة (Let's Encrypt عبر Caddy/nginx)

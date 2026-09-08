@@ -70,14 +70,14 @@ def test_pool_connects_and_defaults(loop):
 def test_migrations_are_idempotent():
     pg.init_db()
     pg.init_db()
-    # 001 + 002 + 003 + 004 applied exactly once.
+    # 001 -> 006 applied exactly once; HEAD is 006 (Phase F provider_usage).
 
     async def ver():
         pool = await pg.get_pool()
         rows = await pool.fetch("SELECT version_num FROM alembic_version")
         return [r["version_num"] for r in rows]
 
-    assert asyncio.run_coroutine_threadsafe(ver(), pg._loop()).result() == ["004"]
+    assert asyncio.run_coroutine_threadsafe(ver(), pg._loop()).result() == ["006"]
 
 
 # ---------- users CRUD / auth ----------
@@ -372,3 +372,46 @@ def test_sqlite_to_postgres_migration_copy_and_idempotent():
     assert (u2, p2) == (0, 0)          # ON CONFLICT DO NOTHING -> no dupes
     assert pg.get_user_by_email("mig@a.com")["credits"] == 3
     assert pg.get_user_by_email("mig@b.com")["plan"] == "pro"
+
+
+# ---------- Phase F: provider usage accounting ledger ----------
+
+def test_record_provider_usage_roundtrip():
+    rid = pg.record_provider_usage(
+        "demo", "paid_fallback", "gemini", "gemini-1.5-flash", slug="flux-demo-1")
+    assert rid >= 1
+    s = pg.provider_usage_summary()
+    assert s["total_attempts"] >= 1
+    assert s["pending_attempts"] >= 1  # ok is NULL until finalized
+    assert s["by_runtime_source"]["paid_fallback"]["attempts"] >= 1
+    assert s["by_surface"]["demo"]["attempts"] >= 1
+
+
+def test_update_provider_usage_outcome():
+    pg.record_provider_usage("demo", "pool", "gemini", "m", slug="flux-demo-2")
+    assert pg.update_provider_usage_outcome("flux-demo-2", ok=1) is True
+    s = pg.provider_usage_summary()
+    assert s["finalized"] >= 1
+    assert s["ok"] >= 1
+    assert s["pending_attempts"] == 0
+    # a second update is a no-op (no open row left)
+    assert pg.update_provider_usage_outcome("flux-demo-2", ok=0) is False
+
+
+def test_update_targets_latest_open_row():
+    pg.record_provider_usage("project", "byok", "anthropic", "claude", slug="u1-p")
+    pg.record_provider_usage("project", "byok", "anthropic", "claude", slug="u1-p")
+    assert pg.update_provider_usage_outcome("u1-p", ok=1) is True
+
+    async def check():
+        pool = await pg.get_pool()
+        rows = await pool.fetch(
+            "SELECT ok FROM provider_usage WHERE slug=$1 ORDER BY id", "u1-p")
+        return [r["ok"] for r in rows]
+
+    vals = asyncio.run_coroutine_threadsafe(check(), pg._loop()).result()
+    assert vals == [None, 1]  # oldest attempt stays pending after reset_db baseline
+
+
+def test_update_noop_when_no_open_row():
+    assert pg.update_provider_usage_outcome("no-such-slug", ok=1) is False

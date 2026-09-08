@@ -7,6 +7,11 @@ lightweight health probe. When the whole pool is unavailable the caller falls
 back to the operator-configured runtime (env) or fails fast — providers are
 NEVER probed with real completions here.
 
+Phase C (provider_guard): the pool now routes through circuit breakers,
+per-provider cooldowns and round-robin selection instead of always-first. The
+public helpers (`get_demo_provider`, `pick_demo_provider`, `resolve_provider_key`)
+keep their contracts; only the arbitration inside changed.
+
 Every entry that `requires_key` reads its key from the named env var; without a
 key the entry is skipped before any network probe (no pointless AUTH_ERROR
 round-trips). `provider` matches an endpoint known to provider.py; the prompt
@@ -19,6 +24,7 @@ import os
 from typing import Optional
 
 from provider import ProviderStatus, check_provider_health
+import provider_guard as guard
 
 # Provider -> probe key in provider.py's endpoint table (name drift handled here).
 _PROBE_KEY = {"google": "gemini"}
@@ -32,8 +38,26 @@ DEMO_PROVIDERS = [
 ]
 
 
+def _pool_enabled() -> bool:
+    """Operator switch for the demo provider pool (default on)."""
+    return os.environ.get("FLUXSWARM_DEMO_POOL_ENABLED", "1").strip() in ("1", "true", "yes")
+
+
 class ProviderUnavailableError(RuntimeError):
     """Raised when the demo provider pool is exhausted (all entries unhealthy)."""
+
+
+def _keyed_entries() -> list[dict]:
+    """DEMO_PROVIDERS with the runtime probe key attached, minus entries whose
+    required key env var is absent (no pointless AUTH_ERROR round-trips)."""
+    out = []
+    for entry in DEMO_PROVIDERS:
+        if not _entry_keyed(entry):
+            continue
+        e = dict(entry)
+        e["probe_key"] = resolve_provider_key(entry["provider"])
+        out.append(e)
+    return out
 
 
 def _probe_provider(provider: str, model: str) -> bool:
@@ -52,17 +76,18 @@ def _entry_keyed(entry: dict) -> bool:
 
 
 def get_demo_provider() -> dict:
-    """Return the first available demo provider (dict literal from DEMO_PROVIDERS).
+    """Return the next available demo provider (round-robin across healthy
+    entries; circuit breakers + cooldowns from provider_guard).
 
     Synchronous core: provider.py's health probe is sync and the demo launch
     endpoint is sync; `get_demo_provider_async` wraps this for async callers.
+    The returned dict matches the DEMO_PROVIDERS shape, extended with
+    ``probe_key`` (the provider.py runtime key) and ``reason``.
     """
-    for entry in DEMO_PROVIDERS:
-        if not _entry_keyed(entry):
-            continue
-        if _probe_provider(entry["provider"], entry["model"]):
-            return entry
-    raise ProviderUnavailableError("All demo providers exhausted")
+    try:
+        return guard.pick_rotation(_keyed_entries())
+    except guard.ProviderPoolBlocked:
+        raise ProviderUnavailableError("All demo providers exhausted")
 
 
 async def get_demo_provider_async() -> dict:
@@ -71,7 +96,7 @@ async def get_demo_provider_async() -> dict:
 
 
 def resolve_provider_key(provider: str) -> str:
-    """Map a pool provider name to the provider.py runtime key (""google"" -> ``gemini``)."""
+    """Map a pool provider name to the provider.py runtime key ("google" -> "gemini")."""
     return _PROBE_KEY.get(provider, provider)
 
 
@@ -83,3 +108,21 @@ def pick_demo_provider() -> Optional[dict]:
         return None
     except Exception:
         return None
+
+
+def pool_capacity() -> dict:
+    """Truthful health/capacity report over the full demo pool (which entries
+    are viable, breaker state, availability) for /health and the UI."""
+    enabled = _pool_enabled()
+    report = guard.capacity_report(DEMO_PROVIDERS, pool_enabled=enabled)
+    entries = []
+    for entry in DEMO_PROVIDERS:
+        entries.append({
+            "provider": entry.get("provider"),
+            "model": entry.get("model"),
+            "key_env": entry.get("key_env"),
+            "requires_key": bool(entry.get("requires_key")),
+            "keyed": _entry_keyed(entry),
+        })
+    report["entries"] = entries
+    return report

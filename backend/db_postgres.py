@@ -149,7 +149,8 @@ async def _truncate_all() -> None:
     await pool.execute(
         "TRUNCATE TABLE users, projects, referrals, squad_templates, "
         "template_purchases, payment_events, telegram_links, telegram_codes, "
-        "password_resets, demo_usage, provider_agreements, admt_disclosures "
+        "password_resets, demo_usage, provider_agreements, admt_disclosures, "
+        "provider_usage "
         "RESTART IDENTITY CASCADE"
     )
 
@@ -442,6 +443,103 @@ async def _bump_demo_usage(who: str, day: str) -> int:
 
 def bump_demo_usage(who: str, day: str) -> int:
     return _await(_bump_demo_usage(who, day))
+
+
+async def _record_provider_usage(surface: str, runtime_source: str,
+                                 provider: str, model: str, *,
+                                 ok: int | None = None,
+                                 runtime_s: int | None = None,
+                                 tasks: int | None = None,
+                                 slug: str | None = None) -> int:
+    """Append one provider-usage ledger row (Phase F observability).
+
+    ``surface`` = "demo" | "project"; ``runtime_source`` = "pool" |
+    "paid_fallback" | "byok" | "default". ``ok`` stays NULL until the launch
+    finalizes. Observability only — never gates spend.
+    """
+    pool = await get_pool()
+    rid = await pool.fetchval(
+        "INSERT INTO provider_usage(created_at, day, surface, runtime_source, "
+        "provider, model, ok, runtime_s, tasks, slug) "
+        "VALUES(EXTRACT(EPOCH FROM now())::bigint, "
+        "to_char(now(), 'YYYY-MM-DD'), $1, $2, $3, $4, $5, $6, $7, $8) "
+        "RETURNING id",
+        surface, runtime_source, provider, model, ok, runtime_s, tasks, slug,
+    )
+    return int(rid)
+
+
+def record_provider_usage(surface: str, runtime_source: str, provider: str,
+                          model: str, *, ok: int | None = None,
+                          runtime_s: int | None = None, tasks: int | None = None,
+                          slug: str | None = None) -> int:
+    return _await(_record_provider_usage(
+        surface, runtime_source, provider, model, ok=ok,
+        runtime_s=runtime_s, tasks=tasks, slug=slug))
+
+
+async def _update_provider_usage_outcome(slug: str, *, ok: int | None = None,
+                                         runtime_s: int | None = None,
+                                         tasks: int | None = None) -> bool:
+    """Fill terminal outcome on the latest open attempt for *slug*."""
+    pool = await get_pool()
+    val = await pool.fetchval(
+        "UPDATE provider_usage SET ok = COALESCE($2, ok), "
+        "runtime_s = COALESCE($3, runtime_s), tasks = COALESCE($4, tasks) "
+        "WHERE id = (SELECT id FROM provider_usage WHERE slug = $1 AND ok IS NULL "
+        "ORDER BY id DESC LIMIT 1) RETURNING id",
+        slug, ok, runtime_s, tasks,
+    )
+    return val is not None
+
+
+def update_provider_usage_outcome(slug: str, *, ok: int | None = None,
+                                  runtime_s: int | None = None,
+                                  tasks: int | None = None) -> bool:
+    return _await(_update_provider_usage_outcome(
+        slug, ok=ok, runtime_s=runtime_s, tasks=tasks))
+
+
+async def _provider_usage_summary(day: str | None = None) -> dict:
+    """Per-day provider-usage totals (attempts/final outcomes) for /health."""
+    pool = await get_pool()
+    day = day or (await pool.fetchval("SELECT to_char(now(), 'YYYY-MM-DD')"))
+    rows = await pool.fetch(
+        "SELECT surface, runtime_source, ok, COUNT(*) AS n FROM provider_usage "
+        "WHERE day=$1 GROUP BY surface, runtime_source, ok", day,
+    )
+    total = finalized = ok_count = not_ok = 0
+    by_source: dict[str, dict] = {}
+    by_surface: dict[str, dict] = {}
+    for r in rows:
+        src, surf, okf, n = r["runtime_source"], r["surface"], r["ok"], r["n"]
+        total += n
+        bs = by_source.setdefault(src, {"attempts": 0, "ok": 0})
+        bs["attempts"] += n
+        bb = by_surface.setdefault(surf, {"attempts": 0, "ok": 0})
+        bb["attempts"] += n
+        if okf is not None:
+            finalized += n
+            if okf:
+                ok_count += n
+                bs["ok"] += n
+                bb["ok"] += n
+            else:
+                not_ok += n
+    return {
+        "day": day,
+        "total_attempts": total,
+        "finalized": finalized,
+        "ok": ok_count,
+        "not_ok": not_ok,
+        "pending_attempts": total - finalized,
+        "by_runtime_source": by_source,
+        "by_surface": by_surface,
+    }
+
+
+def provider_usage_summary(day: str | None = None) -> dict:
+    return _await(_provider_usage_summary(day))
 
 
 async def _list_user_projects(user_id: int) -> list[dict]:

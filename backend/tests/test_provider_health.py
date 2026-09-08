@@ -163,6 +163,38 @@ class TestInvalidCredentials:
 
 
 # ---------------------------------------------------------------------------
+# 5b. Gemini credential resolution (Phase G: GOOGLE_API_KEY legacy alias)
+# ---------------------------------------------------------------------------
+class TestGeminiKeyAlias:
+    def _probe_status(self):
+        with patch("provider.httpx.Client") as MockClient:
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.text = "[]"
+            mock_client = MagicMock()
+            mock_client.get.return_value = mock_resp
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            MockClient.return_value = mock_client
+            return check_provider_health("gemini", model="gemini-2.0-flash").status
+
+    def test_canonical_gemini_key_resolves(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEY", "sk-gem")
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        assert self._probe_status() == ProviderStatus.SUCCESS
+
+    def test_legacy_google_alias_resolves(self, monkeypatch):
+        monkeypatch.setenv("GOOGLE_API_KEY", "sk-gem")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        assert self._probe_status() == ProviderStatus.SUCCESS
+
+    def test_no_key_auth_error(self, monkeypatch):
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        assert self._probe_status() == ProviderStatus.AUTH_ERROR
+
+
+# ---------------------------------------------------------------------------
 # 6. provider configuration missing (unknown provider)
 # ---------------------------------------------------------------------------
 class TestProviderConfigMissing:

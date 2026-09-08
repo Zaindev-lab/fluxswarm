@@ -212,8 +212,33 @@ class ProviderAgreement(Base):
     )
 
 
+class ProviderUsage(Base):
+    """Append-only provider accounting ledger (Phase F).
+
+    One row per launch attempt; ``ok`` starts NULL and is filled when the
+    launch finalizes (outcome updates key on the unique board slug). This is
+    observability only — spend gating lives in provider_guard's fail-closed
+    budget gate, never here.
+    """
+
+    __tablename__ = "provider_usage"
+
+    id: Mapped[int] = mapped_column(BIGINT, Identity(), primary_key=True)
+    created_at: Mapped[float] = mapped_column(BIGINT, nullable=False)
+    day: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    surface: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    runtime_source: Mapped[str] = mapped_column(Text, nullable=False)
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    ok: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    runtime_s: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tasks: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    slug: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
+
+
 # Keep an explicit list of every model for Alembic autogenerate and tooling.
 MODELS: tuple[type[Base], ...] = (
     User, Project, Referral, SquadTemplate, TemplatePurchase, PaymentEvent,
     TelegramLink, TelegramCode, PasswordReset, DemoUsage, ProviderAgreement,
+    ProviderUsage,
 )
