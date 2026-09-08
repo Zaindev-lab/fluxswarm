@@ -1053,8 +1053,10 @@ def api_squad():
     return {
         "workers": [{"profile": p, "display": d, "role": r, "skills": s.split(",")}
                     for p, d, r, s in hc.SQUAD],
-        "verifier": {"profile": hc.VERIFIER[0], "display": hc.VERIFIER[1], "role": hc.VERIFIER[2]},
-        "synthesizer": {"profile": hc.SYNTHESIZER[0], "display": hc.SYNTHESIZER[1], "role": hc.SYNTHESIZER[2]},
+        "verifier": {"profile": hc.VERIFIER[0], "display": hc.VERIFIER[1], "role": hc.VERIFIER[2],
+                     "skills": hc.VERIFIER[3].split(",")},
+        "synthesizer": {"profile": hc.SYNTHESIZER[0], "display": hc.SYNTHESIZER[1], "role": hc.SYNTHESIZER[2],
+                        "skills": hc.SYNTHESIZER[3].split(",")},
     }
 
 

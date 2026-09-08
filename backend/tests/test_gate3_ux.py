@@ -221,6 +221,11 @@ def test_squad_api_shape():
     assert profiles == [p[0] for p in main_mod.hc.SQUAD]
     assert data["verifier"]["profile"] == main_mod.hc.VERIFIER[0]
     assert data["synthesizer"]["profile"] == main_mod.hc.SYNTHESIZER[0]
+    # Phase H fix: verifier/synthesizer must expose skills like workers —
+    # templates render a.skills.join() for every squad member (missing key
+    # threw a TypeError swallowed as "Could not load squad").
+    assert data["verifier"]["skills"] == main_mod.hc.VERIFIER[3].split(",")
+    assert data["synthesizer"]["skills"] == main_mod.hc.SYNTHESIZER[3].split(",")
     # Phase 3: real BYOK providers only — OpenRouter free tier is the sole
     # zero-cost option and still requires a key + agreement (no anonymous tier).
     assert main_mod.hc.SUPPORTED_PROVIDERS == (
