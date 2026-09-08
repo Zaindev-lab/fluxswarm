@@ -49,9 +49,15 @@ services:
         sync: false
       - key: REDIS_URL
         sync: false
-      # Billing — fill after Paddle setup (§2 in backend/DEPLOY-US.md).
+      # Billing — live Paddle is wired (see §2 in backend/DEPLOY-US.md).
+      # FLUXSWARM_PAYMENTS and FLUXSWARM_PAYMENT_PROVIDER are NOT sync:false so
+      # blueprint syncs keep the live billing gate open. The key-like values
+      # below (API key, webhook secret, client token, price ids) stay sync:false
+      # and are set manually in the dashboard / via the Render API.
       - key: FLUXSWARM_PAYMENTS
-        value: "0"
+        value: "1"
+      - key: FLUXSWARM_PAYMENT_PROVIDER
+        value: paddle
       - key: PADDLE_API_KEY
         sync: false
       - key: PADDLE_WEBHOOK_SECRET
