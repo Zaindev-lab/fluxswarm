@@ -21,7 +21,19 @@ if config.config_file_name is not None:
 
 
 def _async_url(url: str) -> str:
-    """Force the asyncpg driver so Alembic's async engine uses the right adapter."""
+    """Force the asyncpg driver so Alembic's async engine uses the right adapter.
+
+    asyncpg's ``connect()`` does not accept libpq-style ``sslmode`` /
+    ``channel_binding`` query params (Neon URLs carry both). Strip them and let
+    asyncpg negotiate TLS via the standard ``?ssl=`` driver param instead.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+
+    parts = urlsplit(url)
+    if parts.query:
+        q = [kv for kv in parts.query.split("&") if not kv.startswith(("sslmode=", "channel_binding="))]
+        sep = "&" if q else ""
+        url = urlunsplit((parts.scheme, parts.netloc, parts.path, sep.join(q), parts.fragment))
     if url.startswith(("postgresql://", "postgres://")):
         url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
         url = url.replace("postgres://", "postgresql+asyncpg://", 1)
