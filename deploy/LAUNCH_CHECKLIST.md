@@ -54,3 +54,10 @@
 - [x] `docker build` لصورة الـ runner + صورة التطبيق (`fluxswarm-beta`) تنجح
 - [x] `curl /health` → 200 (تكامل عبر compose على منفذ تجريبي)
 - [x] فحص أمان `grep -r "sk-" backend --include="*.py"` (بدون test_/example) → 0 نتائج
+
+## تنبيهات خطة Render المجانية (free)
+
+- **لا قرص ثابت**: أي إعادة نشر / استبدال مثال يمسح ملفات `HERMES_HOME` (اللوحات والأعمال المتوسطة). حالة المشاريع تُحفظ في PostgreSQL (`FLUXSWARM_DATABASE_URL`)، أما اللوحات/النتائج السرب فهي للتجربة المؤقتة. لاستمرارها: قرص ثابت (Render paid) أو VPS.
+- **حد 512MB والأسبوع** (منذ `dedf1f8`): `MAX_IN_PROGRESS = max(1, min(16, 512//GUARD)) = 1` — عامل واحد متسلسل، مُثبت بلا OOM بقياس ذروة ~342MB. لا تقهر GC الجنة بسبب 384/512 في الحساب — النتيجة 1 في الحالتين.
+- **تعديلات الـ Blueprint تُطبَّق يدوياً**: تغيير قيمة env في `render.yaml` (مثل `MEMORY_GUARD_MB_PER_WORKER`) لا يُنشر ذاتياً مع autoDeploy — يتطلب زر **Sync from Blueprint** في لوحة Render.
+- **مراقبة**: `active_boards`/`sealed_boards` في `/health` لكل إعادة نشر (اللوحات تظهر وتُختتم ضمن عمر المثال).
