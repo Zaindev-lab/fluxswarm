@@ -133,6 +133,12 @@ async function launchDemo(){
   const goal=($("goal").value||"Build a sample FastAPI notes API with tests and CI/CD (DEMO)").trim();
   $("launch").disabled=true;$("err").hidden=true;
   lastAction=launchDemo;
+  async function recoverSlug(){
+    const r=await fetch("/api/demo/latest");
+    const d=await r.json();
+    if(d&&d.board)return d.board;
+    return null;
+  }
   try{
     const r=await fetch("/api/demo/launch?goal="+encodeURIComponent(goal));
     if(!r.ok){
@@ -150,9 +156,24 @@ async function launchDemo(){
     $("agents").innerHTML=SKEL.repeat(6);$("eta").textContent="Preparing swarm...";
     poll();
   }catch(e){
+    // A timeout at the edge can drop the launch body AFTER the board exists;
+    // recover the board via the latest-session endpoint before surfacing error.
+    try{
+      const s=await recoverSlug();
+      if(s){slug=s;$("stage").hidden=false;$("agents").innerHTML=SKEL.repeat(6);poll();return;}
+    }catch(_){}
     showError("Connection error — please try again.");
   }finally{$("launch").disabled=false;}
 }
+
+// Resume an in-flight swarm across page reloads / dropped responses.
+async function resume(){
+  try{
+    const s=await (async()=>{const r=await fetch("/api/demo/latest");const d=await r.json();return d&&d.board?d.board:null;})();
+    if(s){slug=s;$("stage").hidden=false;$("agents").innerHTML=SKEL.repeat(6);poll();}
+  }catch(e){}
+}
+resume();
 </script>
 </body>
 </html>

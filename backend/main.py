@@ -261,6 +261,56 @@ _DEMO_MICRO_GLOBAL_MAX = 200
 # Session 3 demo lifecycle (auto-close + workspace recycle).
 _DEMO_MAX_RUNTIME_S = int(os.getenv("FLUXSWARM_DEMO_MAX_RUNTIME_S", "600"))
 _DEMO_WORKSPACE_TTL_S = int(os.getenv("FLUXSWARM_DEMO_WORKSPACE_TTL_S", "86400"))
+_DEMO_LAST: dict[str, tuple] = {}
+_DEMO_LAST_TTL_S = 7200
+
+
+def _remember_demo(ip: str, slug: str) -> None:
+    """Remember the caller's most recent demo board so the UI can recover the
+    slug even when the launch response is dropped at the edge (free tier can
+    cut long-running requests server-side after the board was created)."""
+    if not ip or not slug:
+        return
+    try:
+        cutoff = time.time() - _DEMO_LAST_TTL_S
+        if len(_DEMO_LAST) > 4096:
+            for k in list(_DEMO_LAST):
+                if _DEMO_LAST[k][1] < cutoff:
+                    _DEMO_LAST.pop(k, None)
+        _DEMO_LAST[ip] = (slug, time.time())
+    except Exception:
+        pass
+
+
+def _latest_demo(ip: str):
+    """The caller's most recent expiry-checked demo slug, or None."""
+    if not ip:
+        return None
+    try:
+        snap = _DEMO_LAST.get(ip)
+    except Exception:
+        return None
+    if not snap:
+        return None
+    slug, ts = snap
+    if time.time() - ts > _DEMO_LAST_TTL_S:
+        try:
+            _DEMO_LAST.pop(ip, None)
+        except Exception:
+            pass
+        return None
+    try:
+        if hc.board_is_sealed(slug):
+            try:
+                _DEMO_LAST.pop(ip, None)
+            except Exception:
+                pass
+            return None
+    except Exception:
+        pass
+    return slug
+
+
 _DEMO_LIMIT_DETAILS = {
     "ip": {
         "error": "demo_ip_limit",
@@ -1108,6 +1158,7 @@ def api_demo_launch(request: Request, goal: str = "Build a sample FastAPI notes 
     goal = (goal or "").strip() or "Build a sample FastAPI notes API with tests and CI/CD (DEMO)"
     goal = sanitize_goal(goal)
     slug = "flux-demo-" + str(int(time.time()))
+    _remember_demo(ip, slug)
     hc.ensure_board(slug)
     # Session 2 + P0.5: pick a healthy demo provider (free pool) and thread it
     # as an EXPLICIT request-scoped pin (provider/model kwargs). The pool is
@@ -1186,6 +1237,17 @@ def api_demo_status(request: Request):
         "your_ip_limit_window": f"{_DEMO_IP_WINDOW}s",
         "next_reset": _next_utc_midnight(),
     }
+
+
+@app.get("/api/demo/latest")
+def api_demo_latest(request: Request):
+    """The caller's most recent ACTIVE demo board slug (recovery for a launch
+    whose response was dropped at the proxy while the board was created)."""
+    ip = _client_ip(request)
+    slug = _latest_demo(ip)
+    if not slug:
+        return {"board": None}
+    return {"board": slug}
 
 
 @app.get("/api/demo/micro")

@@ -1099,7 +1099,70 @@ def dispatch(board: str, max_spawn: int | None = None, dry_run: bool = False,
             _cleanup_board_workers(board)
 
 
+def _list_tasks_from_db(board: str) -> list[dict] | None:
+    """Read the board's ``kanban.db`` directly (no CLI subprocess) so live reads
+    stay milliseconds even on a throttled free-tier instance; the shape matches
+    ``hermes kanban list --json`` post-normalization. Returns None when the DB
+    is missing or its schema is unreadable, so the caller falls back to the CLI."""
+    db = _board_db_path(board)
+    try:
+        if not db.exists():
+            return None
+        c = sqlite3.connect(str(db))
+    except Exception:
+        return None
+    try:
+        cols = [r[1] for r in c.execute("PRAGMA table_info(tasks)")]
+        want = ("id", "title", "assignee", "status", "state", "created_at",
+                "started_at", "completed_at", "last_heartbeat_at", "result",
+                "worker_pid", "role_name")
+        pick = [k for k in want if k in cols]
+        if not {"id", "assignee", "status"}.issubset(pick):
+            return None
+        rows = c.execute(
+            "SELECT %s FROM tasks ORDER BY created_at" % ", ".join(pick)
+        ).fetchall()
+        norm = {"done": "done", "running": "running", "ready": "queued",
+                "todo": "queued", "blocked": "blocked"}
+        out = []
+        for row in rows:
+            d = dict(zip(pick, row))
+            raw = d.get("status") or d.get("state") or "unknown"
+            t = {
+                "id": d.get("id"), "title": d.get("title"),
+                "assignee": d.get("assignee"),
+                "status": d.get("status") or d.get("state"),
+                "created_at": d.get("created_at"),
+                "started_at": d.get("started_at"),
+                "completed_at": d.get("completed_at"),
+                "last_heartbeat_at": d.get("last_heartbeat_at"),
+                "result": d.get("result"), "worker_pid": d.get("worker_pid"),
+            }
+            if "role_name" in d:
+                t["role_name"] = d.get("role_name")
+            t["state"] = norm.get(raw, raw)
+            a = (t.get("assignee") or "").strip()
+            if a.startswith("ecc-"):
+                a = a[len("ecc-"):]
+            if ":" in a:
+                pre, post = a.split(":", 1)
+                if pre.startswith("ecc-"):
+                    a = pre[len("ecc-"):] + ":" + post
+            t["assignee_display"] = a
+            out.append(t)
+        return out
+    except Exception:
+        return None
+    finally:
+        c.close()
+
+
 def list_tasks(board: str) -> list[dict]:
+    fast = _list_tasks_from_db(board)
+    if fast is not None:
+        for t in fast:
+            _attach_activity(board, t)
+        return fast
     r = _run(["list", "--json"], board=board)
     if r.returncode != 0:
         raise RuntimeError(f"list failed: {r.stderr}")
