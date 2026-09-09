@@ -88,7 +88,20 @@ class TestDbLedger:
 class TestDemoLedger:
     def _smoke_demo(self, monkeypatch, pick):
         monkeypatch.setattr(main_mod.provider_pool, "pick_demo_provider", pick)
-        monkeypatch.setattr(main_mod, "_client_ip", lambda request: "127.0.0.1")
+        # Hermetic quota state: THIS class only asserts the ledger rows, NEVER
+        # the quota gates (those are covered by dedicated tests). A shared
+        # in-memory per-IP / global / durable counter exhausted by earlier tests
+        # in the same session must not 429 these launches under the "quota runs
+        # only after a provider resolves" rule.
+        seq = {"n": 0}
+
+        def _uniq_ip(request):
+            seq["n"] += 1
+            return f"10.200.{seq['n'] // 240}.{seq['n'] % 240}"
+
+        monkeypatch.setattr(main_mod, "_client_ip", _uniq_ip)
+        monkeypatch.setattr(main_mod.limiter, "check", lambda *a, **k: True)
+        monkeypatch.setattr(main_mod.db, "bump_demo_usage", lambda *a, **k: 1)
         monkeypatch.setattr(main_mod.hc, "ensure_board", lambda slug: True)
 
         def fake_launch(board, goal, provider_keys=None, provider=None, model=None):

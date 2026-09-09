@@ -364,7 +364,13 @@ def test_admt_integration_full(monkeypatch):
 # 16 --------------------------------------------------------------------------
 def _smoke_demo(monkeypatch):
     """Demo launch without the real swarm/provider machinery (hermetic + fast)."""
-    monkeypatch.setattr(main_mod.provider_pool, "pick_demo_provider", lambda: None)
+    # A REAL (fake) pick: since quota gates now run AFTER a provider resolves
+    # (a pool-down launch must NOT burn a user's launch slot), a hermetic pick
+    # is required for the rate-limit tests to consume slots like real users do.
+    monkeypatch.setattr(
+        main_mod.provider_pool, "pick_demo_provider",
+        lambda: {"provider": "google", "model": "gemini-1.5-flash",
+                 "probe_key": "gemini", "requires_key": False})
     monkeypatch.setattr(main_mod.hc, "ensure_board", lambda slug: True)
 
     def _fake_launch(board, goal, provider_keys=None):

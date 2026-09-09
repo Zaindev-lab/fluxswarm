@@ -1136,19 +1136,6 @@ def api_demo_launch(request: Request, goal: str = "Build a sample FastAPI notes 
     ip = _client_ip(request)
     if not limiter.ip_allowed(ip):
         raise HTTPException(status_code=429, detail="Too many attempts — please wait a moment")
-    if not limiter.check(f"demo:ip:{ip}", _DEMO_IP_MAX, _DEMO_IP_WINDOW):
-        raise HTTPException(status_code=429, detail=_DEMO_LIMIT_DETAILS["ip"])
-    if not limiter.check("demo:global", _DEMO_GLOBAL_MAX, _DEMO_GLOBAL_WINDOW):
-        raise HTTPException(status_code=429, detail=_DEMO_LIMIT_DETAILS["global"])
-    if db.bump_demo_usage("anon", _today()) > _DEMO_DAILY_CAP:
-        raise HTTPException(status_code=429, detail={
-            "error": "demo_daily_limit",
-            "message": {
-                "en": "Daily demo allowance used up. Sign up for unlimited access.",
-            },
-            "retry_after_seconds": 86400,
-            "upgrade_url": "/pricing",
-        })
     demo = db.get_user_by_id(1) or db.get_user_by_ref("demo")
     if demo is None:
         # db.seed_demo() runs at import, but guard anyway: a missing demo user
@@ -1157,8 +1144,6 @@ def api_demo_launch(request: Request, goal: str = "Build a sample FastAPI notes 
     plan = demo.get("plan", "demo")
     goal = (goal or "").strip() or "Build a sample FastAPI notes API with tests and CI/CD (DEMO)"
     goal = sanitize_goal(goal)
-    slug = "flux-demo-" + str(int(time.time()))
-    _remember_demo(ip, slug)
     # Session 2 + P0.5: pick a healthy demo provider (free pool) and thread it
     # as an EXPLICIT request-scoped pin (provider/model kwargs). The pool is
     # never applied by mutating the process-global os.environ — concurrent
@@ -1202,7 +1187,26 @@ def api_demo_launch(request: Request, goal: str = "Build a sample FastAPI notes 
             "demo": True,
             "reason": budget.reason,
         }
+    # Quota gates run AFTER a runtime actually resolved: a failed provider pick
+    # (pool down) or a budget gate refusal must never burn a user's per-IP or
+    # daily launch slot — that earlier order made transient provider outages
+    # look like "I already used my launch".
+    if not limiter.check(f"demo:ip:{ip}", _DEMO_IP_MAX, _DEMO_IP_WINDOW):
+        raise HTTPException(status_code=429, detail=_DEMO_LIMIT_DETAILS["ip"])
+    if not limiter.check("demo:global", _DEMO_GLOBAL_MAX, _DEMO_GLOBAL_WINDOW):
+        raise HTTPException(status_code=429, detail=_DEMO_LIMIT_DETAILS["global"])
+    if db.bump_demo_usage("anon", _today()) > _DEMO_DAILY_CAP:
+        raise HTTPException(status_code=429, detail={
+            "error": "demo_daily_limit",
+            "message": {
+                "en": "Daily demo allowance used up. Sign up for unlimited access.",
+            },
+            "retry_after_seconds": 86400,
+            "upgrade_url": "/pricing",
+        })
     pool_probe_key = pool_pick.get("probe_key") or pool_provider if pool_pick else pool_provider
+    slug = "flux-demo-" + str(int(time.time()))
+    _remember_demo(ip, slug)
     # Phase F: append the provider-usage ledger row BEFORE the launch so every
     # attempt (including any paid fallback) is observable even when the launch
     # never finalizes. Best-effort: accounting must never break a launch.

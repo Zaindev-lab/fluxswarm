@@ -326,6 +326,14 @@ class TestDemoLaunchRuntime:
         assert seen["keys"] is None
         assert seen["provider"] == "gemini"          # resolve_provider_key("google")
         assert seen["model"] == "gemini-1.5-flash"
+        # The swarm build runs on a background thread (api_demo_launch returns
+        # the slug immediately); wait for that thread's dispatch so the assertion
+        # below is race-free.
+        import time as _time
+        for _ in range(100):
+            if "fire_k" in seen:
+                break
+            _time.sleep(0.05)
         assert seen["fire_k"] is None
         # env-flip regression guard: the demo NEVER pins the runtime via the
         # process-global os.environ (concurrent launches would cross-pollute).
@@ -337,6 +345,11 @@ class TestDemoLaunchRuntime:
         never a raw 500 or a mutated process env."""
         import main as main_mod
         monkeypatch.setattr(main_mod.provider_pool, "pick_demo_provider", lambda: None)
+        # Force "no operator default" too: an earlier test in the same session
+        # may have set FLUXSWARM_DEFAULT_PROVIDER/… directly (leak), which would
+        # flip this launch onto the paid-fallback SUCCESS path and mask the
+        # failure — this test asserts the pool-down, no-default STRUCTURED body.
+        monkeypatch.setattr(main_mod, "_paid_fallback_runtime", lambda: None)
         monkeypatch.setattr(main_mod, "_client_ip", lambda request: "127.0.0.1")
         monkeypatch.setattr(main_mod.hc, "ensure_board", lambda slug: True)
 
