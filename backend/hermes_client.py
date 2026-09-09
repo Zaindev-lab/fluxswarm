@@ -46,7 +46,7 @@ PROFILES_DIR = Path(HERMES_HOME) / "profiles"
 # 8GB / 384MB = 21 -> clamped to MAX_IN_PROGRESS = 16.
 _MEM_TOTAL_MB = int(os.environ.get("FLUXSWARM_MEM_TOTAL_MB", "8192"))
 MEMORY_GUARD_MB_PER_WORKER = int(os.environ.get("MEMORY_GUARD_MB_PER_WORKER", "384"))
-MAX_IN_PROGRESS = max(2, min(16, _MEM_TOTAL_MB // MEMORY_GUARD_MB_PER_WORKER))
+MAX_IN_PROGRESS = max(1, min(16, _MEM_TOTAL_MB // MEMORY_GUARD_MB_PER_WORKER))
 
 # Safe board-slug charset. Slugs are server-generated (u{uid}-{time}-{rand},
 # u{uid}-tg-…, flux-demo-…, tg-{chat}-…), but delete_boards validates every

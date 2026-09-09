@@ -7,7 +7,8 @@
 # Free-tier constraints you accept by using `plan: free`:
 #   - 512 MB RAM / 0.1 CPU. The memory-derived concurrency cap
 #     (FLUXSWARM_MEM_TOTAL_MB / MEMORY_GUARD_MB_PER_WORKER) is shrunk to 512 MB
-#     so MAX_IN_PROGRESS = clamp(512/384, 2..16) = **2** concurrent agent spawns.
+#     so MAX_IN_PROGRESS = clamp(512/512, 1..16) = **1** serialized agent spawn
+#     (verified OOM-free at the 512 MB cap; 2 concurrent venv workers exceed it).
 #   - No persistent disk: SQLite volumes from docker-compose.beta.yml do NOT
 #     survive restarts. Set FLUXSWARM_DATABASE_URL (Neon) for real persistence
 #     and REDIS_URL (Upstash) for cross-restart rate-limit state.
@@ -39,11 +40,11 @@ services:
         value: /app/hermes_home
       - key: FLUXSWARM_HERMES_BIN
         value: /usr/local/bin/hermes
-      # Free-tier memory budget -> MAX_IN_PROGRESS=2 (see deploy/docker/docker-compose.beta.yml).
+      # Free-tier memory budget -> MAX_IN_PROGRESS=1 (serialized; verified at 512MB).
       - key: FLUXSWARM_MEM_TOTAL_MB
         value: "512"
       - key: MEMORY_GUARD_MB_PER_WORKER
-        value: "384"
+        value: "512"
       # Set both secrets in the Render dashboard (sync: false = manual only).
       - key: FLUXSWARM_DATABASE_URL
         sync: false

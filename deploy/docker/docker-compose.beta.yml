@@ -39,7 +39,8 @@ services:
     # MEMORY_GUARD_MB_PER_WORKER below derive the backend-side concurrency cap
     # (MAX_IN_PROGRESS) and MUST stay in sync with `deploy.resources.limits.memory`.
     # P0.1: Render free tier is 512MB — an 8G/4G budget gets OOM-killed on deploy.
-    #   512M limit -> MAX_IN_PROGRESS = max(2, 450//384) = 2 workers max.
+    #   512M limit -> MAX_IN_PROGRESS = max(1, 512//512) = 1 worker (serialized;
+    #   verified OOM-free: 2 concurrent venv workers exceed the cap, 1 does not).
     deploy:
       resources:
         limits:
@@ -66,9 +67,9 @@ services:
       # (seed_demo re-pins this password on every boot when the env is set).
       FLUXSWARM_DEMO_PASSWORD: "${FLUXSWARM_DEMO_PASSWORD:-demo-shared-2026}"
       # Session 3: memory-derived swarm concurrency + reaper tuning + dispatch window.
-      # P0.1: 450MB syncs with the 512M cgroup limit above (MAX_IN_PROGRESS=2).
-      FLUXSWARM_MEM_TOTAL_MB: "450"
-      MEMORY_GUARD_MB_PER_WORKER: "384"
+      # P0.1: 512MB syncs with the 512M cgroup limit above (MAX_IN_PROGRESS=1).
+      FLUXSWARM_MEM_TOTAL_MB: "512"
+      MEMORY_GUARD_MB_PER_WORKER: "512"
       FLUXSWARM_REAPER_MAX_SPAWN: "16"
       FLUXSWARM_REAPER_ENABLED: "1"
       FLUXSWARM_DISPATCH_TIMEOUT_S: "900"

@@ -23,12 +23,12 @@ def test_max_in_progress_from_memory_budget(monkeypatch):
     monkeypatch.setattr(hc_mod, "_MEM_TOTAL_MB", 16384)
     monkeypatch.setattr(hc_mod, "MEMORY_GUARD_MB_PER_WORKER", 384)
     monkeypatch.setattr(hc_mod, "MAX_IN_PROGRESS",
-                        max(2, min(16, 16384 // 384)))
+                        max(1, min(16, 16384 // 384)))
     assert hc_mod.MAX_IN_PROGRESS == 16       # 42 -> cap
-    monkeypatch.setattr(hc_mod, "MAX_IN_PROGRESS", max(2, min(16, 2048 // 384)))
+    monkeypatch.setattr(hc_mod, "MAX_IN_PROGRESS", max(1, min(16, 2048 // 384)))
     assert hc_mod.MAX_IN_PROGRESS == 5        # 2048/384=5
-    monkeypatch.setattr(hc_mod, "MAX_IN_PROGRESS", max(2, min(16, 256 // 384)))
-    assert hc_mod.MAX_IN_PROGRESS == 2        # floor
+    monkeypatch.setattr(hc_mod, "MAX_IN_PROGRESS", max(1, min(16, 256 // 384)))
+    assert hc_mod.MAX_IN_PROGRESS == 1        # floor (512MB free fits exactly 1)
 
 
 def test_dispatch_defaults_max_spawn_to_budget(monkeypatch):
