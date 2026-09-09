@@ -85,9 +85,17 @@ def _entry_keyed(entry: dict) -> bool:
     return bool(os.environ.get(key_env, "").strip())
 
 
+# The free demo's only latency-friendly slot. gemini-1.5-flash converts a
+# squad lane in seconds; the nemotron free slot is a slow fallback that (alone)
+# makes a full 6-lane swarm outpace the demo runtime cap on a throttled
+# instance. Prefer the fast slot whenever its key is configured and healthy.
+_FAST_DEMO_PROVIDER = "google"
+_FAST_DEMO_MODEL_PREFIX = "gemini-"
+
+
 def get_demo_provider() -> dict:
-    """Return the next available demo provider (round-robin across healthy
-    entries; circuit breakers + cooldowns from provider_guard).
+    """Return the next available demo provider (fast-slot preference: gemini-1.5
+    flash when keyed and healthy, otherwise the normal rotation).
 
     Synchronous core: provider.py's health probe is sync and the demo launch
     endpoint is sync; `get_demo_provider_async` wraps this for async callers.
@@ -95,7 +103,16 @@ def get_demo_provider() -> dict:
     ``probe_key`` (the provider.py runtime key) and ``reason``.
     """
     try:
-        return guard.pick_rotation(_keyed_entries())
+        keyed = _keyed_entries()
+        fast = [e for e in keyed
+                if e.get("provider") == _FAST_DEMO_PROVIDER
+                and str(e.get("model", "")).startswith(_FAST_DEMO_MODEL_PREFIX)]
+        if fast:
+            try:
+                return guard.pick_rotation(fast)
+            except guard.ProviderPoolBlocked:
+                pass  # fast slot down / mid-cooldown: fall through to the pool
+        return guard.pick_rotation(keyed)
     except guard.ProviderPoolBlocked:
         raise ProviderUnavailableError("All demo providers exhausted")
 

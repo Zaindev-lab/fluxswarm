@@ -94,3 +94,17 @@ services:
         value: gpt-4o-mini
       - key: FLUXSWARM_SUPPORT_AI_KEY
         sync: false
+      # Demo runtime ceiling (seconds) before the reaper force-seals a demo
+      # board. The 600s default is too short for a FULL 6-lane squad on the
+      # free instance; 1800 lets even the slow fallback slot converge while
+      # the demo page (polling) keeps the instance awake.
+      - key: FLUXSWARM_DEMO_MAX_RUNTIME_S
+        value: "1800"
+      # Demo AI providers (provider_pool.py): gemini-1.5-flash is the fast
+      # preferred slot — set GEMINI_API_KEY for the demo to converge quickly.
+      # openrouter nemotron-free is the slow fallback when the fast key is
+      # absent or unhealthy.
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
