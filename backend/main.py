@@ -1159,7 +1159,6 @@ def api_demo_launch(request: Request, goal: str = "Build a sample FastAPI notes 
     goal = sanitize_goal(goal)
     slug = "flux-demo-" + str(int(time.time()))
     _remember_demo(ip, slug)
-    hc.ensure_board(slug)
     # Session 2 + P0.5: pick a healthy demo provider (free pool) and thread it
     # as an EXPLICIT request-scoped pin (provider/model kwargs). The pool is
     # never applied by mutating the process-global os.environ — concurrent
@@ -1214,13 +1213,50 @@ def api_demo_launch(request: Request, goal: str = "Build a sample FastAPI notes 
         )
     except Exception:
         pass
-    swarm = hc.launch_swarm(slug, goal, provider_keys=None,
-                            provider=pool_provider, model=pool_model)
-    _fire_dispatch(slug, plan, None)
-    audit.audit("demo.launch", uid=demo["id"] if demo else None, ip="internal",
-                outcome="ok", slug=slug, plan=plan, provider=pool_probe_key,
-                runtime=runtime_source)
-    return {"slug": slug, "root_id": swarm.root_id, "demo": True}
+    # The swarm build (ensure_board + the CLI plan step + set-model pins) can
+    # take minutes on a throttled free-tier instance; run in-band it would let
+    # the proxy drop the response even though the board was created (the whole
+    # symptom tree we fixed). Return the slug immediately and drive the build
+    # in a daemon thread — the UI polls progress and /api/demo/latest recovers
+    # the slug across reloads.
+    try:
+        _demo_launch_background(
+            slug=slug, goal=goal, plan=plan,
+            provider=pool_provider, model=pool_model,
+            pool_probe_key=pool_probe_key, runtime_source=runtime_source,
+            uid=demo["id"] if demo else None,
+        )
+    except Exception:
+        pass
+    return {"slug": slug, "root_id": None, "demo": True}
+
+
+def _demo_launch_background(*, slug: str, goal: str, plan: str,
+                            provider, model, pool_probe_key, runtime_source: str,
+                            uid) -> None:
+    """Build + dispatch a demo swarm off the request thread (see above)."""
+
+    def _run() -> None:
+        try:
+            hc.ensure_board(slug)
+            hc.launch_swarm(slug, goal, provider_keys=None,
+                            provider=provider, model=model)
+            try:
+                audit.audit("demo.launch", uid=uid, ip="internal", outcome="ok",
+                            slug=slug, plan=plan, provider=pool_probe_key,
+                            runtime=runtime_source)
+            except Exception:
+                pass
+            _fire_dispatch(slug, plan, None)
+        except Exception as e:
+            try:
+                audit.audit("demo.launch", outcome="error", slug=slug,
+                            reason=type(e).__name__)
+                db.update_provider_usage_outcome(slug, ok=0)
+            except Exception:
+                pass
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 @app.get("/api/demo/status")
