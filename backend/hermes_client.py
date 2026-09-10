@@ -703,6 +703,16 @@ def _emit_working(board_display_log: str, task_id: str, note: str, at: float | N
     "Working…" row; the thin executor emits one at its true start so the UI
     timeline shows activity. Failures here never raise.
     """
+    _insert_event(board_display_log, task_id, "heartbeat", note, at)
+
+
+def _emit_error(board_display_log: str, task_id: str, reason: str, at: float | None = None) -> None:
+    """Best-effort 'Demo error: …' event so a failed lane is VISIBLE on the
+    board timeline instead of silently stuck. Failures here never raise."""
+    _insert_event(board_display_log, task_id, "error", reason, at)
+
+
+def _insert_event(board_display_log: str, task_id: str, kind: str, note: str, at: float | None = None) -> None:
     db = _board_db_path(board_display_log)
     try:
         if not db.exists():
@@ -712,8 +722,9 @@ def _emit_working(board_display_log: str, task_id: str, note: str, at: float | N
             c.execute(
                 "INSERT INTO task_events (task_id, kind, payload, created_at) "
                 "VALUES (?, ?, ?, ?)",
-                (task_id, "heartbeat",
-                 json.dumps({"note": str(note)[:200]}), float(at if at is not None else time.time())),
+                (task_id, kind,
+                 json.dumps({"note" if kind == "heartbeat" else "message": str(note)[:400]}),
+                 float(at if at is not None else time.time())),
             )
             c.commit()
         finally:
@@ -742,30 +753,42 @@ def thin_execute(board: str, task_id: str, workspace: str, provider: str,
     paid path keeps running full agents untouched.
     """
     start = time.time()
+    emitted_error = False
     r = _run(["claim", task_id, "--ttl", "600"], board=board)
     if r.returncode != 0:
-        raise RuntimeError(
-            f"demo task {task_id} could not be claimed: "
-            f"{(r.stderr or r.stdout or '').strip()[:300]}")
-    _emit_working(board, task_id, "thin demo worker: provider completion in flight")
-    text = demo_llm.completion(provider, model, prompt)
-    name = artifact_name or demo_llm.deliverable_filename(objective or "")
-    ws = Path(workspace)
-    ws.mkdir(parents=True, exist_ok=True)
-    artifact = ws / name
-    artifact.write_text(text, encoding="utf-8")
-    _emit_working(board, task_id, "artifact written; attaching")
-    ra = _run(["attach", task_id, str(artifact)], board=board)
-    if ra.returncode != 0:
-        # produced event is cosmetic to convergence; the real artifact is on
-        # disk — log and continue rather than fail the lane.
-        pass
-    summary = (text.strip().splitlines() or [name])[0][:160]
-    rc_ = _run(["complete", task_id, "--result", summary], board=board)
-    if rc_.returncode != 0:
-        raise RuntimeError(
-            f"demo task {task_id} could not be completed: "
-            f"{(rc_.stderr or rc_.stdout or '').strip()[:300]}")
+        reason = f"demo task {task_id} could not be claimed: {(r.stderr or r.stdout or '').strip()[:300]}"
+        _emit_error(board, task_id, reason)
+        emitted_error = True
+        raise RuntimeError(reason)
+    try:
+        _emit_working(board, task_id, "thin demo worker: provider completion in flight")
+        text = demo_llm.completion(provider, model, prompt)
+        name = artifact_name or demo_llm.deliverable_filename(objective or "")
+        ws = Path(workspace)
+        ws.mkdir(parents=True, exist_ok=True)
+        artifact = ws / name
+        artifact.write_text(text, encoding="utf-8")
+        _emit_working(board, task_id, "artifact written; attaching")
+        ra = _run(["attach", task_id, str(artifact)], board=board)
+        if ra.returncode != 0:
+            # produced event is cosmetic to convergence; the real artifact is on
+            # disk — log and continue rather than fail the lane.
+            pass
+        summary = (text.strip().splitlines() or [name])[0][:160]
+        rc_ = _run(["complete", task_id, "--result", summary], board=board)
+        if rc_.returncode != 0:
+            reason = (f"demo task {task_id} could not be completed: "
+                      f"{(rc_.stderr or rc_.stdout or '').strip()[:300]}")
+            _emit_error(board, task_id, reason)
+            emitted_error = True
+            raise RuntimeError(reason)
+    except BaseException as exc:
+        # The failure lands ON THE BOARD (visible timeline) before it reaches
+        # the driver — a demo that fails must say so, not sit silently stuck.
+        if not emitted_error:
+            _emit_error(board, task_id,
+                        f"{type(exc).__name__}: {str(exc)[:300]}")
+        raise
     return {"result": summary, "artifact": str(artifact), "ok": True,
             "elapsed_s": round(time.time() - start, 1)}
 
@@ -1645,6 +1668,10 @@ def _task_activity_events(board: str, task_id: str) -> list[dict]:
             out.append({"kind": "completed", "label": label, "at": int(created_at)})
         elif kind == "failed":
             out.append({"kind": "failed", "label": "Failed", "at": int(created_at)})
+        elif kind == "error":
+            msg = (pd or {}).get("message") or kind
+            out.append({"kind": "error", "label": f"Demo error: {str(msg)[:240]}",
+                        "at": int(created_at)})
         elif kind == "blocked":
             out.append({"kind": "blocked", "label": "Blocked", "at": int(created_at)})
         elif kind in ("reclaimed", "crashed", "timed_out"):

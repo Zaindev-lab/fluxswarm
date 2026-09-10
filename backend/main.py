@@ -1331,6 +1331,11 @@ def _demo_drive(*, slug: str, goal: str, planner_id: str, builder_id: str,
             try:
                 audit.audit("demo.drive", outcome="error", slug=slug,
                             reason=type(e).__name__)
+                if len(outcomes) == 0:
+                    # planner lane failed before reaching the builder — say so
+                    # on the builder lane too (its own codes never emitted).
+                    hc._emit_error(slug, builder_id,
+                                   "builder lane not started (planner lane failed)")
             except Exception:
                 pass
         else:

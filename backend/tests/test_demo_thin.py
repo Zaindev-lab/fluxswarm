@@ -154,3 +154,53 @@ def test_reaper_skips_demo_boards(monkeypatch):
 
     main_mod._reconcile_boards_once()
     assert dispatched == ["u1-real"]
+
+
+def test_thin_execute_failure_lands_error_event(monkeypatch, tmp_path):
+    """A thin-lane failure must be VISIBLE on the board (error timeline row)
+    before the lane re-raises — the demo never fails silently."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _capture_run(monkeypatch)
+    inserted = []
+
+    def fake_insert(board, task_id, kind, note, at=None):
+        inserted.append((board, task_id, kind, note))
+
+    monkeypatch.setattr(hc, "_insert_event", fake_insert)
+    monkeypatch.setattr(hc, "_emit_working", lambda *a, **k: None)
+    monkeypatch.setattr(hc, "_emit_error", lambda *a, **k: inserted.append(("E", a[1], a[2])))
+    monkeypatch.setattr(demo_llm, "completion",
+                        lambda p, m, prompt: (_ for _ in ()).throw(
+                            demo_llm.DemoLLMError("gemini HTTP 401: bad key")))
+
+    try:
+        hc.thin_execute("bdemo", "t1", str(ws), "gemini", "g", "P", objective="x")
+        raise AssertionError("expected DemoLLMError to propagate")
+    except demo_llm.DemoLLMError:
+        pass
+    error_rows = [i for i in inserted if i[0] == "E"]
+    assert error_rows, "expected an error event on the board"
+    assert "HTTP 401" in error_rows[0][2]
+
+
+def test_error_kind_renders_in_activity_log(monkeypatch, tmp_path):
+    """The UI timeline renders a 'Demo error: …' row for kind=error events."""
+    import sqlite3
+    import json
+    import time
+    monkeypatch.setattr(hc, "HERMES_HOME", str(tmp_path))
+    board = "flux-demo-render"
+    db = hc._board_db_path(board)
+    db.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(str(db))
+    con.execute("CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT, "
+                "kind TEXT, payload TEXT, created_at REAL)")
+    con.execute("INSERT INTO task_events (task_id, kind, payload, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                ("t1", "error", json.dumps({"message": "gemini HTTP 429: rate limited"}), time.time()))
+    con.commit()
+    con.close()
+    ev = hc._task_activity_events(board, "t1")
+    assert ev and ev[0]["kind"] == "error"
+    assert "HTTP 429" in ev[0]["label"]
