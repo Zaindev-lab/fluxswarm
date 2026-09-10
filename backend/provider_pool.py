@@ -35,12 +35,12 @@ _PROBE_KEY = {"google": "gemini"}
 #     used to work are dead today: google/gemini-flash-1.5:free -> 404 "No
 #     endpoints found", meta-llama/llama-3.1-8b-instruct:free -> 404 "only paid".
 #   - The legacy google/gemini-1.5-flash slot is dead (404 on v1beta REST);
-#     gemini-2.5-flash-lite is the cheapest/fastest free-tier Gemini model as of
+#     gemini-3.5-flash-lite is the cheapest/fastest free-tier Gemini model as of
 #     Sept 2026 (AI Studio free: 5-15 RPM, ~1000/day, $0 input/output).
 # Free-tier availability FLUCTUATES; this pool is opportunistic capacity, not
 # guaranteed infrastructure — re-verify slots before relying on them.
 DEMO_PROVIDERS = [
-    {"provider": "google", "model": "gemini-2.5-flash-lite",
+    {"provider": "google", "model": "gemini-3.5-flash-lite",
      "requires_key": True, "key_env": "GEMINI_API_KEY"},
     {"provider": "openrouter", "model": "nvidia/nemotron-3.5-lightning:free",
      "requires_key": True, "key_env": "OPENROUTER_API_KEY"},

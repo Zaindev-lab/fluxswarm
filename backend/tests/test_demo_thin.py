@@ -47,9 +47,9 @@ def test_demo_llm_gemini_completion_payload(monkeypatch):
 
     monkeypatch.setattr(demo_llm, "_post_json", fake_post)
     monkeypatch.setenv("GEMINI_API_KEY", "gk-test")
-    text = demo_llm.completion("gemini", "gemini-2.5-flash-lite", "do it")
+    text = demo_llm.completion("gemini", "gemini-3.5-flash-lite", "do it")
     assert text == "hello demo"
-    assert "generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent" in seen["url"]
+    assert "generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent" in seen["url"]
     assert seen["payload"]["contents"][0]["parts"][0]["text"] == "do it"
 
 
@@ -74,7 +74,7 @@ def test_demo_llm_missing_key_raises(monkeypatch):
     """A keyless thin completion must fail loudly, never fake an answer."""
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     try:
-        demo_llm.completion("gemini", "gemini-2.5-flash-lite", "x")
+        demo_llm.completion("gemini", "gemini-3.5-flash-lite", "x")
         raise AssertionError("expected DemoLLMError")
     except demo_llm.DemoLLMError as exc:
         assert "GEMINI_API_KEY" in str(exc)
@@ -103,7 +103,7 @@ def test_thin_execute_runs_claim_attach_complete_sequence(monkeypatch, tmp_path)
     calls = _capture_run(monkeypatch)
     monkeypatch.setattr(demo_llm, "completion", lambda p, m, prompt: "Final deliverable body\nsecond line")
 
-    res = hc.thin_execute("bdemo", "t1", str(ws), "gemini", "gemini-2.5-flash-lite",
+    res = hc.thin_execute("bdemo", "t1", str(ws), "gemini", "gemini-3.5-flash-lite",
                           "PROMPT", objective="write a README")
     assert res["ok"] is True
     assert res["result"] == "Final deliverable body"

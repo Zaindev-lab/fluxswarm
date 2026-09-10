@@ -378,7 +378,7 @@ def test_sqlite_to_postgres_migration_copy_and_idempotent():
 
 def test_record_provider_usage_roundtrip():
     rid = pg.record_provider_usage(
-        "demo", "paid_fallback", "gemini", "gemini-2.5-flash-lite", slug="flux-demo-1")
+        "demo", "paid_fallback", "gemini", "gemini-3.5-flash-lite", slug="flux-demo-1")
     assert rid >= 1
     s = pg.provider_usage_summary()
     assert s["total_attempts"] >= 1

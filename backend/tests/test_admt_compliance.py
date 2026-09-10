@@ -369,7 +369,7 @@ def _smoke_demo(monkeypatch):
     # is required for the rate-limit tests to consume slots like real users do.
     monkeypatch.setattr(
         main_mod.provider_pool, "pick_demo_provider",
-        lambda: {"provider": "google", "model": "gemini-2.5-flash-lite",
+        lambda: {"provider": "google", "model": "gemini-3.5-flash-lite",
                  "probe_key": "gemini", "requires_key": False})
     monkeypatch.setattr(main_mod.hc, "ensure_board", lambda slug: True)
 
