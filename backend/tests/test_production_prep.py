@@ -297,7 +297,7 @@ class TestDemoLaunchRuntime:
         seen = {}
 
         def fake_pick():
-            return {"provider": "google", "model": "gemini-1.5-flash",
+            return {"provider": "google", "model": "gemini-2.5-flash-lite",
                     "requires_key": False}
 
         def fake_launch(board, goal, provider=None, model=None):
@@ -323,7 +323,7 @@ class TestDemoLaunchRuntime:
         assert resp["demo"] is True
         assert seen["keys"] is None
         assert seen["provider"] == "gemini"          # resolve_provider_key("google")
-        assert seen["model"] == "gemini-1.5-flash"
+        assert seen["model"] == "gemini-2.5-flash-lite"
         # The demo build runs on a background thread (api_demo_launch returns
         # the slug immediately); wait for that thread's drive so the assertion
         # below is race-free.
@@ -332,7 +332,7 @@ class TestDemoLaunchRuntime:
             if "drive" in seen:
                 break
             _time.sleep(0.05)
-        assert seen["drive"] == ("gemini", "gemini-1.5-flash")
+        assert seen["drive"] == ("gemini", "gemini-2.5-flash-lite")
         # env-flip regression guard: the demo NEVER pins the runtime via the
         # process-global os.environ (concurrent launches would cross-pollute).
         assert os.environ.get("FLUXSWARM_DEFAULT_PROVIDER") == env_before["FLUXSWARM_DEFAULT_PROVIDER"]
@@ -379,7 +379,7 @@ class TestDemoProfileBuild:
         monkeypatch.setattr(hc_mod, "cleanup_profile_keys", lambda: None)
 
         res = hc_mod.launch_demo_profile(
-            "bdemo", "Build a thing", provider="gemini", model="gemini-1.5-flash")
+            "bdemo", "Build a thing", provider="gemini", model="gemini-2.5-flash-lite")
 
         assert res["planner_id"] == "t_abc001"
         assert res["builder_id"] == "t_abc002"
@@ -393,7 +393,7 @@ class TestDemoProfileBuild:
         ws = p[p.index("--workspace") + 1]
         assert ws.startswith("dir:") and ws.endswith("demo-workspace")
         assert p[p.index("--max-runtime") + 1] == str(hc_mod.DEMO_TASK_MAX_RUNTIME_S)
-        assert p[p.index("--model") + 1] == "gemini-1.5-flash"
+        assert p[p.index("--model") + 1] == "gemini-2.5-flash-lite"
         assert p[p.index("--provider") + 1] == "gemini"
         b_args = creates[1]
         assert b_args[b_args.index("--assignee") + 1] == "ecc-build-fixer"

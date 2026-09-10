@@ -163,7 +163,7 @@ class TestCircuit:
 # Round-robin selection
 # ---------------------------------------------------------------------------
 _ENTRIES = [
-    {"provider": "google", "model": "gemini-1.5-flash", "requires_key": False,
+    {"provider": "google", "model": "gemini-2.5-flash-lite", "requires_key": False,
      "probe_key": "gemini"},
     {"provider": "openrouter", "model": "google/gemini-flash-1.5:free",
      "requires_key": True, "key_env": "OPENROUTER_API_KEY", "probe_key": "openrouter"},

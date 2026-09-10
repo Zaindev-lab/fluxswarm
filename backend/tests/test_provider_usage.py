@@ -36,7 +36,7 @@ def _usage_rows(slug: str, runtime_source: str | None = None) -> list[dict]:
 class TestDbLedger:
     def test_record_inserts_and_counts_as_pending(self):
         rid = db.record_provider_usage(
-            "demo", "paid_fallback", "gemini", "gemini-1.5-flash", slug="flux-demo-t")
+            "demo", "paid_fallback", "gemini", "gemini-2.5-flash-lite", slug="flux-demo-t")
         assert rid >= 1
         s = db.provider_usage_summary()
         assert s["total_attempts"] >= 1
@@ -113,7 +113,7 @@ class TestDemoLedger:
         return main_mod.api_demo_launch(None)
 
     def test_pool_pick_records_usage_with_probe_key(self, monkeypatch):
-        pick = {"provider": "google", "model": "gemini-1.5-flash", "requires_key": False}
+        pick = {"provider": "google", "model": "gemini-2.5-flash-lite", "requires_key": False}
         resp = self._smoke_demo(monkeypatch, lambda: pick)
         assert resp["demo"] is True
         rows = _usage_rows(resp["slug"], runtime_source="pool")
@@ -122,7 +122,7 @@ class TestDemoLedger:
         assert row["surface"] == "demo"
         assert row["runtime_source"] == "pool"
         assert row["provider"] == "gemini"     # resolve_provider_key("google")
-        assert row["model"] == "gemini-1.5-flash"
+        assert row["model"] == "gemini-2.5-flash-lite"
         assert row["ok"] is None               # pending until _bg_dispatch finalizes
 
     def test_pool_unavailable_records_nothing(self, monkeypatch):
