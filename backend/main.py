@@ -43,6 +43,7 @@ if (os.getenv("FLUXSWARM_DATABASE_URL") or "").startswith("postgres"):
 else:
     import db
 import hermes_client as hc
+import demo_llm
 import notify
 import serverlock
 import vault
@@ -900,6 +901,12 @@ def _reconcile_boards_once() -> None:
         slug = (b or {}).get("slug")
         if not slug:
             continue
+        # Demo boards are owned ENTIRELY by the thin demo driver + the demo
+        # lifecycle sweep. A reaper pass here would spawn fat Hermes workers
+        # (which crash ~40-80s into work on the free host) and fight the thin
+        # executor for claims — so the reaper never re-arms flux-demo-*.
+        if slug.startswith("flux-demo-"):
+            continue
         if now - _reaper_last.get(slug, 0.0) < _REAPER_MIN_GAP_S:
             continue
         # A project-finalized board (stuck/refunded/errored) or a board sealed
@@ -1250,25 +1257,89 @@ def api_demo_launch(request: Request, goal: str = ""):
 def _demo_launch_background(*, slug: str, goal: str, plan: str,
                             provider, model, pool_probe_key, runtime_source: str,
                             uid) -> None:
-    """Build + dispatch a demo swarm off the request thread (see above)."""
+    """Build + drive the demo off the request thread (see above).
+
+    The demo uses the thin 2-lane profile: real board + real provider + real
+    artifacts, executed by a bounded thin executor (a full Hermes worker
+    crashes ~40-80s into work on the free host — measured — so real agents
+    belong on the paid path, untouched here).
+    """
 
     def _run() -> None:
         try:
             hc.ensure_board(slug)
-            hc.launch_demo_profile(board=slug, goal=goal,
-                                   provider=provider, model=model)
+            prof = hc.launch_demo_profile(board=slug, goal=goal,
+                                          provider=provider, model=model)
             try:
                 audit.audit("demo.launch", uid=uid, ip="internal", outcome="ok",
                             slug=slug, plan=plan, provider=pool_probe_key,
                             runtime=runtime_source)
             except Exception:
                 pass
-            _fire_dispatch(slug, plan, None)
+            _demo_drive(slug=slug, goal=goal,
+                        planner_id=prof["planner_id"],
+                        builder_id=prof["builder_id"],
+                        workspace=prof["workspace"],
+                        provider=provider, model=model,
+                        pool_probe_key=pool_probe_key,
+                        runtime_source=runtime_source)
         except Exception as e:
             try:
                 audit.audit("demo.launch", outcome="error", slug=slug,
                             reason=type(e).__name__)
                 db.update_provider_usage_outcome(slug, ok=0)
+            except Exception:
+                pass
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _read_brief(text: str, n_lines: int = 12) -> str:
+    return "\n".join((text or "").strip().splitlines()[:n_lines])
+
+
+def _demo_drive(*, slug: str, goal: str, planner_id: str, builder_id: str,
+                workspace: str, provider, model, pool_probe_key=None,
+                runtime_source: str = "pool") -> None:
+    """Drive the thin 2-lane demo board to completion in a daemon thread.
+
+    Planner -> Builder, each executed with a REAL completion from the pool
+    provider and REAL artifact + completed event on the board. Never raises.
+    """
+    def _run() -> None:
+        outcomes: list = []
+        ok = False
+        try:
+            outcomes.append(hc.thin_execute(
+                board=slug, task_id=planner_id, workspace=workspace,
+                provider=provider, model=model,
+                prompt=demo_llm.planner_prompt(hc.DEMO_PLANNER_TITLE, goal),
+                objective=goal, artifact_name="PLAN.md"))
+            plan_text = ""
+            try:
+                plan_text = (Path(workspace) / "PLAN.md").read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                pass
+            outcomes.append(hc.thin_execute(
+                board=slug, task_id=builder_id, workspace=workspace,
+                provider=provider, model=model,
+                prompt=demo_llm.builder_prompt(hc.DEMO_BUILDER_TITLE, goal,
+                                               _read_brief(plan_text)),
+                objective=goal))
+            ok = len(outcomes) == 2 and all(o.get("ok") for o in outcomes)
+        except Exception as e:
+            try:
+                audit.audit("demo.drive", outcome="error", slug=slug,
+                            reason=type(e).__name__)
+            except Exception:
+                pass
+        else:
+            try:
+                audit.audit("demo.drive", outcome="ok", slug=slug,
+                            provider=pool_probe_key, runtime=runtime_source,
+                            planner=outcomes[0].get("elapsed_s"),
+                            builder=outcomes[1].get("elapsed_s"))
+                db.update_provider_usage_outcome(slug, ok=int(ok))
             except Exception:
                 pass
 

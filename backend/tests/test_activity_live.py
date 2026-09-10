@@ -254,10 +254,10 @@ def test_reaper_ticks_only_unfinished_boards(monkeypatch):
     seen = []
     bump_calls = []
     monkeypatch.setattr(main_mod.hc, "list_boards",
-                        lambda: [{"slug": "flux-demo-a"}, {"slug": "flux-demo-b"},
-                                 {"slug": "flux-demo-c"}])
+                        lambda: [{"slug": "u1-a"}, {"slug": "u1-b"},
+                                 {"slug": "u1-c"}])
     monkeypatch.setattr(main_mod.hc, "board_has_unfinished_work",
-                        lambda s: s in ("flux-demo-a", "flux-demo-c"))
+                        lambda s: s in ("u1-a", "u1-c"))
     monkeypatch.setattr(main_mod.hc, "bump_blocked_to_ready",
                         lambda s: bump_calls.append(s) or 0)
     monkeypatch.setattr(main_mod.hc, "dispatch",
@@ -266,14 +266,14 @@ def test_reaper_ticks_only_unfinished_boards(monkeypatch):
     main_mod._reaper_last.clear()
     main_mod._reconcile_boards_once()
 
-    assert [d[0] for d in disp] == ["flux-demo-a", "flux-demo-c"]
+    assert [d[0] for d in disp] == ["u1-a", "u1-c"]
     # Every board gets a transient-block recovery pass BEFORE the dispatch
     # filter, so a board whose agents are ALL blocked can recover too.
-    assert sorted(bump_calls) == ["flux-demo-a", "flux-demo-b", "flux-demo-c"]
+    assert sorted(bump_calls) == ["u1-a", "u1-b", "u1-c"]
     # Single, NON-blocking pass (the reaper must not hold a converger loop).
     for _, kw in disp:
         assert kw.get("blocking") is False
-    assert main_mod._reaper_last.get("flux-demo-b") is None  # terminal board skipped
+    assert main_mod._reaper_last.get("u1-b") is None  # terminal board skipped
 
 
 def test_reaper_bumps_blocked_then_dispatches(monkeypatch):
@@ -293,7 +293,7 @@ def test_reaper_bumps_blocked_then_dispatches(monkeypatch):
     def fake_dispatch(*args, **kwargs):
         order.append("dispatch:" + args[0])
 
-    monkeypatch.setattr(main_mod.hc, "list_boards", lambda: [{"slug": "flux-demo-dead"}])
+    monkeypatch.setattr(main_mod.hc, "list_boards", lambda: [{"slug": "u1-dead"}])
     monkeypatch.setattr(main_mod.hc, "bump_blocked_to_ready", fake_bump)
     monkeypatch.setattr(main_mod.hc, "board_has_unfinished_work", fake_unfinished)
     monkeypatch.setattr(main_mod.hc, "dispatch", fake_dispatch)
@@ -301,12 +301,12 @@ def test_reaper_bumps_blocked_then_dispatches(monkeypatch):
     main_mod._reaper_last.clear()
     main_mod._reconcile_boards_once()
 
-    assert order == ["bump:flux-demo-dead", "check:flux-demo-dead", "dispatch:flux-demo-dead"]
+    assert order == ["bump:u1-dead", "check:u1-dead", "dispatch:u1-dead"]
 
 
 def test_reaper_respects_per_board_min_gap(monkeypatch):
     disp = []
-    monkeypatch.setattr(main_mod.hc, "list_boards", lambda: [{"slug": "flux-demo-a"}])
+    monkeypatch.setattr(main_mod.hc, "list_boards", lambda: [{"slug": "u1-a"}])
     monkeypatch.setattr(main_mod.hc, "board_has_unfinished_work", lambda s: True)
     monkeypatch.setattr(main_mod.hc, "bump_blocked_to_ready", lambda s: 0)
     monkeypatch.setattr(main_mod.hc, "dispatch",
@@ -317,10 +317,10 @@ def test_reaper_respects_per_board_min_gap(monkeypatch):
     main_mod._reconcile_boards_once()
     # Second pass immediately after is throttled by the min-gap window.
     main_mod._reconcile_boards_once()
-    main_mod._reaper_last["flux-demo-a"] = 0.0  # pretend long ago -> allowed again
+    main_mod._reaper_last["u1-a"] = 0.0  # pretend long ago -> allowed again
     main_mod._reconcile_boards_once()
 
-    assert disp.count("flux-demo-a") == 2  # not 3: the immediate retry was throttled
+    assert disp.count("u1-a") == 2  # not 3: the immediate retry was throttled
 
 
 def test_reaper_reclaim_uses_existing_single_pass_dispatch(monkeypatch):
@@ -335,7 +335,7 @@ def test_reaper_reclaim_uses_existing_single_pass_dispatch(monkeypatch):
         return {"terminal": False, "outcome": "pending"}
 
     monkeypatch.setattr(main_mod.hc, "dispatch", fake_dispatch)
-    main_mod.hc.dispatch("flux-demo-dead", max_spawn=main_mod._REAPER_MAX_SPAWN,
+    main_mod.hc.dispatch("u1-dead", max_spawn=main_mod._REAPER_MAX_SPAWN,
                          blocking=False)
     assert captured.get("blocking") is False
     assert captured.get("max_spawn") == main_mod._REAPER_MAX_SPAWN

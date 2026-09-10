@@ -306,14 +306,14 @@ class TestDemoLaunchRuntime:
             seen["model"] = model
             return {"planner_id": "p1", "builder_id": "b1", "workspace": "/tmp/ws"}
 
-        def fake_fire(slug, plan, provider_keys=None, pid=None):
-            seen["fire_k"] = provider_keys
+        def fake_drive(**kw):
+            seen["drive"] = (kw.get("provider"), kw.get("model"))
 
         monkeypatch.setattr(main_mod.provider_pool, "pick_demo_provider", fake_pick)
         monkeypatch.setattr(main_mod, "_client_ip", lambda request: "127.0.0.1")
         monkeypatch.setattr(main_mod.hc, "ensure_board", lambda slug: True)
         monkeypatch.setattr(main_mod.hc, "launch_demo_profile", fake_launch)
-        monkeypatch.setattr(main_mod, "_fire_dispatch", fake_fire)
+        monkeypatch.setattr(main_mod, "_demo_drive", fake_drive)
 
         env_before = {
             "FLUXSWARM_DEFAULT_PROVIDER": os.environ.get("FLUXSWARM_DEFAULT_PROVIDER"),
@@ -324,15 +324,15 @@ class TestDemoLaunchRuntime:
         assert seen["keys"] is None
         assert seen["provider"] == "gemini"          # resolve_provider_key("google")
         assert seen["model"] == "gemini-1.5-flash"
-        # The swarm build runs on a background thread (api_demo_launch returns
-        # the slug immediately); wait for that thread's dispatch so the assertion
+        # The demo build runs on a background thread (api_demo_launch returns
+        # the slug immediately); wait for that thread's drive so the assertion
         # below is race-free.
         import time as _time
         for _ in range(100):
-            if "fire_k" in seen:
+            if "drive" in seen:
                 break
             _time.sleep(0.05)
-        assert seen["fire_k"] is None
+        assert seen["drive"] == ("gemini", "gemini-1.5-flash")
         # env-flip regression guard: the demo NEVER pins the runtime via the
         # process-global os.environ (concurrent launches would cross-pollute).
         assert os.environ.get("FLUXSWARM_DEFAULT_PROVIDER") == env_before["FLUXSWARM_DEFAULT_PROVIDER"]

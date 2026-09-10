@@ -377,7 +377,7 @@ def _smoke_demo(monkeypatch):
         return {"planner_id": "p1", "builder_id": "b1", "workspace": "/tmp/ws"}
 
     monkeypatch.setattr(main_mod.hc, "launch_demo_profile", _fake_profile)
-    monkeypatch.setattr(main_mod, "_fire_dispatch", lambda *a, **k: None)
+    monkeypatch.setattr(main_mod, "_demo_drive", lambda **k: None)
 
 
 def test_opt_out_blocks_demo():

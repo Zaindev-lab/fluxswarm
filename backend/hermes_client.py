@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Optional
 
 from provider import ProviderHealth, ProviderStatus, check_provider_health
+import demo_llm
 
 # HERMES_BIN is overridable via FLUXSWARM_HERMES_BIN so the same code runs on
 # Linux/Docker (e.g. /app/hermes/bin/hermes) as well as the dev Windows host.
@@ -693,6 +694,80 @@ def launch_demo_profile(board: str, goal: str, provider: Optional[str] = None,
     planner_id = _create(DEMO_PLANNER_TITLE, _DEMO_PLANNER_ASSIGNEE)
     builder_id = _create(DEMO_BUILDER_TITLE, _DEMO_BUILDER_ASSIGNEE, parent=planner_id)
     return {"planner_id": planner_id, "builder_id": builder_id, "workspace": str(ws)}
+
+
+def _emit_working(board_display_log: str, task_id: str, note: str, at: float | None = None) -> None:
+    """Best-effort display-only 'Working…' event for the thin demo executor.
+
+    A real worker emits heartbeats (~60s) which the log collapses to a single
+    "Working…" row; the thin executor emits one at its true start so the UI
+    timeline shows activity. Failures here never raise.
+    """
+    db = _board_db_path(board_display_log)
+    try:
+        if not db.exists():
+            return
+        c = sqlite3.connect(str(db))
+        try:
+            c.execute(
+                "INSERT INTO task_events (task_id, kind, payload, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (task_id, "heartbeat",
+                 json.dumps({"note": str(note)[:200]}), float(at if at is not None else time.time())),
+            )
+            c.commit()
+        finally:
+            c.close()
+    except Exception:
+        pass
+
+
+def thin_execute(board: str, task_id: str, workspace: str, provider: str,
+                 model: str, prompt: str, objective: str = "",
+                 artifact_name: str | None = None) -> dict:
+    """Execute one demo lane with a bounded thin executor.
+
+    A full Hermes worker crashes ~40-80s into real work on the 512MB free host
+    (measured: ``recovered reason=crash`` on every attempt, regardless of task
+    size), so the free demo CANNOT converge with real agents. The thin executor
+    still runs against the REAL board and REAL provider:
+
+      * ``kanban claim``  -> real ``claimed`` ("Started") event,
+      * a real completion call to the resolved pool provider (demo_llm),
+      * a real artifact file written into the task workspace,
+      * ``kanban attach`` -> real "Produced" event,
+      * ``kanban complete`` -> real result summary.
+
+    Only the heavyweight agent loop (fat worker subprocess) is skipped. The
+    paid path keeps running full agents untouched.
+    """
+    start = time.time()
+    r = _run(["claim", task_id, "--ttl", "600"], board=board)
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"demo task {task_id} could not be claimed: "
+            f"{(r.stderr or r.stdout or '').strip()[:300]}")
+    _emit_working(board, task_id, "thin demo worker: provider completion in flight")
+    text = demo_llm.completion(provider, model, prompt)
+    name = artifact_name or demo_llm.deliverable_filename(objective or "")
+    ws = Path(workspace)
+    ws.mkdir(parents=True, exist_ok=True)
+    artifact = ws / name
+    artifact.write_text(text, encoding="utf-8")
+    _emit_working(board, task_id, "artifact written; attaching")
+    ra = _run(["attach", task_id, str(artifact)], board=board)
+    if ra.returncode != 0:
+        # produced event is cosmetic to convergence; the real artifact is on
+        # disk — log and continue rather than fail the lane.
+        pass
+    summary = (text.strip().splitlines() or [name])[0][:160]
+    rc_ = _run(["complete", task_id, "--result", summary], board=board)
+    if rc_.returncode != 0:
+        raise RuntimeError(
+            f"demo task {task_id} could not be completed: "
+            f"{(rc_.stderr or rc_.stdout or '').strip()[:300]}")
+    return {"result": summary, "artifact": str(artifact), "ok": True,
+            "elapsed_s": round(time.time() - start, 1)}
 
 
 def _board_activity_sig(board: str) -> tuple:
