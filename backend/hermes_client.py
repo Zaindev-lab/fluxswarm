@@ -622,6 +622,15 @@ DEMO_BUILDER_TITLE = "Build the demo deliverable"
 _DEMO_PLANNER_ASSIGNEE = "ecc-planner"
 _DEMO_BUILDER_ASSIGNEE = "ecc-build-fixer"
 DEMO_TASK_MAX_RUNTIME_S = int(os.environ.get("FLUXSWARM_DEMO_TASK_MAX_RUNTIME_S", "1500"))
+# Free-tier workers crash after ~40-80s of real work (512MB host). The demo
+# tasks are therefore coached to finish in ONE short response: a long turn
+# dies mid-run, a short one survives its window.
+_DEMO_SPEED_BODY = (
+    "\n\nSPEED RULES (strict):\n"
+    "- This is a latency demo. Produce the deliverable IMMEDIATELY in one short "
+    "response. Do not iterate, do not over-engineer, do not scan the workspace.\n"
+    "- Write the smallest possible single file that satisfies the objective.\n"
+    "- Do not use any tool that lists or reads directories; act directly.\n")
 
 
 def demo_workspace_dir(board: str) -> Path:
@@ -658,6 +667,7 @@ def launch_demo_profile(board: str, goal: str, provider: Optional[str] = None,
     ws = demo_workspace_dir(board)
     _seed_demo_workspace(ws, goal)
     ws_spec = f"dir:{ws}"
+    task_body = (goal or "").strip() + _DEMO_SPEED_BODY
 
     def _create(title: str, assignee: str, parent: str | None = None) -> str:
         args = ["create", title, "--assignee", assignee, "--workspace", ws_spec,
@@ -668,7 +678,7 @@ def launch_demo_profile(board: str, goal: str, provider: Optional[str] = None,
             args += ["--model", model]
         if parent:
             args += ["--parent", parent]
-        args += ["--body", goal, "--created-by", "fluxswarm"]
+        args += ["--body", task_body, "--created-by", "fluxswarm"]
         r = _run(args, board=board)
         if r.returncode != 0:
             raise RuntimeError(

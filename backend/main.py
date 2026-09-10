@@ -1121,7 +1121,7 @@ def api_squad():
 
 
 @app.get("/api/demo/launch")
-def api_demo_launch(request: Request, goal: str = "Build a sample FastAPI notes API with tests and CI/CD (DEMO)"):
+def api_demo_launch(request: Request, goal: str = ""):
     """Pre-seeded instant demo: launches a sample swarm under the demo user.
 
     Returns immediately; the dispatcher pass runs in a background thread so the
@@ -1152,7 +1152,9 @@ def api_demo_launch(request: Request, goal: str = "Build a sample FastAPI notes 
         # must not crash the endpoint (it would 500 on `demo.get(...)`).
         return {"error": "demo_user_missing", "demo": True}
     plan = demo.get("plan", "demo")
-    goal = (goal or "").strip() or "Build a sample FastAPI notes API with tests and CI/CD (DEMO)"
+    goal = (goal or "").strip() or (
+        "Create a file README.md containing three bullet points describing "
+        "what FluxSwarm agents do. That is the entire deliverable.")
     goal = sanitize_goal(goal)
     # Session 2 + P0.5: pick a healthy demo provider (free pool) and thread it
     # as an EXPLICIT request-scoped pin (provider/model kwargs). The pool is
