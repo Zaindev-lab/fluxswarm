@@ -629,6 +629,15 @@ def api_provider_health(provider: str = "", model: str = ""):
 
 
 # ---------- background squad dispatch ----------
+def _demo_dispatch_timeout(slug: str) -> int:
+    """Driver window for demo boards matches their wall-clock cap (the old
+    fixed 900 s could cut a legit free-tier demo short and seal it while its
+    workers were still mid-run); production launches keep the operator default."""
+    if slug.startswith("flux-demo-"):
+        return max(hc.DISPATCH_TIMEOUT_S, _DEMO_MAX_RUNTIME_S)
+    return hc.DISPATCH_TIMEOUT_S
+
+
 def _bg_dispatch(slug: str, plan: str, provider_keys=None, pid: int | None = None) -> None:
     """Drive the dispatcher to a terminal state in a daemon thread.
 
@@ -647,9 +656,10 @@ def _bg_dispatch(slug: str, plan: str, provider_keys=None, pid: int | None = Non
     instead of an indefinitely-running board.
     """
     try:
+        timeout_s = _demo_dispatch_timeout(slug)
         res = hc.dispatch(slug, max_spawn=db.PLANS.get(plan, {}).get("parallel", 1),
                           provider_keys=provider_keys, blocking=True,
-                          timeout_s=hc.DISPATCH_TIMEOUT_S)
+                          timeout_s=timeout_s)
     except Exception as e:
         # Surface the failure for ops instead of silently dropping the swarm,
         # and protect the credit: a launch that errored before any agent
@@ -1243,8 +1253,8 @@ def _demo_launch_background(*, slug: str, goal: str, plan: str,
     def _run() -> None:
         try:
             hc.ensure_board(slug)
-            hc.launch_swarm(slug, goal, provider_keys=None,
-                            provider=provider, model=model)
+            hc.launch_demo_profile(board=slug, goal=goal,
+                                   provider=provider, model=model)
             try:
                 audit.audit("demo.launch", uid=uid, ip="internal", outcome="ok",
                             slug=slug, plan=plan, provider=pool_probe_key,

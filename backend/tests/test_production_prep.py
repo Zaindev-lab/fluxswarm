@@ -300,13 +300,11 @@ class TestDemoLaunchRuntime:
             return {"provider": "google", "model": "gemini-1.5-flash",
                     "requires_key": False}
 
-        def fake_launch(board, goal, provider_keys=None, provider=None, model=None):
-            seen["keys"] = provider_keys
+        def fake_launch(board, goal, provider=None, model=None):
+            seen["keys"] = None
             seen["provider"] = provider
             seen["model"] = model
-            return type("S", (), {
-                "root_id": "r1", "worker_ids": [], "verifier_id": "v", "synthesizer_id": "s",
-            })()
+            return {"planner_id": "p1", "builder_id": "b1", "workspace": "/tmp/ws"}
 
         def fake_fire(slug, plan, provider_keys=None, pid=None):
             seen["fire_k"] = provider_keys
@@ -314,7 +312,7 @@ class TestDemoLaunchRuntime:
         monkeypatch.setattr(main_mod.provider_pool, "pick_demo_provider", fake_pick)
         monkeypatch.setattr(main_mod, "_client_ip", lambda request: "127.0.0.1")
         monkeypatch.setattr(main_mod.hc, "ensure_board", lambda slug: True)
-        monkeypatch.setattr(main_mod.hc, "launch_swarm", fake_launch)
+        monkeypatch.setattr(main_mod.hc, "launch_demo_profile", fake_launch)
         monkeypatch.setattr(main_mod, "_fire_dispatch", fake_fire)
 
         env_before = {
@@ -357,6 +355,70 @@ class TestDemoLaunchRuntime:
         assert resp["demo"] is True
         assert resp["error"] == "demo_provider_unavailable"
         assert "en" in resp["message"]
+
+
+class TestDemoProfileBuild:
+    def test_launch_demo_profile_builds_two_lane_graph(self, monkeypatch):
+        """The demo 2-lane profile pins the runtime at CREATE time, seeds a tiny
+        dir: workspace, and links Builder under Planner — never the full squad."""
+        import hermes_client as hc_mod
+        calls: list = []
+        n = {"n": 0}
+
+        def fake_run(args, board=None, capture=True, provider_keys=None):
+            calls.append((board, list(args)))
+            n["n"] += 1
+            if n["n"] == 1:
+                return type("R", (), {"returncode": 0,
+                                      "stdout": "Created t_abc001  (ready, assignee=ecc-planner)"})()
+            return type("R", (), {"returncode": 0,
+                                  "stdout": "Created t_abc002  (todo, assignee=ecc-build-fixer)"})()
+
+        monkeypatch.setattr(hc_mod, "_run", fake_run)
+        monkeypatch.setattr(hc_mod, "_raise_preflight", lambda: None)
+        monkeypatch.setattr(hc_mod, "cleanup_profile_keys", lambda: None)
+
+        res = hc_mod.launch_demo_profile(
+            "bdemo", "Build a thing", provider="gemini", model="gemini-1.5-flash")
+
+        assert res["planner_id"] == "t_abc001"
+        assert res["builder_id"] == "t_abc002"
+        assert (hc_mod.demo_workspace_dir("bdemo") / "TASK.md").exists()
+        creates = [a for b, a in calls if a[0] == "create"]
+        assert len(creates) == 2
+        for b, a in calls:
+            assert b == "bdemo"
+        p = creates[0]
+        assert p[p.index("--assignee") + 1] == "ecc-planner"
+        ws = p[p.index("--workspace") + 1]
+        assert ws.startswith("dir:") and ws.endswith("demo-workspace")
+        assert p[p.index("--max-runtime") + 1] == str(hc_mod.DEMO_TASK_MAX_RUNTIME_S)
+        assert p[p.index("--model") + 1] == "gemini-1.5-flash"
+        assert p[p.index("--provider") + 1] == "gemini"
+        b_args = creates[1]
+        assert b_args[b_args.index("--assignee") + 1] == "ecc-build-fixer"
+        assert "--parent" in b_args and b_args[b_args.index("--parent") + 1] == "t_abc001"
+
+    def test_launch_demo_profile_no_runtime_still_creates_unpinned_tasks(self, monkeypatch):
+        """provider/model are optional: a demo with no pick still builds the
+        graph WITHOUT --model/--provider (the worker uses the env runtime)."""
+        import hermes_client as hc_mod
+        calls = []
+        n = {"n": 0}
+
+        def fake_run(args, board=None, capture=True, provider_keys=None):
+            calls.append(list(args))
+            n["n"] += 1
+            return type("R", (), {"returncode": 0,
+                                  "stdout": f"Created t_af00{n['n']}  (ready, assignee=ecc-planner)"})()
+
+        monkeypatch.setattr(hc_mod, "_run", fake_run)
+        monkeypatch.setattr(hc_mod, "_raise_preflight", lambda: None)
+        monkeypatch.setattr(hc_mod, "cleanup_profile_keys", lambda: None)
+        res = hc_mod.launch_demo_profile("bdemo2", "Do something")
+        assert res["planner_id"] == "t_af001"
+        asserts = [a for a in calls if a[0] == "create"]
+        assert "--model" not in asserts[0] and "--provider" not in asserts[0]
 
 
 class TestVaultSecretFailFast:

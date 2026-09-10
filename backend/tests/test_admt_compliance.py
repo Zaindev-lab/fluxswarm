@@ -373,11 +373,10 @@ def _smoke_demo(monkeypatch):
                  "probe_key": "gemini", "requires_key": False})
     monkeypatch.setattr(main_mod.hc, "ensure_board", lambda slug: True)
 
-    def _fake_launch(board, goal, provider_keys=None):
-        return SimpleNamespace(root_id="r1", worker_ids=["w1"],
-                               verifier_id="v1", synthesizer_id="s1")
+    def _fake_profile(board, goal, provider=None, model=None):
+        return {"planner_id": "p1", "builder_id": "b1", "workspace": "/tmp/ws"}
 
-    monkeypatch.setattr(main_mod.hc, "launch_swarm", _fake_launch)
+    monkeypatch.setattr(main_mod.hc, "launch_demo_profile", _fake_profile)
     monkeypatch.setattr(main_mod, "_fire_dispatch", lambda *a, **k: None)
 
 

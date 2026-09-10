@@ -602,6 +602,89 @@ def launch_from_template(board: str, goal: str, agents: list[str],
     )
 
 
+# --------------------------------------------------------------------------
+# Demo profile: a lightweight, convergent 2-lane board for the free demo.
+# The full `hermes kanban swarm` squad (6 agents over the whole project
+# workspace) cannot converge within the free-tier runtime budget on a
+# throttled 0.1-CPU instance: each worker boots a fat CLI against a large
+# context, and slow/heavy workers get reclaimed or crash (memory), so the
+# board churns in a recover-and-requeue loop instead of finishing.
+# The demo instead builds a DIRECT kanban graph (no swarm CLI) with:
+#   * a deliberately TINY auto-seeded workspace (dir: specifier) so each
+#     worker's context and memory footprint stay small;
+#   * two dependent tasks (Planner -> Builder) — enough to show a real,
+#     multi-phase agent run without the squad's width;
+#   * a raised per-task --max-runtime so legitimate long turns survive;
+#   * the picked (model, provider) pinned AT CREATE TIME (no per-task
+#     set-model churn), so a keyless default can never block a card.
+DEMO_PLANNER_TITLE = "Plan the demo deliverable"
+DEMO_BUILDER_TITLE = "Build the demo deliverable"
+_DEMO_PLANNER_ASSIGNEE = "ecc-planner"
+_DEMO_BUILDER_ASSIGNEE = "ecc-build-fixer"
+DEMO_TASK_MAX_RUNTIME_S = int(os.environ.get("FLUXSWARM_DEMO_TASK_MAX_RUNTIME_S", "1500"))
+
+
+def demo_workspace_dir(board: str) -> Path:
+    """The small, disposable workspace the demo tasks operate in.
+
+    Lives inside the board's own directory (under ``HERMES_HOME/kanban/boards``)
+    so the demo TTL sweep (``delete_demo_board``) reclaims it automatically.
+    """
+    return Path(HERMES_HOME) / "kanban" / "boards" / board / "demo-workspace"
+
+
+def _seed_demo_workspace(ws: Path, goal: str) -> None:
+    """Seed the tiny demo workspace with instructions before workers claim."""
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / "TASK.md").write_text(
+        "FluxSwarm demo — disposable sandbox.\n\n"
+        "OBJECTIVE:\n"
+        f"{goal}\n\n"
+        "RULES:\n"
+        "- Work ONLY inside this directory; do not read or modify anything outside it.\n"
+        "- Produce one small, self-contained deliverable as files here.\n",
+        encoding="utf-8")
+
+
+def launch_demo_profile(board: str, goal: str, provider: Optional[str] = None,
+                        model: Optional[str] = None) -> dict:
+    """Build the 2-lane demo graph directly in an existing board.
+
+    Returns ``{"planner_id", "builder_id", "workspace"}``. Raises
+    RuntimeError on any step (fail fast BEFORE the board is dispatched).
+    """
+    _raise_preflight()
+    cleanup_profile_keys()
+    ws = demo_workspace_dir(board)
+    _seed_demo_workspace(ws, goal)
+    ws_spec = f"dir:{ws}"
+
+    def _create(title: str, assignee: str, parent: str | None = None) -> str:
+        args = ["create", title, "--assignee", assignee, "--workspace", ws_spec,
+                "--max-runtime", str(DEMO_TASK_MAX_RUNTIME_S)]
+        if provider:
+            args += ["--provider", provider]
+        if model:
+            args += ["--model", model]
+        if parent:
+            args += ["--parent", parent]
+        args += ["--body", goal, "--created-by", "fluxswarm"]
+        r = _run(args, board=board)
+        if r.returncode != 0:
+            raise RuntimeError(
+                f"demo task create failed (rc={r.returncode}): "
+                f"{(r.stderr or r.stdout or '').strip()[:400]}")
+        m = re.search(r"Created (t_[0-9a-f]+)", r.stdout or "")
+        if not m:
+            raise RuntimeError(
+                f"demo task create: no task id in output: {(r.stdout or '').strip()[:400]}")
+        return m.group(1)
+
+    planner_id = _create(DEMO_PLANNER_TITLE, _DEMO_PLANNER_ASSIGNEE)
+    builder_id = _create(DEMO_BUILDER_TITLE, _DEMO_BUILDER_ASSIGNEE, parent=planner_id)
+    return {"planner_id": planner_id, "builder_id": builder_id, "workspace": str(ws)}
+
+
 def _board_activity_sig(board: str) -> tuple:
     """Monotonic worker-activity fingerprint for the board, read from ``kanban.db``.
 
@@ -1480,7 +1563,10 @@ def _task_activity_events(board: str, task_id: str) -> list[dict]:
         elif kind == "blocked":
             out.append({"kind": "blocked", "label": "Blocked", "at": int(created_at)})
         elif kind in ("reclaimed", "crashed", "timed_out"):
-            out.append({"kind": "recovered", "label": "Worker recovered and requeued",
+            reason = {"reclaimed": "stall-reclaim", "crashed": "crash",
+                      "timed_out": "max-runtime"}.get(kind, kind)
+            out.append({"kind": "recovered", "reason": reason,
+                        "label": f"Worker recovered and requeued ({reason})",
                         "at": int(created_at)})
     return out
 
