@@ -699,7 +699,9 @@ def _seed_demo_workspace(ws: Path, goal: str) -> None:
         f"{goal}\n\n"
         "RULES:\n"
         "- Work ONLY inside this directory; do not read or modify anything outside it.\n"
-        "- Produce one small, self-contained deliverable as files here.\n",
+        "- Produce one small, self-contained deliverable as files here.\n"
+        "- If the objective describes a website/web app/landing page, the deliverable\n"
+        "  is a single self-contained index.html (inline CSS+JS, no external deps).\n",
         encoding="utf-8")
 
 
@@ -804,8 +806,9 @@ def _seed_project_workspace(ws: Path, goal: str) -> None:
         f"{goal}\n\n"
         "The six lanes below each produce a REAL artifact in this directory:\n"
         "PLAN.md, ARCHITECTURE.md, Dockerfile, tests/test_app.py, REVIEW.md,\n"
-        "and the final deliverable (README.md or the project code file). Confirm\n"
-        "the deliverable actually satisfies the objective.\n",
+        "and the final deliverable (README.md, the project code file, or a single\n"
+        "self-contained index.html when the objective is a website/web app/landing page).\n"
+        "Confirm the deliverable actually satisfies the objective.\n",
         encoding="utf-8")
 
 

@@ -33,6 +33,15 @@ _THIN_RETRY_BACKOFF_S = float(os.environ.get("FLUXSWARM_THIN_RETRY_BACKOFF_S", "
 
 _HTTP_CODE_RE = re.compile(r" HTTP (\d{3}):")
 
+# Objectives that describe a browsable website/web app should produce a single
+# self-contained index.html — the project preview (/p/<slug>/) then renders it
+# as a live Lovable-style page instead of a plain file listing.
+_WEB_HINTS = (
+    "web app", "webapp", "web application", "website", "web page", "webpage",
+    "landing", "landingpage", "landing page", "single-page", "spa", "dashboard",
+    "frontend", "portfolio", "saas", " ui", "ui ", " ecommerce",
+)
+
 
 class DemoLLMError(RuntimeError):
     """A real, non-silent failure for the thin demo executor."""
@@ -142,26 +151,47 @@ def completion(provider: str, model: str, prompt: str, max_tokens: int = 400,
     raise DemoLLMError(f"unhandled demo provider: {provider!r}")
 
 
+def _is_web_objective(objective: str) -> bool:
+    lower = (objective or "").lower()
+    return any(h in lower for h in _WEB_HINTS)
+
+
 def planner_prompt(task_title: str, objective: str) -> str:
+    prefix = " Deliver the site as ONE self-contained index.html." if _is_web_objective(objective) else ""
     return (
         f"Task: {task_title}\n\n"
         f"Objective: {objective}\n\n"
         "Act as the Planner. Produce a SHORT plan (at most 12 lines, plain text)"
-        " describing the minimal steps to achieve the objective. Do not write "
-        "any files. Output only the plan text.\n"
+        " describing the minimal steps to achieve the objective."
+        f"{prefix}"
+        " Do not write any files. Output only the plan text.\n"
     )
 
 
 def builder_prompt(task_title: str, objective: str, plan: str) -> str:
+    if _is_web_objective(objective):
+        deliverable = (
+            "The objective is a WEBSITE / WEB APP — the deliverable is ONE "
+            "self-contained file named index.html: a complete, working web page "
+            "with ALL CSS and JavaScript inlined (no external CDNs, fonts, or "
+            "images), responsive, opening directly in a browser and rendering "
+            "the UI the user asked for (real interactions, not placeholders)."
+        )
+    else:
+        deliverable = (
+            "Produce the SINGLE final deliverable file that achieves the "
+            "objective. If the objective mentions a specific file name (e.g. "
+            "README.md or app.py), write exactly that; otherwise write the "
+            "concise code/document file that fulfills the objective."
+        )
     return (
         f"Task: {task_title}\n\n"
         f"Objective: {objective}\n\n"
         f"Plan (from the Planner):\n{plan or '(none)'}\n\n"
-        "Act as the Builder. Produce the SINGLE final deliverable file that "
-        "achieves the objective. Output ONLY the file content — no commentary, "
-        "no markdown fences. If the objective mentions a specific file name "
-        "(e.g. README.md), write exactly that; otherwise write a concise text "
-        "document that fulfills the objective.\n"
+        "Act as the Builder. "
+        f"{deliverable} "
+        "Output ONLY the file content — no commentary, no markdown fences, no "
+        "``` code blocks.\n"
     )
 
 
@@ -169,10 +199,10 @@ def deliverable_filename(objective: str) -> str:
     lower = (objective or "").lower()
     if "readme" in lower:
         return "README.md"
-    if "html" in lower:
-        return "index.html"
-    if "python" in lower or "py " in lower:
+    if "python" in lower or "py " in lower or lower.endswith(".py"):
         return "app.py"
+    if "html" in lower or _is_web_objective(objective):
+        return "index.html"
     return "deliverable.md"
 
 

@@ -17,6 +17,7 @@ import mimetypes
 import os
 import re
 import secrets
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -1306,8 +1307,9 @@ def api_demo_launch(request: Request, goal: str = ""):
         return {"error": "demo_user_missing", "demo": True}
     plan = demo.get("plan", "demo")
     goal = (goal or "").strip() or (
-        "Create a file README.md containing three bullet points describing "
-        "what FluxSwarm agents do. That is the entire deliverable.")
+        "Build a single self-contained index.html landing page for a fictional "
+        "AI startup called Nebula: dark hero, features grid, pricing table, and "
+        "an interactive sign-up form — all inline CSS/JS, nothing external.")
     goal = sanitize_goal(goal)
     # Session 2 + P0.5: pick a healthy demo provider (free pool) and thread it
     # as an EXPLICIT request-scoped pin (provider/model kwargs). The pool is
@@ -1486,6 +1488,16 @@ def _demo_drive(*, slug: str, goal: str, planner_id: str, builder_id: str,
                 pass
         else:
             try:
+                # Mirror the demo's tiny workspace into the board's preview root
+                # (project_workspace_dir) so /p/<slug>/ renders the built site
+                # live instead of an empty listing. The demo workspace itself is
+                # intentionally disposable; this copy is the user-facing result.
+                if ok:
+                    src = Path(workspace)
+                    dst = hc.project_workspace_dir(slug)
+                    if src.is_dir() and str(src) != str(dst):
+                        dst.mkdir(parents=True, exist_ok=True)
+                        shutil.copytree(src, dst, dirs_exist_ok=True)
                 audit.audit("demo.drive", outcome="ok", slug=slug,
                             provider=pool_probe_key, runtime=runtime_source,
                             planner=outcomes[0].get("elapsed_s"),
@@ -2082,7 +2094,11 @@ def _preview_html(slug: str, code: int, title: str, text: str) -> HTMLResponse:
 
 def _preview_listing(request: Request, slug: str, node: Path,
                      root: Path, relpath: str) -> str:
-    """Directory-listing page for the live preview (no index.html at this path)."""
+    """Preview page when no index.html exists (no browseable site generated).
+
+    Root level shows a guided Lovable-style card explaining there is no live
+    page yet and how to get one; the generated files are listed below it.
+    """
     import html as _html
     base = request.url.path.rstrip("/")
     rows: list[str] = []
@@ -2096,12 +2112,20 @@ def _preview_listing(request: Request, slug: str, node: Path,
         rows.append(f'<li><a href="{_html.escape(href, quote=True)}">{icon} '
                     f'{_html.escape(p.name)}</a></li>')
     rel_disp = relpath or "."
+    guide = ""
+    if not relpath:
+        guide = """
+<div style="max-width:760px;margin:24px auto 32px;padding:28px;border-radius:16px;background:linear-gradient(160deg,#13203c,#0b1428);border:1px solid #1e2c4d">
+<p style="margin:0 0 6px;font-size:12px;letter-spacing:.12em;color:#22d3ee;text-transform:uppercase">Live preview</p>
+<h1 style="margin:0 0 10px;font-size:24px">No live page generated yet</h1>
+<p style="margin:0 0 14px;color:#aeb8d0">This build produced code and documents, not a browsable web page. To get a live preview that renders in this window, launch with a goal that asks for a <b>website</b>, <b>landing page</b>, or <b>web app</b> — the swarm then builds a single self-contained <code>index.html</code> you can open and interact with.</p>
+<p style="margin:0;color:#8b96b3;font-size:13px">Generated files are listed below if you want to inspect them.</p>
+</div>"""
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <title>{_html.escape(slug)} · preview</title></head>
 <body style="font-family:system-ui;background:#0b0f1a;color:#eef1fb;margin:0;padding:32px;line-height:1.7">
+{guide}
 <p style="color:#8b96b3;font-size:13px">{_html.escape(slug)} · /{_html.escape(rel_disp)}</p>
-<h1 style="margin:6px 0 4px">Generated workspace</h1>
-<p style="color:#8b96b3;margin:0 0 18px">No index.html at this level — browse the generated files.</p>
 <ul style="list-style:none;padding:0;margin:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px">
 {''.join(rows)}
 </ul></body></html>"""

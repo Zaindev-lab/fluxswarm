@@ -181,7 +181,7 @@ async function poll(){
 }
 
 async function launchDemo(){
-  const goal=($("goal").value||"Build a sample FastAPI notes API with tests and CI/CD (DEMO)").trim();
+  const goal=($("goal").value||"Build a single self-contained index.html landing page for a fictional AI startup called Nebula — dark hero, features grid, pricing table, interactive sign-up form (all inline, nothing external)").trim();
   $("launch").disabled=true;$("err").hidden=true;
   lastAction=launchDemo;
   async function recoverSlug(){

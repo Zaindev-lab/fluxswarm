@@ -113,7 +113,21 @@ def test_deliverable_filename_mapping():
     assert demo_llm.deliverable_filename("write a README") == "README.md"
     assert demo_llm.deliverable_filename("landing HTML page") == "index.html"
     assert demo_llm.deliverable_filename("python script") == "app.py"
+    # Web-intent goals map to a browsable index.html (served live by /p/<slug>/).
+    assert demo_llm.deliverable_filename("build a website for a bakery") == "index.html"
+    assert demo_llm.deliverable_filename("a landing page for our startup") == "index.html"
+    assert demo_llm.deliverable_filename("create a dashboard UI") == "index.html"
+    assert demo_llm.deliverable_filename("a single-page web app") == "index.html"
     assert demo_llm.deliverable_filename("anything else") == "deliverable.md"
+
+
+def test_web_intent_guidance_in_prompts():
+    web = demo_llm.builder_prompt("Build", "a landing page for a startup", "plan")
+    assert "index.html" in web
+    assert "ALL CSS and JavaScript inlined" in web
+    code = demo_llm.builder_prompt("Build", "a FastAPI REST API", "plan")
+    assert "index.html" not in code
+    assert "single self-contained index.html" not in code
 
 
 def test_thin_execute_drives_board_events_and_artifact(monkeypatch, tmp_path):
