@@ -283,7 +283,13 @@ Bring your own provider key for the strongest output — or a free OpenRouter ke
 
   <!-- RESULTS / WORKSPACE -->
   <div class="card hidden" id="results">
-    <h2 style="margin-top:0;font-size:16px" id="resTitle">Generated workspace</h2>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+      <h2 style="margin-top:0;font-size:16px" id="resTitle">Generated workspace</h2>
+      <div style="display:flex;gap:8px">
+        <button class="ghost" id="previewBtn" data-onclick="openPreview" data-i18n="preview_btn">👁 Preview</button>
+        <button class="ghost" id="previewTabBtn" data-onclick="openPreviewTab" data-i18n="preview_open">Open</button>
+      </div>
+    </div>
     <div class="hint" id="resHint" data-i18n="res_hint">Generated files from this board's workspace.</div>
     <pre id="wsContent" class="empty"></pre>
   </div>
@@ -418,6 +424,19 @@ Bring your own provider key for the strongest output — or a free OpenRouter ke
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
+<!-- LIVE PREVIEW -->
+<div class="modal" id="previewModal" role="dialog" aria-modal="true" aria-label="Live preview">
+  <div class="box" style="width:min(1150px,94vw);max-width:none;height:92vh;max-height:92vh;display:flex;flex-direction:column;padding:0">
+    <div style="display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--border);flex:0 0 auto">
+      <span style="font-size:16px;font-weight:800" id="previewTitle" data-i18n="preview_title">Live preview</span>
+      <span style="color:var(--muted);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1" id="previewSlug"></span>
+      <button class="ghost" id="previewOpenTab" data-i18n="preview_open">Open in new tab</button>
+      <button class="ghost" id="previewCloseBtn" aria-label="Close preview">✕</button>
+    </div>
+    <iframe id="previewFrame" sandbox="allow-scripts allow-forms allow-modals allow-popups" style="flex:1;border:0;background:#fff;min-height:0" title="Live preview"></iframe>
+  </div>
+</div>
+
 <!-- SUPPORT CHAT -->
 <div class="support-panel" id="supportPanel" role="dialog" aria-label="Support assistant">
   <div class="support-head">
@@ -438,7 +457,7 @@ const API="";
 let token=null, currentUser=null, currentSlug=null, ws=null;
 const params=new URLSearchParams(location.search);
 if(params.get("ref")) document.getElementById("r_ref").value=params.get("ref");
-document.addEventListener("keydown",e=>{if(e.key==="Escape")document.getElementById("authModal").classList.remove("open");});
+document.addEventListener("keydown",e=>{if(e.key==="Escape"){document.getElementById("authModal").classList.remove("open");document.getElementById("previewModal").classList.remove("open");}});
 
 /* CSP-strict event delegation: no inline onclick= attributes allowed under a
    nonce-only script-src. Buttons carry data-onclick="fnName" [+ data-arg]. */
@@ -568,6 +587,40 @@ async function loadWorkspace(slug){
   el.className="";el.textContent=content;
 }
 
+/* ---- live preview (/p/<slug>/ in a sandboxed iframe) ------------ */
+const previewURL=()=>"/p/"+encodeURIComponent(currentSlug)+"/";
+function previewNeedsTicket(){return currentSlug&&!currentSlug.startsWith("flux-demo-")&&token;}
+async function openPreview(){
+  if(!currentSlug){toast(t("preview_none"));return;}
+  const modal=document.getElementById("previewModal");
+  const frame=document.getElementById("previewFrame");
+  document.getElementById("previewSlug").textContent=currentSlug;
+  if(previewNeedsTicket()){
+    try{
+      const r=await fetch(API+`/api/projects/${encodeURIComponent(currentSlug)}/preview-ticket`,{headers:{Authorization:"Bearer "+token}});
+      if(!r.ok){toast(t("preview_fail"));return;}
+    }catch(e){toast(t("preview_fail"));return;}
+  }
+  frame.removeAttribute("src");
+  modal.classList.add("open");
+  frame.src=previewURL();
+}
+function openPreviewTab(){
+  if(!currentSlug){toast(t("preview_none"));return;}
+  if(previewNeedsTicket()){
+    toast(t("preview_tab_hint"));
+    openPreview();
+    return;
+  }
+  window.open(previewURL(),"_blank","noopener");
+}
+(async function previewWiring(){
+  const modal=document.getElementById("previewModal");
+  document.getElementById("previewCloseBtn").addEventListener("click",()=>modal.classList.remove("open"));
+  document.getElementById("previewOpenTab").addEventListener("click",()=>{window.open(previewURL(),"_blank","noopener");});
+  modal.addEventListener("click",e=>{if(e.target===modal)modal.classList.remove("open");});
+}());
+
 function connectWS(slug){if(ws)ws.close();ws=new WebSocket((location.protocol==="https:"?"wss":"ws")+"://"+location.host+"/ws/"+encodeURIComponent(slug)+(token?"?token="+encodeURIComponent(token):""));ws.onopen=()=>{document.getElementById("liveCounter").textContent=t("ws_live");};ws.onerror=()=>{toast("Connection error");};ws.onclose=()=>{document.getElementById("liveCounter").textContent=t("ws_disconnected");};ws.onmessage=(ev)=>{const msg=JSON.parse(ev.data);if(msg.type==="snapshot"||msg.type==="update")renderTasks(msg.tasks);if(msg.type==="error")document.getElementById("liveCounter").textContent="⚠ "+errt(msg.detail);};}
 async function pollTasks(slug){const r=await fetch(API+`/api/projects/${encodeURIComponent(slug)}/tasks`,{headers:token?{Authorization:"Bearer "+token}:{}});if(!r.ok){toast(t("login_first"));return;}const d=await r.json();renderTasks(d);}
 function fmtClock(epoch){if(!epoch)return "";const d=new Date(epoch*1000);const p=n=>String(n).padStart(2,"0");return p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds());}
@@ -683,6 +736,9 @@ const I18N = {
     res_hint:"Generated files from this board's workspace.",
     projects_title:"History & results", projects_login_empty:"Sign in to see your projects.", projects_empty:"No projects yet — launch your first one.", projects_fail:"Could not load projects", open_btn:"Open",
     ws_fail:"Could not load files", ws_empty:"No generated files yet.",
+    preview_title:"Live preview", preview_btn:"👁 Preview", preview_open:"Open in new tab",
+    preview_none:"Open a board first to preview it", preview_fail:"Preview unavailable",
+    preview_tab_hint:"Private board — open the preview inside the app",
     settings_title:"Account & data", settings_login_empty:"Sign in to manage your account.",
     sett_account:"Account", lbl_account_name:"Display name", btn_save_name:"Save", name_ok:"Name updated", name_fail:"Could not update name", name_empty:"Name is empty",
     sett_security:"Security", lbl_pw_current:"Current password", lbl_pw_new:"New password",

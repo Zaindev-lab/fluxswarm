@@ -13,16 +13,19 @@ from contextlib import asynccontextmanager
 import datetime
 import ipaddress
 import json
+import mimetypes
 import os
 import re
 import secrets
 import threading
 import time
 from pathlib import Path
+from urllib.parse import quote as urlquote
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+                               PlainTextResponse, RedirectResponse, Response)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
@@ -420,6 +423,21 @@ def _csp_for(nonce: str) -> str:
     return _CSP_TEMPLATE.format(nonce=nonce)
 
 
+# CSP for /p/ preview responses: user-generated content in a sandboxed iframe.
+# Allows inline/eval scripts so generated apps run; frame-ancestors 'self' lets
+# the dashboard embed via <iframe sandbox>.  Scoped path: /p only; the global
+# CSP (nonce-only) stays in force for every other route.
+_PREVIEW_CSP = (
+    "default-src 'self' 'unsafe-inline' data: blob:; "
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; "
+    "style-src 'self' 'unsafe-inline' data: blob:; "
+    "img-src 'self' data: blob:; font-src 'self' data: blob:; "
+    "connect-src 'self' data: blob: ws: wss:; "
+    "object-src 'none'; base-uri 'self'; "
+    "frame-ancestors 'self'"
+)
+
+
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     # Per-request CSP nonce so inline scripts run under a signed nonce instead
@@ -427,9 +445,17 @@ async def security_headers(request: Request, call_next):
     nonce = secrets.token_urlsafe(16)
     request.state.csp_nonce = nonce
     resp = await call_next(request)
-    resp.headers["Content-Security-Policy"] = _csp_for(nonce)
+    if getattr(request.state, "preview", False):
+        # Preview responses carry user-generated app pages that need inline
+        # scripts/eval to render; they are served into a sandboxed (opaque
+        # origin) iframe with frame-ancestors 'self'. Everything else keeps the
+        # strict nonce-only policy below.
+        resp.headers["Content-Security-Policy"] = _PREVIEW_CSP
+        resp.headers["X-Frame-Options"] = "SAMEORIGIN"
+    else:
+        resp.headers["Content-Security-Policy"] = _csp_for(nonce)
+        resp.headers["X-Frame-Options"] = "DENY"
     resp.headers["X-Content-Type-Options"] = "nosniff"
-    resp.headers["X-Frame-Options"] = "DENY"
     resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     resp.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     if request.url.scheme == "https":
@@ -1948,6 +1974,196 @@ def api_workspace(slug: str, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail="Failed to read workspace")
 
 
+# ---------- live project preview (/p/<slug>/...) ----------
+# Renders the board's generated workspace as a browsable live site (index.html
+# when present, else an auto directory listing) served under /p/. The dashboard
+# embeds it in a sandboxed iframe (opaque origin -> cannot read the parent's
+# session or API); the routes below carry the relaxed _PREVIEW_CSP scoped to /p
+# only.
+#
+# Authorization mirrors the rest of the app: demo (``flux-demo-*``) boards are
+# public showcase; owned (``u<uid>-``) boards require a short-lived preview
+# ticket cookie issued by /api/projects/{slug}/preview-ticket (the dashboard
+# tokens live in localStorage and cannot be attached to an iframe navigation,
+# so the app swaps a Bearer token for an HttpOnly /p-scoped cookie). Raw file
+# paths are resolved with resolve()-containment so ``../`` can never escape the
+# workspace root.
+_PREVIEW_TICKET_TTL_S = 600
+_preview_tickets: dict[str, dict] = {}
+
+
+def _bound_preview_tickets() -> None:
+    cutoff = time.time() - _PREVIEW_TICKET_TTL_S
+    if len(_preview_tickets) > 2048:
+        for k in list(_preview_tickets):
+            if _preview_tickets[k]["exp"] < cutoff:
+                _preview_tickets.pop(k, None)
+
+
+def _issue_preview_ticket(slug: str, uid: int) -> str:
+    ticket = secrets.token_urlsafe(24)
+    _bound_preview_tickets()
+    _preview_tickets[ticket] = {
+        "slug": slug, "uid": uid, "exp": time.time() + _PREVIEW_TICKET_TTL_S}
+    return ticket
+
+
+def _preview_identity(request: Request) -> dict | None:
+    """Resolve the preview viewer: preview-ticket cookie first, then the normal
+    Bearer/fs_token session. Returns a {uid, slug} dict (or None)."""
+    ticket = (request.cookies.get("fs_preview") or "").strip()
+    if ticket:
+        snap = _preview_tickets.get(ticket)
+        if snap:
+            if snap["exp"] > time.time():
+                return snap
+            _preview_tickets.pop(ticket, None)
+    user = get_current_user_optional(request)
+    if user:
+        return {"uid": user["id"], "slug": ""}
+    return None
+
+
+def _preview_allowed(request: Request, slug: str) -> bool:
+    """Demo boards are public; owned boards need the ticket bound to this exact
+    slug, or the owner's normal session."""
+    if not hc._SAFE_SLUG_RE.match(slug):
+        return False
+    if slug.startswith("flux-demo-"):
+        return True
+    ident = _preview_identity(request)
+    if not ident or not ident.get("uid"):
+        return False
+    bound = ident.get("slug") or ""
+    if not slug.startswith(f"u{ident['uid']}-"):
+        return False
+    return not bound or bound == slug
+
+
+def _workspace_target(root: Path, relpath: str) -> Path | None:
+    """Resolve ``relpath`` inside ``root`` with path-traversal containment."""
+    try:
+        root_resolved = str(root.resolve()) + os.sep
+    except OSError:
+        return None
+    segs = [s for s in relpath.replace("\\", "/").split("/") if s not in ("", ".")]
+    if any(s == ".." for s in segs):
+        return None
+    target = root
+    for s in segs:
+        target = target / s
+    try:
+        target = target.resolve()
+    except OSError:
+        return None
+    if not str(target).startswith(root_resolved):
+        return None
+    return target
+
+
+def _preview_html(slug: str, code: int, title: str, text: str) -> HTMLResponse:
+    import html as _html
+    body = (f"<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+            f"<title>{code} · FluxSwarm preview</title></head>"
+            f"<body style='font-family:system-ui;background:#0b0f1a;color:#eef1fb;"
+            f"margin:0;padding:48px;line-height:1.6'>"
+            f"<h1>{code} — {_html.escape(title)}</h1>"
+            f"<p>{_html.escape(text)}</p>"
+            f"<p><a href='/' style='color:#22d3ee'>Back to FluxSwarm</a></p>"
+            f"</body></html>")
+    return HTMLResponse(body, status_code=code)
+
+
+def _preview_listing(request: Request, slug: str, node: Path,
+                     root: Path, relpath: str) -> str:
+    """Directory-listing page for the live preview (no index.html at this path)."""
+    import html as _html
+    base = request.url.path.rstrip("/")
+    rows: list[str] = []
+    try:
+        entries = list(node.iterdir())
+    except OSError:
+        entries = []
+    for p in sorted(entries, key=lambda p: (0 if p.is_dir() else 1, p.name.lower())):
+        icon = "📁" if p.is_dir() else "📄"
+        href = base + "/" + urlquote(p.name)
+        rows.append(f'<li><a href="{_html.escape(href, quote=True)}">{icon} '
+                    f'{_html.escape(p.name)}</a></li>')
+    rel_disp = relpath or "."
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>{_html.escape(slug)} · preview</title></head>
+<body style="font-family:system-ui;background:#0b0f1a;color:#eef1fb;margin:0;padding:32px;line-height:1.7">
+<p style="color:#8b96b3;font-size:13px">{_html.escape(slug)} · /{_html.escape(rel_disp)}</p>
+<h1 style="margin:6px 0 4px">Generated workspace</h1>
+<p style="color:#8b96b3;margin:0 0 18px">No index.html at this level — browse the generated files.</p>
+<ul style="list-style:none;padding:0;margin:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px">
+{''.join(rows)}
+</ul></body></html>"""
+
+
+def _preview_doc(request: Request, slug: str, relpath: str) -> Response:
+    """Serve one preview resource under /p/<slug>/ (index, file, or listing)."""
+    request.state.preview = True
+    root = hc.project_workspace_dir(slug)
+    if not relpath:
+        idx = root / "index.html"
+        if idx.is_file():
+            return FileResponse(idx, media_type="text/html")
+        return HTMLResponse(_preview_listing(request, slug, root, root, ""))
+    target = _workspace_target(root, relpath)
+    if target is None:
+        return _preview_html(slug, 404, "Not found", "This path is invalid.")
+    if target.is_dir():
+        return HTMLResponse(_preview_listing(request, slug, target, root, relpath))
+    if target.is_file():
+        mt = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+        if any(t in mt for t in ("text/", "json", "xml", "javascript")):
+            mt += "; charset=utf-8"
+        return FileResponse(target, media_type=mt)
+    return _preview_html(slug, 404, "Not found", "This file does not exist.")
+
+
+@app.get("/p/{slug}")
+def preview_redirect(request: Request, slug: str):
+    if not _preview_allowed(request, slug):
+        return _preview_html(slug, 403, "Forbidden",
+                             "Sign in to preview this board, or open a demo board.")
+    return RedirectResponse(url=f"/p/{slug}/", status_code=301)
+
+
+@app.get("/p/{slug}/")
+def preview_root(request: Request, slug: str):
+    if not _preview_allowed(request, slug):
+        return _preview_html(slug, 403, "Forbidden",
+                             "Sign in to preview this board, or open a demo board.")
+    return _preview_doc(request, slug, "")
+
+
+@app.get("/p/{slug}/{rest:path}")
+def preview_path(request: Request, slug: str, rest: str):
+    if not _preview_allowed(request, slug):
+        return _preview_html(slug, 403, "Forbidden",
+                             "Sign in to preview this board, or open a demo board.")
+    return _preview_doc(request, slug, rest)
+
+
+@app.get("/api/projects/{slug}/preview-ticket")
+def api_preview_ticket(slug: str, request: Request,
+                       user: dict = Depends(get_current_user)):
+    """Issue a short-lived /p-only cookie so the dashboard can embed the user's
+    preview in a sandboxed iframe (Bearer tokens in localStorage cannot travel
+    with an iframe navigation). Demo boards need no ticket."""
+    if not slug.startswith(f"u{user['id']}-"):
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    ticket = _issue_preview_ticket(slug, user["id"])
+    audit.audit("preview.ticket", uid=user["id"], slug=slug,
+                ip=_client_ip(request), outcome="ok")
+    resp = JSONResponse({"ok": True, "slug": slug, "ttl_seconds": _PREVIEW_TICKET_TTL_S})
+    resp.set_cookie("fs_preview", ticket, max_age=_PREVIEW_TICKET_TTL_S,
+                    httponly=True, samesite="lax", path="/p")
+    return resp
+
+
 @app.get("/api/projects/{slug}/tasks")
 def api_tasks(slug: str, user: dict = Depends(get_current_user)):
     # Only allow if the board belongs to this user (prefix guard).
@@ -2542,6 +2758,7 @@ def _cookies_page(path: str):
     body = """<h1>Cookies &amp; Tracking</h1>
 <p>The FluxSwarm server sets no tracking cookies. Your session uses a signed token held in browser <code>localStorage</code>; the only other local value is <code>flux-lang</code> (language preference) and <code>fs-consent</code> (your consent-banner choice).</p>
 <p>The site uses strictly necessary local storage only: the session token that keeps you signed in and your saved preferences. A dismissible notice explains this on the home page for visitors in the UK/EU and records your acceptance — it is not a consent wall, because nothing is loaded for advertising or analytics without your choice, and no third-party cookies are set on our domain.</p>
+<p>The live preview feature sets one transient cookie (<code>fs_preview</code>, HttpOnly, scoped only to <code>/p/</code>, expires after 10 minutes): it lets the dashboard embed one of your own generated app pages in a restricted preview frame without attaching your login token to those URLs. It is deleted on expiry and never used for tracking.</p>
 <p>When you pay, Paddle (merchant of record) sets cookies on its own domain only, never ours; analytics, when enabled by the operator, are cookieless and privacy-friendly (Plausible).</p>
 <p>See also <a href="/refund">refund</a> · <a href="/privacy">privacy</a> · <a href="/acceptable-use">acceptable use</a>.</p>"""
     body = body.format(c=contact)
