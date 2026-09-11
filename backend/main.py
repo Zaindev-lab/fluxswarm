@@ -782,9 +782,117 @@ def _project_by_pid(pid: int) -> dict | None:
         return None
 
 
-def _fire_dispatch(slug: str, plan: str, provider_keys=None, pid: int | None = None) -> None:
-    threading.Thread(target=_bg_dispatch, args=(slug, plan),
-                     kwargs={"provider_keys": provider_keys, "pid": pid}, daemon=True).start()
+def _fire_dispatch(slug: str, plan: str, provider_keys=None, pid: int | None = None,
+                   goal: str | None = None) -> None:
+    """Fire whichever driver owns this host: the thin in-process project driver
+    on small-memory hosts (the fat Hermes worker OOMs a 512 MB container
+    ~40-80s into work — measured), otherwise the fat multi-wave dispatcher."""
+    if hc.projects_are_thin():
+        threading.Thread(target=_bg_thin_project, args=(slug, goal or ""),
+                         kwargs={"provider_keys": provider_keys, "pid": pid},
+                         daemon=True).start()
+    else:
+        threading.Thread(target=_bg_dispatch, args=(slug, plan),
+                         kwargs={"provider_keys": provider_keys, "pid": pid},
+                         daemon=True).start()
+
+
+def _thin_runtime(provider_keys=None) -> tuple[str, str, str | None]:
+    """Resolve the thin in-process runtime: BYOK gemini/openrouter key first,
+    else the operator-configured demo pool (env-keyed). Returns
+    (provider_for_llm, model, api_key_or_None)."""
+    keys = provider_keys or {}
+    if (keys.get("gemini") or "").strip():
+        return "gemini", "gemini-3.5-flash-lite", keys["gemini"].strip()
+    if (keys.get("openrouter") or "").strip():
+        return "openrouter", "nvidia/nemotron-3.5-lightning:free", keys["openrouter"].strip()
+    pick = provider_pool.pick_demo_provider()
+    if not pick:
+        raise RuntimeError("no demo provider available for the thin project path")
+    prov = provider_pool.resolve_provider_key(pick["provider"])
+    return prov, pick["model"], None
+
+
+def _ws_brief(root, limit: int = 2500) -> str:
+    """Concatenate the real artifacts produced so far as context for the
+    reviewer/builder lanes (the thin project's shared blackboard)."""
+    root = Path(root)
+    parts = []
+    for name in ("PLAN.md", "ARCHITECTURE.md", "Dockerfile",
+                 "tests/test_app.py", "REVIEW.md"):
+        p = root / name
+        try:
+            if p.exists():
+                parts.append(f"--- {name} ---\n" + p.read_text(
+                    encoding="utf-8", errors="ignore")[:2000])
+        except Exception:
+            pass
+    return "\n\n".join(parts)[:limit]
+
+
+def _bg_thin_project(slug: str, goal: str, provider_keys=None, pid: int | None = None) -> None:
+    """Drive the thin 6-lane project squad to completion in a daemon thread.
+
+    Planner -> Architect -> DevOps -> TDD -> Reviewer -> Builder, each a REAL
+    provider completion (pool or BYOK) writing a REAL artifact into the project
+    workspace (served by /api/projects/{slug}/workspace). Bounded, direct-DB,
+    no fat CLI worker, no OOM. On failure the launched lanes stay honest on the
+    board and the launch is finalized (credit refunded only when no real work
+    was produced — the same policy as the fat path).
+    """
+    provider = model = api_key = None
+    try:
+        provider, model, api_key = _thin_runtime(provider_keys)
+        by_role = {}
+        for t in (hc.list_tasks(slug) or []):
+            a = (t.get("assignee") or "").strip()
+            tid = t.get("id")
+            if a and tid:
+                by_role[a] = tid
+        if not by_role.get("ecc-planner"):
+            raise RuntimeError(f"thin project board {slug} has no squad tasks")
+        ws_root = hc.project_workspace_dir(slug)
+        lanes = [
+            ("ecc-planner", "PLAN.md",
+             lambda brief: demo_llm.planner_prompt(hc.SQUAD[0][2], goal)),
+            ("ecc-architect", "ARCHITECTURE.md",
+             lambda brief: demo_llm.architect_prompt(hc.SQUAD[1][2], goal)),
+            ("ecc-devops", "Dockerfile",
+             lambda brief: demo_llm.devops_prompt(hc.SQUAD[2][2], goal)),
+            ("ecc-tdd", "tests/test_app.py",
+             lambda brief: demo_llm.tdd_prompt(hc.SQUAD[3][2], goal)),
+            ("ecc-reviewer", "REVIEW.md",
+             lambda brief: demo_llm.reviewer_prompt(hc.VERIFIER[2], goal, brief)),
+            ("ecc-build-fixer", None,
+             lambda brief: demo_llm.builder_prompt(hc.SYNTHESIZER[2], goal, brief)),
+        ]
+        brief = ""
+        for assignee, artifact, make_prompt in lanes:
+            tid = by_role.get(assignee)
+            if not tid:
+                continue
+            art = artifact or demo_llm.deliverable_filename(goal)
+            hc.thin_execute(board=slug, task_id=tid, workspace=str(ws_root),
+                            provider=provider, model=model,
+                            prompt=make_prompt(brief), objective=goal,
+                            artifact_name=art, api_key=api_key, max_tokens=800)
+            brief = _ws_brief(ws_root)
+        if pid is not None:
+            _finalize_launch(slug, pid, status="ok", outcome="converged", reason="")
+        try:
+            audit.audit("thin.drive", outcome="ok", slug=slug, plan="thin")
+            db.update_provider_usage_outcome(slug, ok=1)
+        except Exception:
+            pass
+    except Exception as e:
+        try:
+            if pid is not None:
+                _finalize_launch(slug, pid, status="error", outcome="launch_error",
+                                 reason=type(e).__name__)
+            audit.audit("thin.drive", outcome="error", slug=slug,
+                        reason=str(e)[:300])
+        except Exception:
+            pass
 
 
 # ---------- persistent reconciliation reaper ----------
@@ -892,6 +1000,12 @@ def _demo_lifecycle_sweep() -> None:
 
 
 def _reconcile_boards_once() -> None:
+    # Small-memory host: EVERY launch is owned by a thin driver that completes
+    # eagerly and finalizes bookkeeping; a reaper pass here would run the fat
+    # `hermes dispatch` CLI (loads the whole workspace) against every board and
+    # OOM the container. The reaper stays fully disabled on such hosts.
+    if hc.projects_are_thin():
+        return
     try:
         boards = hc.list_boards()
     except Exception:
@@ -1757,7 +1871,6 @@ def api_create_project(payload: ProjectCreate, request: Request,
     if db.get_user_credits(user["id"]) == 0:
         notify.send_depletion_async(user["email"], user["name"])
     slug = make_project_slug(user["id"])
-    hc.ensure_board(slug)
     keys = _user_provider_keys(user)
     # Phase F: append the provider-usage ledger row with the ACTUAL resolved
     # runtime (BYOK beats operator default) before the launch. Best-effort:
@@ -1775,7 +1888,15 @@ def api_create_project(payload: ProjectCreate, request: Request,
         except Exception:
             pass
     try:
-        swarm = hc.launch_swarm(slug, goal, provider_keys=keys)
+        if hc.projects_are_thin():
+            # Small-memory host: the fat `swarm` CLI + `boards create` load the
+            # whole workspace and OOM a 512 MB container (measured crash loop).
+            # Build the real 6-lane squad directly in kanban.db; the background
+            # thin driver then executes each lane with a real provider call.
+            swarm = hc.launch_project_thin(slug, goal, provider=prov, model=model)
+        else:
+            hc.ensure_board(slug)
+            swarm = hc.launch_swarm(slug, goal, provider_keys=keys)
     except Exception as e:
         # Refund the launch credit via the idempotent, audited helper — never
         # by ad-hoc SQL (double-refund risk) and never leaking internal detail.
@@ -1785,7 +1906,7 @@ def api_create_project(payload: ProjectCreate, request: Request,
         db.refund_launch_credit(user["id"])
         raise HTTPException(status_code=500, detail="Failed to launch swarm")
     pid = db.add_project(user["id"], slug, payload.name or "Project", goal)
-    _fire_dispatch(slug, user["plan"], _user_provider_keys(user), pid=pid)
+    _fire_dispatch(slug, user["plan"], _user_provider_keys(user), pid=pid, goal=goal)
     audit.audit("project.create", uid=user["id"], email=user["email"], ip=_client_ip(request),
                 outcome="ok", slug=slug, plan=user["plan"])
     return {
@@ -3168,13 +3289,16 @@ def api_buy_template(tid: int, payload: BuyIn, request: Request,
     pid = None
     try:
         pid = db.add_project(user["id"], slug, tpl.get("name", "marketplace-squad"), goal)
-        hc.ensure_board(slug)
-        hc.launch_from_template(slug, goal, tpl.get("agents", []),
-                                provider_keys=_user_provider_keys(user))
+        if hc.projects_are_thin():
+            hc.launch_project_thin(slug, goal, provider=None, model=None)
+        else:
+            hc.ensure_board(slug)
+            hc.launch_from_template(slug, goal, tpl.get("agents", []),
+                                    provider_keys=_user_provider_keys(user))
         # Auto-dispatch through the same background path as projects/demo so the
         # multi-wave swarm (workers -> verifier -> synthesizer) drives to
         # completion instead of stalling after the first ready-wave.
-        _fire_dispatch(slug, user["plan"], _user_provider_keys(user), pid=pid)
+        _fire_dispatch(slug, user["plan"], _user_provider_keys(user), pid=pid, goal=goal)
         launched = True
     except Exception as e:
         launched = False

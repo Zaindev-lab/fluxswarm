@@ -123,7 +123,7 @@ def test_thin_execute_drives_board_events_and_artifact(monkeypatch, tmp_path):
     ws.mkdir()
     _mk_demo_board(tmp_path, monkeypatch)
     monkeypatch.setattr(demo_llm, "completion",
-                        lambda p, m, prompt: "Final deliverable body\nsecond line")
+                        lambda p, m, prompt, max_tokens=400, api_key=None: "Final deliverable body\nsecond line")
 
     res = hc.thin_execute("bdemo", "t1", str(ws), "gemini", "gemini-3.5-flash-lite",
                           "PROMPT", objective="write a README")
@@ -148,7 +148,7 @@ def test_thin_execute_failure_raises_and_marks_board(monkeypatch, tmp_path):
     ws.mkdir()
     _mk_demo_board(tmp_path, monkeypatch)
     monkeypatch.setattr(demo_llm, "completion",
-                        lambda p, m, prompt: (_ for _ in ()).throw(
+                        lambda p, m, prompt, max_tokens=400, api_key=None: (_ for _ in ()).throw(
                             demo_llm.DemoLLMError("gemini HTTP 401: bad key")))
 
     try:
@@ -171,7 +171,7 @@ def test_thin_execute_ignores_provider_absence_only_via_real_error(monkeypatch, 
     ws = tmp_path / "ws"
     ws.mkdir()
     _mk_demo_board(tmp_path, monkeypatch, task_ids=("t_other",))
-    monkeypatch.setattr(demo_llm, "completion", lambda p, m, prompt: "ok")
+    monkeypatch.setattr(demo_llm, "completion", lambda p, m, prompt, max_tokens=400, api_key=None: "ok")
     try:
         hc.thin_execute("bdemo", "missing", str(ws), "gemini", "g", "P", objective="x")
         raise AssertionError("expected RuntimeError")
@@ -208,7 +208,7 @@ def test_thin_execute_failure_lands_error_event(monkeypatch, tmp_path):
     ws.mkdir()
     _mk_demo_board(tmp_path, monkeypatch)
     monkeypatch.setattr(demo_llm, "completion",
-                        lambda p, m, prompt: (_ for _ in ()).throw(
+                        lambda p, m, prompt, max_tokens=400, api_key=None: (_ for _ in ()).throw(
                             demo_llm.DemoLLMError("gemini HTTP 401: bad key")))
 
     try:

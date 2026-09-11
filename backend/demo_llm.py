@@ -50,18 +50,21 @@ def provider_hint(exc: BaseException) -> str:
     return "gemini" if "generativelanguage" in getattr(exc, "url", "") else "openrouter"
 
 
-def completion(provider: str, model: str, prompt: str, max_tokens: int = 400) -> str:
-    """One real, bounded completion for the demo executor.
+def completion(provider: str, model: str, prompt: str, max_tokens: int = 400,
+               api_key: str | None = None) -> str:
+    """One real, bounded completion for the thin executor.
 
-    The demo only ever lands on the free-pool providers (gemini fast slot or
-    the openrouter free fallback); anything else fails loudly rather than
-    silently minting a keyed path we have not audited.
+    ``api_key`` optionally overrides the env key (used by the project path to
+    honor a user's BYOK key in-process, without ever writing it to disk). The
+    demo only ever lands on gemini or the openrouter free fallback; anything
+    else fails loudly rather than silently minting a keyed path we have not
+    audited.
     """
     provider = (provider or "").strip().lower()
     key_env = _KEY_ENV.get(provider)
     if not key_env:
         raise DemoLLMError(f"thin demo executor has no completion path for provider={provider!r}")
-    key = os.environ.get(key_env, "").strip()
+    key = (api_key or os.environ.get(key_env, "")).strip()
     if not key:
         raise DemoLLMError(f"missing {key_env} for the demo executor")
 
@@ -128,3 +131,46 @@ def deliverable_filename(objective: str) -> str:
     if "python" in lower or "py " in lower:
         return "app.py"
     return "deliverable.md"
+
+
+def architect_prompt(task_title: str, objective: str) -> str:
+    return (
+        f"Task: {task_title}\n\n"
+        f"Objective: {objective}\n\n"
+        "Act as the Architect. Produce a SHORT architecture document (at most "
+        "20 lines, plain text, no markdown fences) covering components, data "
+        "flow, and the key interfaces of the solution. This becomes "
+        "ARCHITECTURE.md. Output only the document text.\n"
+    )
+
+
+def devops_prompt(task_title: str, objective: str, plan: str = "") -> str:
+    return (
+        f"Task: {task_title}\n\n"
+        f"Objective: {objective}\n\n"
+        "Act as the DevOps engineer. Output ONLY a production-ready Dockerfile "
+        "(plain text, no markdown fences, no commentary) that would containerize "
+        "this project as a simple Python or static web service.\n"
+    )
+
+
+def tdd_prompt(task_title: str, objective: str, brief: str = "") -> str:
+    return (
+        f"Task: {task_title}\n\n"
+        f"Objective: {objective}\n\n"
+        "Act as the TDD specialist. Output ONLY the Python source of a pytest "
+        "test suite (plain text, no markdown fences) with 3-6 focused tests for "
+        "the core behavior described in the objective. No commentary outside "
+        "the code.\n"
+    )
+
+
+def reviewer_prompt(task_title: str, objective: str, brief: str = "") -> str:
+    return (
+        f"Task: {task_title}\n\n"
+        f"Objective: {objective}\n\n"
+        f"Project artifacts produced so far:\n{(brief or '(none)')[:2000]}\n\n"
+        "Act as the Reviewer. Output a SHORT review (at most 15 lines, plain "
+        "text) listing the strengths and any gaps or risks in the artifacts "
+        "relative to the objective. This becomes REVIEW.md.\n"
+    )

@@ -50,6 +50,52 @@ _MEM_TOTAL_MB = int(os.environ.get("FLUXSWARM_MEM_TOTAL_MB", "8192"))
 MEMORY_GUARD_MB_PER_WORKER = int(os.environ.get("MEMORY_GUARD_MB_PER_WORKER", "384"))
 MAX_IN_PROGRESS = max(1, min(16, _MEM_TOTAL_MB // MEMORY_GUARD_MB_PER_WORKER))
 
+
+def _cgroup_memory_mb() -> int | None:
+    """Host memory LIMIT from the container cgroup (bytes) — the reliable
+    "how much RAM can I actually use" figure. Returns None when not running
+    under cgroup v1/v2 limits (desktop dev/CI), so callers fall back to the
+    configured default (8 GB) and the fat path stays the default choice."""
+    for path in ("/sys/fs/cgroup/memory.max",
+                 "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            val = Path(path).read_text(encoding="utf-8", errors="ignore").strip()
+            if val.isdigit():
+                mb = int(val) // (1024 * 1024)
+                if mb > 0:
+                    return mb
+        except Exception:
+            continue
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8",
+                                                    errors="ignore").splitlines():
+            if line.startswith("MemTotal:"):
+                return int(line.split()[1]) // 1024
+    except Exception:
+        pass
+    return None
+
+
+def projects_are_thin() -> bool:
+    """True when this host cannot run the fat Hermes worker path.
+
+    Measured on the 512 MB free tier: a real Hermes worker (or the fat
+    ``swarm``/``boards create`` CLI subprocess that loads the whole workspace)
+    crashes ~40-80 s into work and the OOM kills the container. On such small
+    hosts every REAL launch must use the thin in-process direct-DB driver
+    instead. ``FLUXSWARM_PROJECT_MODE=thin|fat`` overrides the auto-detect;
+    the auto rule is: a cgroup/container memory limit <= 2 GB => thin.
+    """
+    mode = os.environ.get("FLUXSWARM_PROJECT_MODE", "").strip().lower()
+    if mode == "thin":
+        return True
+    if mode == "fat":
+        return False
+    mem = _cgroup_memory_mb()
+    if mem is not None:
+        return mem <= 2048
+    return False
+
 # Safe board-slug charset. Slugs are server-generated (u{uid}-{time}-{rand},
 # u{uid}-tg-…, flux-demo-…, tg-{chat}-…), but delete_boards validates every
 # incoming name against this before touching the filesystem, so a corrupted DB
@@ -657,7 +703,7 @@ def _seed_demo_workspace(ws: Path, goal: str) -> None:
         encoding="utf-8")
 
 
-def _ensure_demo_board_db(board: str) -> None:
+def _ensure_board_db(board: str) -> None:
     """Create the board directory and kanban.db with the Hermes schema (no CLI).
 
     The fat ``hermes boards create`` CLI loads the entire workspace into memory
@@ -686,6 +732,11 @@ def _ensure_demo_board_db(board: str) -> None:
         c.commit()
     finally:
         c.close()
+
+
+def _ensure_demo_board_db(board: str) -> None:
+    """Alias for the demo path: same direct-DB board creation, no CLI."""
+    _ensure_board_db(board)
 
 
 def _demo_insert_task(conn: sqlite3.Connection, board: str, *, task_id: str,
@@ -733,6 +784,90 @@ def launch_demo_profile(board: str, goal: str, provider: Optional[str] = None,
         c.close()
 
     return {"planner_id": planner_id, "builder_id": builder_id, "workspace": str(ws)}
+
+
+def project_workspace_dir(board: str) -> Path:
+    """The per-board workspaces root the real project lanes write into.
+
+    Lives at ``HERMES_HOME/kanban/boards/<board>/workspaces`` — the exact root
+    ``read_workspace`` serves to the user, so every artifact a thin project
+    lane produces lands directly in the downloadable project result.
+    """
+    return Path(HERMES_HOME) / "kanban" / "boards" / board / "workspaces"
+
+
+def _seed_project_workspace(ws: Path, goal: str) -> None:
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / "TASK.md").write_text(
+        "FluxSwarm project deliverable — thin squad workspace.\n\n"
+        "OBJECTIVE:\n"
+        f"{goal}\n\n"
+        "The six lanes below each produce a REAL artifact in this directory:\n"
+        "PLAN.md, ARCHITECTURE.md, Dockerfile, tests/test_app.py, REVIEW.md,\n"
+        "and the final deliverable (README.md or the project code file). Confirm\n"
+        "the deliverable actually satisfies the objective.\n",
+        encoding="utf-8")
+
+
+# Thin 6-lane project graph: (profile, UI role, task title, status).
+# Mirrors the fat squad (SQUAD + VERIFIER + SYNTHESIZER) so the board renders
+# the SAME 6-agent swarm the paid path shows.
+def _thin_project_lanes() -> list[tuple[str, str, str, str]]:
+    return [
+        (SQUAD[0][0], "Planner",    SQUAD[0][2], "ready"),
+        (SQUAD[1][0], "Architect",  SQUAD[1][2], "todo"),
+        (SQUAD[2][0], "DevOps",     SQUAD[2][2], "todo"),
+        (SQUAD[3][0], "TDD",        SQUAD[3][2], "todo"),
+        (VERIFIER[0], "Reviewer",   VERIFIER[2], "todo"),
+        (SYNTHESIZER[0], "Builder", SYNTHESIZER[2], "todo"),
+    ]
+
+
+def launch_project_thin(board: str, goal: str, provider: Optional[str] = None,
+                        model: Optional[str] = None) -> dict:
+    """Build the 6-lane project squad directly in kanban.db (no CLI).
+
+    Same honesty contract as ``launch_swarm`` but for small-memory hosts: the
+    full ``hermes swarm`` CLI subprocess loads the entire workspace and OOMs a
+    512 MB container. This writes the real squad tasks + seeds the real
+    workspace (sub-second, <1 MB RSS); the thin project driver then executes
+    each lane with a real provider completion.
+
+    Returns a SwarmResult-shaped dict (``root_id``/``worker_ids``/
+    ``verifier_id``/``synthesizer_id``) plus ``planner_id`` and ``workspace``.
+    """
+    ws = project_workspace_dir(board)
+    _seed_project_workspace(ws, goal)
+    _ensure_board_db(board)
+    lanes = _thin_project_lanes()
+    ids: list[str] = []
+    plan_id = ""
+    verifier_id = ""
+    synth_id = ""
+    c = sqlite3.connect(str(_board_db_path(board)))
+    try:
+        for prof, _role, title, status in lanes:
+            tid = f"t_{secrets.token_hex(4)}"
+            _demo_insert_task(c, board, task_id=tid, title=title,
+                              assignee=prof, status=status)
+            ids.append(tid)
+            if prof == SQUAD[0][0]:
+                plan_id = tid
+            elif prof == VERIFIER[0]:
+                verifier_id = tid
+            elif prof == SYNTHESIZER[0]:
+                synth_id = tid
+        c.commit()
+    finally:
+        c.close()
+    return {
+        "root_id": None,
+        "worker_ids": [ids[i] for i in range(len(SQUAD))],
+        "verifier_id": verifier_id,
+        "synthesizer_id": synth_id,
+        "planner_id": plan_id,
+        "workspace": str(ws),
+    }
 
 
 def _emit_working(board_display_log: str, task_id: str, note: str, at: float | None = None) -> None:
@@ -795,8 +930,9 @@ def _insert_event(board_display_log: str, task_id: str, kind: str, note: str, at
 
 def thin_execute(board: str, task_id: str, workspace: str, provider: str,
                  model: str, prompt: str, objective: str = "",
-                 artifact_name: str | None = None) -> dict:
-    """Execute one demo lane with a bounded thin executor.
+                 artifact_name: str | None = None, api_key: str | None = None,
+                 max_tokens: int = 400) -> dict:
+    """Execute one thin lane with a bounded in-process executor.
 
     A full Hermes worker crashes ~40-80s into real work on the 512MB free host
     (measured: ``recovered reason=crash`` on every attempt, regardless of task
@@ -804,14 +940,15 @@ def thin_execute(board: str, task_id: str, workspace: str, provider: str,
     still runs against the REAL board and REAL provider:
 
       * direct DB claim  -> real ``claimed`` ("Started") event,
-      * a real completion call to the resolved pool provider (demo_llm),
+      * a real completion call to the resolved provider (demo_llm),
       * a real artifact file written into the task workspace,
       * direct DB attach -> real "Produced" event,
       * direct DB complete -> real result summary.
 
-    All board writes go directly into kanban.db (no CLI subprocess) so the
-    demo path never loads the fat Hermes workspace into memory. The paid
-    path keeps running full agents untouched.
+    ``api_key``/``max_tokens`` let the project path honor a user's BYOK key (or
+    a larger artifact budget like a Dockerfile) without touching the env or
+    disk. All board writes go directly into kanban.db (no CLI subprocess) so
+    the thin path never loads the fat Hermes workspace into memory.
     """
     start = time.time()
     db = _board_db_path(board)
@@ -853,12 +990,14 @@ def thin_execute(board: str, task_id: str, workspace: str, provider: str,
 
     try:
         _claim()
-        _emit_working(board, task_id, "thin demo worker: provider completion in flight")
-        text = demo_llm.completion(provider, model, prompt)
+        _emit_working(board, task_id, "thin worker: provider completion in flight")
+        text = demo_llm.completion(provider, model, prompt,
+                                   max_tokens=max_tokens, api_key=api_key)
         name = artifact_name or demo_llm.deliverable_filename(objective or "")
         ws = Path(workspace)
         ws.mkdir(parents=True, exist_ok=True)
         artifact = ws / name
+        artifact.parent.mkdir(parents=True, exist_ok=True)
         artifact.write_text(text, encoding="utf-8")
         _emit_working(board, task_id, "artifact written; attaching")
         _attach(name)
@@ -1867,6 +2006,18 @@ def read_workspace(board: str) -> str:
 
 
 def list_boards() -> list[dict]:
+    # On small hosts the fat `boards ls` CLI (loads the workspace) is exactly
+    # the OOM risk we route around; a direct filesystem scan is sub-millisecond
+    # and equally truthful for the reaper/health surfaces.
+    if projects_are_thin():
+        try:
+            root = Path(HERMES_HOME) / "kanban" / "boards"
+            if root.is_dir():
+                return [{"slug": e.name} for e in sorted(root.iterdir())
+                        if (e.is_dir() and _SAFE_SLUG_RE.match(e.name))]
+            return []
+        except Exception:
+            pass
     r = _run(["boards", "ls"])
     if r.returncode != 0:
         return []
