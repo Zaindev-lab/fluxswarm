@@ -518,7 +518,7 @@ async function createProject(){
   try{
     const r=await fetch(API+"/api/projects",{method:"POST",headers:{Authorization:"Bearer "+token,"Content-Type":"application/json"},body:JSON.stringify({name:name||t("default_project"),goal})});
     if(r.status===402){toast(t("no_credits"));return;}
-    if(!r.ok){toast(t("err_prefix")+errt((await r.json()).detail||""));return;}
+    if(!r.ok){toast(t("err_prefix")+errt((await r.json().catch(()=>({}))).detail||"Request failed"));return;}
     const d=await r.json();currentSlug=d.slug;loadProjects();gotoSection("boardCard");connectWS(d.slug);pollTasks(d.slug);loadWorkspace(d.slug);
   }catch(e){toast(t("err_prefix")+e.message);}
   finally{btn.disabled=false;btn.textContent=t("btn_launch");}

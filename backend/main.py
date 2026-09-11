@@ -1909,10 +1909,30 @@ def api_create_project(payload: ProjectCreate, request: Request,
     _fire_dispatch(slug, user["plan"], _user_provider_keys(user), pid=pid, goal=goal)
     audit.audit("project.create", uid=user["id"], email=user["email"], ip=_client_ip(request),
                 outcome="ok", slug=slug, plan=user["plan"])
+    return _swarm_payload(slug, payload.goal, swarm)
+
+
+def _swarm_payload(slug: str, goal: str, swarm) -> dict:
+    """Build the launch response for BOTH drivers: the thin one returns a plain
+    dict (launch_project_thin), the fat one a SwarmResult object with
+    attributes. Accessing ``swarm.root_id`` unconditionally raised
+    AttributeError on thin hosts -> FastAPI 500 -> bare 'Internal Server Error'
+    plain text -> the web UI's ``(await r.json()).detail`` threw
+    "Unexpected token 'I'". Map both shapes the same way."""
+    if isinstance(swarm, dict):
+        sm = swarm
+    else:
+        sm = {
+            "root_id": swarm.root_id, "worker_ids": swarm.worker_ids,
+            "verifier_id": swarm.verifier_id,
+            "synthesizer_id": swarm.synthesizer_id,
+        }
     return {
-        "slug": slug, "goal": payload.goal, "root_id": swarm.root_id,
-        "workers": swarm.worker_ids, "verifier_id": swarm.verifier_id,
-        "synthesizer_id": swarm.synthesizer_id,
+        "slug": slug, "goal": goal,
+        "root_id": sm.get("root_id"),
+        "workers": sm.get("worker_ids", []),
+        "verifier_id": sm.get("verifier_id"),
+        "synthesizer_id": sm.get("synthesizer_id"),
     }
 
 

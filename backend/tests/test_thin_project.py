@@ -211,6 +211,30 @@ def test_bg_thin_project_error_finalizes_and_never_raises(monkeypatch, tmp_path)
     assert finalized.get("outcome") == "launch_error"
 
 
+def test_swarm_payload_maps_dict_and_result_object():
+    """The launch response must survive BOTH drivers: thin (plain dict) and fat
+    (SwarmResult object). Before the fix, thin hosts raised
+    ``AttributeError: 'dict' object has no attribute 'root_id'`` -> FastAPI 500
+    -> bare 'Internal Server Error' text -> frontend JSON-parse crash."""
+
+    class _Result:
+        root_id = "r1"
+        worker_ids = ["w1", "w2"]
+        verifier_id = "v1"
+        synthesizer_id = "s1"
+
+    d = main_mod._swarm_payload("u1-x", "Goal", {"root_id": "r1",
+                                                 "worker_ids": ["w1", "w2"],
+                                                 "verifier_id": "v1",
+                                                 "synthesizer_id": "s1"})
+    assert d == {"slug": "u1-x", "goal": "Goal", "root_id": "r1",
+                 "workers": ["w1", "w2"], "verifier_id": "v1",
+                 "synthesizer_id": "s1"}
+
+    o = main_mod._swarm_payload("u1-x", "Goal", _Result())
+    assert o == d
+
+
 def test_thin_driver_pass_goal_artifact_for_readme_goal(monkeypatch, tmp_path):
     """A README-style goal makes the final builder lane deliver README.md."""
     _host(monkeypatch, tmp_path)
