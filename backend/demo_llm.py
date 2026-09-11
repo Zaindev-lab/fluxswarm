@@ -189,27 +189,12 @@ def planner_prompt(task_title: str, objective: str) -> str:
     )
 
 
-def builder_prompt(task_title: str, objective: str, plan: str) -> str:
+def builder_prompt(task_title: str, objective: str, plan: str,
+                   repair: bool = False) -> str:
     if _is_web_objective(objective):
         deliverable = (
             "The objective is a WEBSITE / WEB APP — produce ONE self-contained "
-            "file named index.html that is GENUINELY EXCELLENT:\n"
-            "- A complete, polished, production-looking page, not a sketch: a "
-            "coherent design system (deliberate color palette, readable "
-            "typography, generous spacing) and a responsive layout for mobile "
-            "and desktop.\n"
-            "- Real, meaningful copy written for this brand or project. NEVER "
-            "lorem ipsum, NEVER placeholder fragments, NEVER truncated words — "
-            "every section (hero, features, pricing, contact, etc.) gets "
-            "finished sentences.\n"
-            "- Working interactions: a smooth-scrolling nav with anchor links, "
-            "hover/active states, a functioning form or CTA, and any JS the "
-            "page needs — everything inlined, no external CDNs, fonts, or "
-            "images.\n"
-            "- The file MUST be complete: every tag closed, ending with "
-            "</html>. Never abbreviate content to save tokens; if you must "
-            "choose, cut whole optional sections rather than leave a sentence "
-            "half-finished."
+            "index.html that is GENUINELY EXCELLENT:\n" + _WEB_BUILD_SPEC
         )
     else:
         deliverable = (
@@ -219,6 +204,8 @@ def builder_prompt(task_title: str, objective: str, plan: str) -> str:
             "that; otherwise write the concise code/document file that "
             "fulfills the objective. Never truncate or half-finish output."
         )
+    fix = ("\nNOTE — your previous attempt was truncated or incomplete: re-issue "
+           "the ENTIRE, COMPLETE file now, ending with </html>." if repair else "")
     return (
         f"Task: {task_title}\n\n"
         f"Objective: {objective}\n\n"
@@ -226,8 +213,63 @@ def builder_prompt(task_title: str, objective: str, plan: str) -> str:
         "Act as the Builder. "
         f"{deliverable} "
         "Output ONLY the file content — no commentary, no markdown fences, no "
-        "``` code blocks.\n"
+        "``` code blocks."
+        f"{fix}\n"
     )
+
+
+_WEB_BUILD_SPEC = (
+    "DESIGN SYSTEM (apply it expertly):\n"
+    "- Define CSS custom properties up front: --bg, --surface, --text, --muted, "
+    "--accent, --accent-2, --border, --radius, --shadow. Choose ONE deliberate, "
+    "coherent palette that fits the brand (monochrome base + 1-2 accents; dark "
+    "or light theme picked intentionally). Body text must keep WCAG AA contrast.\n"
+    "- Typography: system-ui font stack, a clear type scale using clamp() for "
+    "the hero title, line-height 1.55 body / 1.1 headings, paragraphs capped at "
+    "~70ch.\n"
+    "- Layout & shapes: a centered container (~1140px max), one consistent "
+    "spacing rhythm, section padding ~96-120px desktop / 56-64px mobile; cards "
+    "in an auto-fit grid with 12-16px radius, hairline border and soft shadow.\n"
+    "- Motion: subtle hover lift on cards/buttons, smooth-scroll navigation, "
+    "gentle fade/slide reveals — all respecting prefers-reduced-motion.\n"
+    "- Responsive: mobile hamburger menu with a working toggle, clamp() "
+    "everywhere, zero horizontal scroll.\n"
+    "STRUCTURE (adapt to the objective but keep the pattern): sticky translucent "
+    "header with nav, hero (headline, one-liner, primary + secondary CTA), "
+    "features grid, testimonials or stats, pricing (if relevant), FAQ accordion, "
+    "contact/form, footer. EVERY named section must actually exist — never link "
+    "to a missing section.\n"
+    "ACCESSIBILITY & QA:\n"
+    "- Add <html lang>, <title>, meta description, a skip link, visible "
+    ":focus-visible styles, ARIA labels on icon-only controls, and of course "
+    "assignment of alt — but there are no images: use inline SVG icons or CSS "
+    "gradients only.\n"
+    "- ANTI-HALLUCINATION: never invent real addresses, phone numbers, emails, "
+    "real companies, or quotes attributed to real people; invent plausible "
+    "fictional details only. Every href="#..." must target a real section id; "
+    "no dead buttons.\n"
+    "- SANDBOX: the page renders as a standalone HTML file inside a sandboxed "
+    "iframe — do NOT use localStorage, sessionStorage, cookies, or fetch; keep "
+    "all state in the DOM or inline JS variables.\n"
+    "- COMPLETE & VALID: no external CDNs, fonts, images, or libraries; end "
+    "with </html>; every tag closed and the layout clean with no JS errors.\n"
+    "- Never output lorem ipsum or placeholder fragments; write finished, "
+    "meaningful copy. Never abbreviate content to save tokens — cut whole "
+    "optional sections instead of leaving truncated words."
+)
+
+
+def web_artifact_needs_repair(text: str) -> bool:
+    """QA gate for a web deliverable: obviously truncated or hollow art
+    (missing closing html tag, near-empty, or a code fence that survived the
+    artifact strip) → rebuild."""
+    t = (text or "").strip()
+    if not t or len(t) < 500:
+        return True
+    first = t.splitlines()[0].strip() if t else ""
+    if first.startswith("```"):
+        return True
+    return not bool(re.search(r"</html\s*>", t, re.IGNORECASE))
 
 
 def deliverable_filename(objective: str) -> str:

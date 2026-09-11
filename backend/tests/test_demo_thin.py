@@ -124,7 +124,7 @@ def test_deliverable_filename_mapping():
 def test_web_intent_guidance_in_prompts():
     web = demo_llm.builder_prompt("Build", "a landing page for a startup", "plan")
     assert "index.html" in web
-    assert "inlined, no external CDNs" in web
+    assert "no external CDNs, fonts, images, or libraries" in web
     assert "Never abbreviate content" in web
     code = demo_llm.builder_prompt("Build", "a FastAPI REST API", "plan")
     assert "index.html" not in code
@@ -137,6 +137,17 @@ def test_builder_token_budget_scales_with_web_goals():
     assert demo_llm.builder_max_tokens("a REST API") == demo_llm._NORMAL_MAX_TOKENS
     assert demo_llm.lane_max_tokens("a landing page", None) > 400
     assert demo_llm.lane_max_tokens("a REST API", "PLAN.md") == demo_llm._NORMAL_MAX_TOKENS
+
+
+def test_web_artifact_qa_gate_catches_broken_deliverables():
+    good = ("<!doctype html><html lang='en'><head><title>N</title></head><body>"
+            + ("<p>" + "x" * 900 + "</p>") * 2 + "</body></html>")
+    assert demo_llm.web_artifact_needs_repair(good) is False
+    assert demo_llm.web_artifact_needs_repair("<!doctype html><title>cut") is True
+    assert demo_llm.web_artifact_needs_repair("tiny") is True
+    assert demo_llm.web_artifact_needs_repair("") is True
+    fenced = "```html\n<!doctype html><html><body></body></html>\n"
+    assert demo_llm.web_artifact_needs_repair(fenced) is True
 
 
 def test_thin_execute_strips_wrapping_markdown_fence(monkeypatch, tmp_path):

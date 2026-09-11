@@ -904,12 +904,18 @@ def _bg_thin_project(slug: str, goal: str, provider_keys=None, pid: int | None =
             tid = by_role.get(assignee)
             if not tid:
                 continue
-            art = artifact or demo_llm.deliverable_filename(goal)
-            hc.thin_execute(board=slug, task_id=tid, workspace=str(ws_root),
-                            provider=provider, model=model,
-                            prompt=make_prompt(brief), objective=goal,
-                            artifact_name=art, api_key=api_key,
-                            max_tokens=demo_llm.lane_max_tokens(goal, artifact))
+            if artifact is None:
+                _run_builder(
+                    slug=slug, task_id=tid, workspace=str(ws_root),
+                    provider=provider, model=model, objective=goal,
+                    brief=brief, task_title=hc.SYNTHESIZER[2],
+                    api_key=api_key)
+            else:
+                hc.thin_execute(board=slug, task_id=tid, workspace=str(ws_root),
+                                provider=provider, model=model,
+                                prompt=make_prompt(brief), objective=goal,
+                                artifact_name=artifact, api_key=api_key,
+                                max_tokens=demo_llm.lane_max_tokens(goal, artifact))
             brief = _ws_brief(ws_root)
         if pid is not None:
             _finalize_launch(slug, pid, status="ok", outcome="converged", reason="")
@@ -1446,6 +1452,39 @@ def _read_brief(text: str, n_lines: int = 12) -> str:
     return "\n".join((text or "").strip().splitlines()[:n_lines])
 
 
+def _run_builder(*, slug: str, task_id: str, workspace: str, provider, model,
+                 objective: str, brief: str, task_title: str,
+                 api_key: str | None = None) -> dict:
+    """Build the final deliverable lane, with ONE automatic QA re-run.
+
+    The builder's artifact is what /p/ renders live, so its output gets a
+    larger token budget AND a light completeness gate: if a web deliverable
+    (index.html) comes back truncated/hollow, the lane is re-run once with a
+    repair hint instead of shipping a broken page."""
+
+    def _execute(repair: bool = False) -> dict:
+        return hc.thin_execute(
+            board=slug, task_id=task_id, workspace=workspace,
+            provider=provider, model=model,
+            prompt=demo_llm.builder_prompt(task_title, objective, brief,
+                                           repair=repair),
+            objective=objective, api_key=api_key,
+            artifact_name=demo_llm.deliverable_filename(objective),
+            max_tokens=demo_llm.builder_max_tokens(objective))
+
+    out = _execute()
+    if out.get("ok") and demo_llm.deliverable_filename(objective) == "index.html":
+        try:
+            text = (Path(workspace) / "index.html").read_text(
+                encoding="utf-8", errors="ignore")
+        except Exception:
+            text = ""
+        if demo_llm.web_artifact_needs_repair(text):
+            _execute(repair=True)
+            out["retried"] = True
+    return out
+
+
 def _demo_drive(*, slug: str, goal: str, planner_id: str, builder_id: str,
                 workspace: str, provider, model, pool_probe_key=None,
                 runtime_source: str = "pool") -> None:
@@ -1468,13 +1507,10 @@ def _demo_drive(*, slug: str, goal: str, planner_id: str, builder_id: str,
                 plan_text = (Path(workspace) / "PLAN.md").read_text(encoding="utf-8", errors="ignore")
             except Exception:
                 pass
-            outcomes.append(hc.thin_execute(
-                board=slug, task_id=builder_id, workspace=workspace,
-                provider=provider, model=model,
-                prompt=demo_llm.builder_prompt(hc.DEMO_BUILDER_TITLE, goal,
-                                               _read_brief(plan_text)),
-                objective=goal,
-                max_tokens=demo_llm.builder_max_tokens(goal)))
+            outcomes.append(_run_builder(
+                slug=slug, task_id=builder_id, workspace=workspace,
+                provider=provider, model=model, objective=goal,
+                brief=_read_brief(plan_text), demo=True))
             ok = len(outcomes) == 2 and all(o.get("ok") for o in outcomes)
         except Exception as e:
             try:
