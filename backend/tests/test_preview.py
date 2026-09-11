@@ -7,8 +7,9 @@ The preview renders a board's generated workspace as a browsable live site
     normal Bearer session) and assets served under /p carry the cookie too;
   * cross-tenant preview access is refused (403);
   * path traversal can never escape the workspace root (../ and encoded forms);
-  * preview responses are iframe-embeddable (X-Frame-Options: SAMEORIGIN +
-    frame-ancestors 'self'), while every other page keeps DENY + nonce CSP.
+  * preview responses are iframe-embeddable (X-Frame-Options: SAMEORIGIN, no
+    frame-ancestors directive — opaque sandboxed frames can never match one),
+    while every other page keeps DENY + nonce CSP.
 """
 from __future__ import annotations
 
@@ -61,10 +62,13 @@ def test_demo_index_is_public_and_embeddable(_host):
     assert r.status_code == 200, r.text
     assert "<h1>Hi</h1>" in r.text
     assert "text/html" in r.headers["content-type"]
-    # embeddable by the dashboard iframe, relaxed CSP for generated apps
+    # embeddable by the dashboard iframe: relaxed CSP for generated apps, with
+    # NO frame-ancestors directive (an opaque sandboxed frame can never match
+    # one in Chromium) and SAMEORIGIN protecting the embed side
     assert r.headers["x-frame-options"] == "SAMEORIGIN"
-    assert "frame-ancestors 'self'" in r.headers["content-security-policy"]
-    assert "unsafe-inline" in r.headers["content-security-policy"]
+    csp = r.headers["content-security-policy"]
+    assert "unsafe-inline" in csp
+    assert "frame-ancestors" not in csp
 
 
 def test_preview_no_slash_redirects(_host):
@@ -175,6 +179,9 @@ def test_main_pages_keep_strict_framing_and_nonce_csp(_host):
     assert "nonce-" in csp
     assert "unsafe-inline" not in csp.split("script-src")[1].split(";")[0]
     assert "frame-ancestors 'none'" in csp
+    # the dashboard may embed its own preview pages (same-origin /p/*) in
+    # addition to the Paddle checkout iframes
+    assert "frame-src 'self'" in csp
 
 
 def test_flag_set_only_on_preview_routes(_host):

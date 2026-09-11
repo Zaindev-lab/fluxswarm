@@ -410,7 +410,7 @@ _CSP_TEMPLATE = ("default-src 'self'; "
                  "img-src 'self' data: https://*.paddle.com; "
                  "font-src 'self' data: https://*.paddle.com; "
                  "connect-src 'self' ws: wss: https://*.paddle.com wss://checkout.paddle.com https://plausible.io; "
-                 "frame-src https://checkout.paddle.com https://sandbox-checkout.paddle.com "
+                 "frame-src 'self' https://checkout.paddle.com https://sandbox-checkout.paddle.com "
                  "https://buy.paddle.com https://sandbox-buy.paddle.com; "
                  "object-src 'none'; "
                  "frame-ancestors 'none'; "
@@ -424,17 +424,21 @@ def _csp_for(nonce: str) -> str:
 
 
 # CSP for /p/ preview responses: user-generated content in a sandboxed iframe.
-# Allows inline/eval scripts so generated apps run; frame-ancestors 'self' lets
-# the dashboard embed via <iframe sandbox>.  Scoped path: /p only; the global
-# CSP (nonce-only) stays in force for every other route.
+# Allows inline/eval scripts so generated apps run. NOTE: this policy must NOT
+# carry a frame-ancestors directive — the preview iframe is sandboxed WITHOUT
+# allow-same-origin, so the frame gets an opaque origin that can never match
+# 'self' (or even '*') in Chromium, and the preview would be refused. Framing is
+# governed instead by the dashboard's frame-src 'self' (LOAD side) plus
+# X-Frame-Options: SAMEORIGIN on these responses (EMBED side, compares URL
+# origins and works under the sandbox). The global strict CSP stays for all
+# other routes.
 _PREVIEW_CSP = (
     "default-src 'self' 'unsafe-inline' data: blob:; "
     "script-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; "
     "style-src 'self' 'unsafe-inline' data: blob:; "
     "img-src 'self' data: blob:; font-src 'self' data: blob:; "
     "connect-src 'self' data: blob: ws: wss:; "
-    "object-src 'none'; base-uri 'self'; "
-    "frame-ancestors 'self'"
+    "object-src 'none'; base-uri 'self'"
 )
 
 
@@ -448,8 +452,10 @@ async def security_headers(request: Request, call_next):
     if getattr(request.state, "preview", False):
         # Preview responses carry user-generated app pages that need inline
         # scripts/eval to render; they are served into a sandboxed (opaque
-        # origin) iframe with frame-ancestors 'self'. Everything else keeps the
-        # strict nonce-only policy below.
+        # origin) iframe. Embedding is allowed by the dashboard's frame-src
+        # 'self' plus X-Frame-Options: SAMEORIGIN here; the relaxed CSP carries
+        # no frame-ancestors (opaque frames can never match a directive in
+        # Chromium). Everything else keeps the strict nonce-only policy below.
         resp.headers["Content-Security-Policy"] = _PREVIEW_CSP
         resp.headers["X-Frame-Options"] = "SAMEORIGIN"
     else:
