@@ -1462,12 +1462,12 @@ def _run_builder(*, slug: str, task_id: str, workspace: str, provider, model,
     (index.html) comes back truncated/hollow, the lane is re-run once with a
     repair hint instead of shipping a broken page."""
 
-    def _execute(repair: bool = False) -> dict:
+    def _execute(repair: bool = False, qa: list[str] | None = None) -> dict:
         return hc.thin_execute(
             board=slug, task_id=task_id, workspace=workspace,
             provider=provider, model=model,
             prompt=demo_llm.builder_prompt(task_title, objective, brief,
-                                           repair=repair),
+                                           repair=repair, qa=qa),
             objective=objective, api_key=api_key,
             artifact_name=demo_llm.deliverable_filename(objective),
             max_tokens=demo_llm.builder_max_tokens(objective))
@@ -1479,8 +1479,10 @@ def _run_builder(*, slug: str, task_id: str, workspace: str, provider, model,
                 encoding="utf-8", errors="ignore")
         except Exception:
             text = ""
-        if demo_llm.web_artifact_needs_repair(text):
-            _execute(repair=True)
+        issues = demo_llm.web_qa_issues(text)
+        if demo_llm.web_artifact_needs_repair(text) \
+                or demo_llm.web_qa_should_repair(issues):
+            _execute(repair=True, qa=issues)
             out["retried"] = True
     return out
 

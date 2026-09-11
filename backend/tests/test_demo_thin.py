@@ -150,6 +150,29 @@ def test_web_artifact_qa_gate_catches_broken_deliverables():
     assert demo_llm.web_artifact_needs_repair(fenced) is True
 
 
+def test_web_qa_issues_detect_broken_and_sandbox_broken_pages():
+    bad = ("<!doctype html><html><body><nav><a href='#missing'>x</a></nav>"
+           "<a href='#'>dead</a><script>localStorage.setItem('a',1);"
+           "fetch('/x')</script><link rel='stylesheet' href='https://cdn.x/style.css'>"
+           + ("<p>lorem ipsum text</p>" * 3) + "</body>")
+    issues = demo_llm.web_qa_issues(bad)
+    joined = "\n".join(issues)
+    assert "no closing </html>" in joined
+    assert "broken anchor" in joined
+    assert "dead link" in joined
+    assert "sandbox-unsafe: uses localStorage" in joined
+    assert "fetch(" in joined
+    assert "external resource referenced" in joined
+    assert "lorem ipsum" in joined
+    assert demo_llm.web_qa_should_repair(issues) is True
+
+    good = ("<!doctype html><html lang='en'><head><title>N</title></head><body>"
+            "<nav><a href='#features'>F</a></nav>"
+            f"<section id='features'><h1>N</h1>{('<p>' + 'x' * 900 + '</p>') * 2}"
+            "</section><footer>N 2026</footer></body></html>")
+    assert demo_llm.web_qa_issues(good) == []
+
+
 def test_thin_execute_strips_wrapping_markdown_fence(monkeypatch, tmp_path):
     """A lenient completion that wraps HTML in backticks still lands a clean
     artifact on disk (the builder prompts forbid fences, but never trust the

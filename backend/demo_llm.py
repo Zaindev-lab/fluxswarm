@@ -190,7 +190,7 @@ def planner_prompt(task_title: str, objective: str) -> str:
 
 
 def builder_prompt(task_title: str, objective: str, plan: str,
-                   repair: bool = False) -> str:
+                   repair: bool = False, qa: list[str] | None = None) -> str:
     if _is_web_objective(objective):
         deliverable = (
             "The objective is a WEBSITE / WEB APP — produce ONE self-contained "
@@ -204,8 +204,17 @@ def builder_prompt(task_title: str, objective: str, plan: str,
             "that; otherwise write the concise code/document file that "
             "fulfills the objective. Never truncate or half-finish output."
         )
-    fix = ("\nNOTE — your previous attempt was truncated or incomplete: re-issue "
-           "the ENTIRE, COMPLETE file now, ending with </html>." if repair else "")
+    if repair:
+        if qa:
+            bullets = "\n".join(f"  - {i}" for i in qa[:12])
+            fix = (f"\nNOTE — your previous attempt failed automated QA:\n{bullets}\n"
+                   "Fix EVERY listed problem and re-issue the ENTIRE, COMPLETE "
+                   "file now, ending with </html>.")
+        else:
+            fix = ("\nNOTE — your previous attempt was truncated or incomplete: "
+                   "re-issue the ENTIRE, COMPLETE file now, ending with </html>.")
+    else:
+        fix = ""
     return (
         f"Task: {task_title}\n\n"
         f"Objective: {objective}\n\n"
@@ -270,6 +279,54 @@ def web_artifact_needs_repair(text: str) -> bool:
     if first.startswith("```"):
         return True
     return not bool(re.search(r"</html\s*>", t, re.IGNORECASE))
+
+
+def web_qa_issues(html: str) -> list[str]:
+    """Deterministic post-build audit of a generated web page. Runs on every
+    web deliverable so a truncated, broken, hollow or sandbox-hostile page is
+    repaired BEFORE the user ever sees it in /p/."""
+    text = html or ""
+    low = text.lower()
+    issues: list[str] = []
+    if "</html>" not in low:
+        issues.append("truncated: no closing </html>")
+    clean = len(text.strip())
+    if clean < 500:
+        issues.append(f"too short ({clean} chars) to be a real page")
+    if "<nav" not in low and "<header" not in low and "<ul" not in low:
+        issues.append("no navigation (<nav>/<header>/<ul>) found")
+    if "<footer" not in low:
+        issues.append("no <footer> section")
+    if not re.search(r"<h1\b", low):
+        issues.append("no <h1> headline (page has no obvious title)")
+    for pat, label in (("localstorage.", "localStorage"), ("sessionstorage.", "sessionStorage"),
+                       ("document.cookie", "document.cookie"), ("fetch(", "fetch(…)")):
+        if pat in low:
+            issues.append(f"sandbox-unsafe: uses {label} (breaks inside the preview iframe)")
+    for m in set(re.findall(r'(?:src|href)\s*=\s*["\']https?://', low)):
+        issues.append(f"external resource referenced ({m}) — must be inline")
+    if re.search(r'''href=["']#["']''', text):
+        issues.append("dead link: href='#' (no target)")
+    ids = set(re.findall(r'''id=["']([^"']+)["']''', text))
+    for h in sorted(set(re.findall(r'''href=["'](#[^"']*)["']''', text))):
+        if h != "#" and h[1:] not in ids:
+            issues.append(f"broken anchor: {h} links to a missing id")
+    for tok in ("lorem ipsum", "sample text", "your text here", "replace this",
+                "image here", "type your", "change this", "dummy "):
+        if tok in low:
+            issues.append(f"placeholder/filler copy: '{tok}'")
+    return issues
+
+
+# Issue prefixes that are hard failures (structural/sandbox) → an automatic
+# repair round is triggered. Missing-nav/footer/filler-copy alone are soft and
+# would churn without adding real value.
+_HARD_QA_PREFIXES = ("truncated", "too short", "broken anchor", "sandbox-unsafe",
+                     "external resource", "dead link", "no closing")
+
+
+def web_qa_should_repair(issues: list[str]) -> bool:
+    return any(i.startswith(_HARD_QA_PREFIXES) for i in issues)
 
 
 def deliverable_filename(objective: str) -> str:
