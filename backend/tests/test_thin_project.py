@@ -273,6 +273,24 @@ def test_completion_does_not_retry_401(monkeypatch):
     assert attempts["n"] == 1
 
 
+def test_read_workspace_includes_suffix_less_artifacts(monkeypatch, tmp_path):
+    """A thin lane writes real artifacts into the project workspace; the served
+    workspace view must include extension-less project files like Dockerfile
+    (the DevOps lane's real deliverable), not just .md/.py files."""
+    _host(monkeypatch, tmp_path)
+    ws = hc.project_workspace_dir("u1-ws")
+    ws.mkdir(parents=True)
+    (ws / "Dockerfile").write_text("FROM python:3.11-slim\n", encoding="utf-8")
+    (ws / "PLAN.md").write_text("# Plan\n", encoding="utf-8")
+    (ws / "tests").mkdir()
+    (ws / "tests" / "test_app.py").write_text("def t(): pass\n", encoding="utf-8")
+    content = hc.read_workspace("u1-ws")
+    assert "--- Dockerfile ---" in content
+    assert "FROM python:3.11-slim" in content
+    assert "PLAN.md" in content
+    assert "test_app.py" in content
+
+
 def test_thin_driver_pass_goal_artifact_for_readme_goal(monkeypatch, tmp_path):
     """A README-style goal makes the final builder lane deliver README.md."""
     _host(monkeypatch, tmp_path)

@@ -1994,10 +1994,12 @@ def read_workspace(board: str) -> str:
     if not _SAFE_SLUG_RE.match(board):
         raise ValueError(f"unsafe board slug: {board!r}")
     ws_root = Path(HERMES_HOME) / "kanban" / "boards" / board / "workspaces"
+    _EXTRA_NAME = {"Dockerfile", "Makefile", "Procfile", "LICENSE"}
     out = []
     try:
         for f in ws_root.rglob("*"):
-            if f.is_file() and f.suffix in (".py", ".md", ".txt", ".json", ".yaml", ".yml"):
+            if f.is_file() and (f.suffix in (".py", ".md", ".txt", ".json", ".yaml", ".yml")
+                                or f.name in _EXTRA_NAME):
                 out.append(f"--- {f.relative_to(ws_root)} ---\n")
                 out.append(f.read_text(encoding="utf-8", errors="ignore")[:3000])
     except Exception:
