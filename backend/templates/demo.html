@@ -37,6 +37,13 @@
   .skel::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent,var(--bord),transparent);animation:sh 1.2s infinite}
   @keyframes sh{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
   .retry-btn{display:inline-block;margin-top:8px;background:var(--err);color:#fff;border:0;border-radius:8px;padding:8px 18px;font-size:14px;cursor:pointer}
+  .modal{position:fixed;inset:0;background:rgba(8,11,20,.74);display:none;align-items:center;justify-content:center;z-index:50;padding:16px}
+  .modal.open{display:flex}
+  .modal .box{width:min(1150px,96vw);height:92vh;max-height:92vh;background:var(--card);border:1px solid var(--bord);border-radius:12px;display:flex;flex-direction:column;overflow:hidden}
+  .modal .head{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--bord);flex-wrap:wrap}
+  .modal .head button{margin:0;padding:8px 14px;font-size:13px;box-shadow:none}
+  .modal .head .slug{flex:1;color:var(--mut);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:120px}
+  .modal .box iframe{flex:1;border:0;background:#fff;width:100%;min-height:0}
   @media(max-width:480px){body{font-size:14px}main{padding:20px 12px}h1{font-size:22px}textarea{font-size:14px}button{font-size:15px;padding:10px 18px}}
 </style>
 </head>
@@ -59,11 +66,24 @@
       <hr style="border:0;border-top:1px dashed var(--dash);margin:16px 0">
       <div id="agents" aria-live="polite"></div>
       <p class="eta" id="eta"></p>
+      <button id="previewBtn" data-onclick="openPreview" hidden>🧬 Preview project</button>
     </div>
     <div id="err" hidden></div>
   </div>
   <a class="link" href="/">→ Full account: 5 free credits & paid credit packs</a>
 </main>
+<div class="modal" id="pvModal" role="dialog" aria-modal="true" aria-label="Live project preview">
+  <div class="box">
+    <div class="head">
+      <span style="font-weight:800;font-size:15px">⚡ Project preview</span>
+      <span class="slug" id="pvSlug"></span>
+      <button data-onclick="pvTab">Open in new tab</button>
+      <button data-onclick="pvCopy">Copy link</button>
+      <button data-onclick="pvClose" aria-label="Close preview">✕</button>
+    </div>
+    <iframe id="pvFrame" sandbox="allow-scripts allow-forms allow-modals allow-popups" title="Live project preview"></iframe>
+  </div>
+</div>
 <script nonce="{{ csp_nonce }}">
 const $=id=>document.getElementById(id);
 let slug=null;
@@ -80,7 +100,33 @@ document.addEventListener("click",e=>{
     $("themeBtn").textContent=next==="dark"?"🌙":"☀️";
   }
   if(action==="launchDemo")launchDemo();
+  if(action==="openPreview")openPreview();
+  if(action==="pvTab")pvTab();
+  if(action==="pvCopy")pvCopy();
+  if(action==="pvClose")pvClose();
 });
+
+// Live preview of the board the swarm just built (/p/<slug>/), rendered in a
+// sandboxed (opaque-origin) iframe like Lovable/Kimi — usable on free trial
+// boards and shareable via a copyable link.
+function pvUrl(){return "/p/"+encodeURIComponent(slug)+"/";}
+function openPreview(){
+  if(!slug)return;
+  $("pvSlug").textContent=slug;
+  $("pvModal").classList.add("open");
+  $("pvFrame").src=pvUrl();
+}
+function pvTab(){if(slug)window.open(pvUrl(),"_blank","noopener");}
+function pvCopy(){
+  if(!slug)return;
+  const u=location.origin+pvUrl();
+  (navigator.clipboard?navigator.clipboard.writeText(u):Promise.reject())
+    .then(()=>{$("eta").textContent="Preview link copied ✓ — share it with your clients.";})
+    .catch(()=>{$("eta").textContent=u;});
+}
+function pvClose(){$("pvModal").classList.remove("open");}
+document.addEventListener("keydown",e=>{if(e.key==="Escape")pvClose();});
+$("pvModal").addEventListener("click",e=>{if(e.target===$("pvModal"))pvClose();});
 
 // Theme (dark default, respect system, persist choice).
 (function(){
@@ -123,7 +169,12 @@ async function poll(){
       $("eta").textContent="Estimated time remaining: ~"+Math.max(0,d.estimated_remaining_seconds||0)+" seconds";
       setTimeout(poll,4000);
     }else{
-      $("eta").textContent="✅ Trial session complete. Sign up free to get 5 credits and launch more projects.";
+      if(d.status==="done"){
+        $("previewBtn").hidden=false;
+        $("eta").textContent="✅ Trial session complete. Preview your project with the button above, or sign up free to launch more.";
+      }else{
+        $("eta").textContent="✅ Trial session complete. Sign up free to get 5 credits and launch more projects.";
+      }
       setTimeout(poll,10000);
     }
   }catch(e){setTimeout(poll,4000);}
