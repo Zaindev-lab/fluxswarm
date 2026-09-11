@@ -908,7 +908,8 @@ def _bg_thin_project(slug: str, goal: str, provider_keys=None, pid: int | None =
             hc.thin_execute(board=slug, task_id=tid, workspace=str(ws_root),
                             provider=provider, model=model,
                             prompt=make_prompt(brief), objective=goal,
-                            artifact_name=art, api_key=api_key, max_tokens=800)
+                            artifact_name=art, api_key=api_key,
+                            max_tokens=demo_llm.lane_max_tokens(goal, artifact))
             brief = _ws_brief(ws_root)
         if pid is not None:
             _finalize_launch(slug, pid, status="ok", outcome="converged", reason="")
@@ -1472,7 +1473,8 @@ def _demo_drive(*, slug: str, goal: str, planner_id: str, builder_id: str,
                 provider=provider, model=model,
                 prompt=demo_llm.builder_prompt(hc.DEMO_BUILDER_TITLE, goal,
                                                _read_brief(plan_text)),
-                objective=goal))
+                objective=goal,
+                max_tokens=demo_llm.builder_max_tokens(goal)))
             ok = len(outcomes) == 2 and all(o.get("ok") for o in outcomes)
         except Exception as e:
             try:

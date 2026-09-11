@@ -931,6 +931,19 @@ def _insert_event(board_display_log: str, task_id: str, kind: str, note: str, at
         pass
 
 
+_FENCE_LINE_RE = re.compile(r"^```[a-zA-Z0-9+-]*\s*$")
+
+
+def _strip_code_fences(text: str) -> str:
+    """Remove a single wrapping markdown fence the model sometimes adds (the
+    prompts forbid it, but a lenient completion may wrap HTML/code anyway)."""
+    lines = text.splitlines()
+    if len(lines) >= 2 and _FENCE_LINE_RE.match(lines[0].strip()) \
+            and _FENCE_LINE_RE.match(lines[-1].strip()):
+        return "\n".join(lines[1:-1]).strip("\n")
+    return text
+
+
 def thin_execute(board: str, task_id: str, workspace: str, provider: str,
                  model: str, prompt: str, objective: str = "",
                  artifact_name: str | None = None, api_key: str | None = None,
@@ -994,8 +1007,8 @@ def thin_execute(board: str, task_id: str, workspace: str, provider: str,
     try:
         _claim()
         _emit_working(board, task_id, "thin worker: provider completion in flight")
-        text = demo_llm.completion(provider, model, prompt,
-                                   max_tokens=max_tokens, api_key=api_key)
+        text = _strip_code_fences(demo_llm.completion(
+            provider, model, prompt, max_tokens=max_tokens, api_key=api_key))
         name = artifact_name or demo_llm.deliverable_filename(objective or "")
         ws = Path(workspace)
         ws.mkdir(parents=True, exist_ok=True)

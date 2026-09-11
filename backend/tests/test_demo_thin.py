@@ -124,10 +124,46 @@ def test_deliverable_filename_mapping():
 def test_web_intent_guidance_in_prompts():
     web = demo_llm.builder_prompt("Build", "a landing page for a startup", "plan")
     assert "index.html" in web
-    assert "ALL CSS and JavaScript inlined" in web
+    assert "inlined, no external CDNs" in web
+    assert "Never abbreviate content" in web
     code = demo_llm.builder_prompt("Build", "a FastAPI REST API", "plan")
     assert "index.html" not in code
     assert "single self-contained index.html" not in code
+
+
+def test_builder_token_budget_scales_with_web_goals():
+    assert demo_llm.builder_max_tokens("a landing page") > 400
+    assert demo_llm.builder_max_tokens("build a dashboard UI") > 400
+    assert demo_llm.builder_max_tokens("a REST API") == demo_llm._NORMAL_MAX_TOKENS
+    assert demo_llm.lane_max_tokens("a landing page", None) > 400
+    assert demo_llm.lane_max_tokens("a REST API", "PLAN.md") == demo_llm._NORMAL_MAX_TOKENS
+
+
+def test_thin_execute_strips_wrapping_markdown_fence(monkeypatch, tmp_path):
+    """A lenient completion that wraps HTML in backticks still lands a clean
+    artifact on disk (the builder prompts forbid fences, but never trust the
+    model)."""
+    import secrets
+    monkeypatch.setattr(hc, "HERMES_HOME", str(tmp_path))
+    board = "u1-fence-" + secrets.token_hex(3)
+    ws = tmp_path / "ws"
+    hc._ensure_demo_board_db(board)
+    c = sqlite3.connect(str(hc._board_db_path(board)))
+    try:
+        hc._demo_insert_task(c, board, task_id="t_fix", title="Build",
+                             assignee="ecc-build-fixer", status="ready")
+        c.commit()
+    finally:
+        c.close()
+    monkeypatch.setattr("hermes_client.demo_llm.completion",
+                        lambda p, m, prompt, max_tokens=400, api_key=None:
+                        "```html\n<!doctype html><title>X</title>\n```")
+    hc.thin_execute(board=board, task_id="t_fix", workspace=str(ws),
+                    provider="gemini", model="m", prompt="p",
+                    objective="a landing page", artifact_name="index.html")
+    out = (ws / "index.html").read_text(encoding="utf-8")
+    assert "```" not in out
+    assert out.startswith("<!doctype html>")
 
 
 def test_thin_execute_drives_board_events_and_artifact(monkeypatch, tmp_path):

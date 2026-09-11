@@ -23,6 +23,12 @@ _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 _COMPLETION_TIMEOUT_S = int(os.environ.get("FLUXSWARM_DEMO_LLM_TIMEOUT_S", "90"))
 
+# A full landing page / web app rarely fits in the 400-token lane default; the
+# builder lane (the artifact the user actually sees in /p/) gets a much larger
+# output budget. Operators cap it per-env. 3000 tokens ≈ 2-4k words of HTML.
+_BUILDER_MAX_TOKENS = int(os.environ.get("FLUXSWARM_BUILDER_MAX_TOKENS", "3000"))
+_NORMAL_MAX_TOKENS = 800
+
 # Transient upstream 5xx/429 are a fact of the free pool: retry a bounded
 # number of times with small backoff so a 503 hiccup mid-swarm doesn't park the
 # whole project board (the thin path would otherwise finalize launch_error at
@@ -156,6 +162,21 @@ def _is_web_objective(objective: str) -> bool:
     return any(h in lower for h in _WEB_HINTS)
 
 
+def builder_max_tokens(objective: str = "") -> int:
+    """Output-budget for the final deliverable lane (what /p/ renders live)."""
+    if not objective or _is_web_objective(objective) or "html" in (objective or "").lower():
+        return _BUILDER_MAX_TOKENS
+    return _NORMAL_MAX_TOKENS
+
+
+def lane_max_tokens(objective: str, artifact_name: str | None) -> int:
+    """Per-lane token budget: the final deliverable gets the large budget; the
+    smaller plan/doc/lint lanes keep the normal cap."""
+    if artifact_name is None:
+        return builder_max_tokens(objective)
+    return _NORMAL_MAX_TOKENS
+
+
 def planner_prompt(task_title: str, objective: str) -> str:
     prefix = " Deliver the site as ONE self-contained index.html." if _is_web_objective(objective) else ""
     return (
@@ -171,18 +192,32 @@ def planner_prompt(task_title: str, objective: str) -> str:
 def builder_prompt(task_title: str, objective: str, plan: str) -> str:
     if _is_web_objective(objective):
         deliverable = (
-            "The objective is a WEBSITE / WEB APP — the deliverable is ONE "
-            "self-contained file named index.html: a complete, working web page "
-            "with ALL CSS and JavaScript inlined (no external CDNs, fonts, or "
-            "images), responsive, opening directly in a browser and rendering "
-            "the UI the user asked for (real interactions, not placeholders)."
+            "The objective is a WEBSITE / WEB APP — produce ONE self-contained "
+            "file named index.html that is GENUINELY EXCELLENT:\n"
+            "- A complete, polished, production-looking page, not a sketch: a "
+            "coherent design system (deliberate color palette, readable "
+            "typography, generous spacing) and a responsive layout for mobile "
+            "and desktop.\n"
+            "- Real, meaningful copy written for this brand or project. NEVER "
+            "lorem ipsum, NEVER placeholder fragments, NEVER truncated words — "
+            "every section (hero, features, pricing, contact, etc.) gets "
+            "finished sentences.\n"
+            "- Working interactions: a smooth-scrolling nav with anchor links, "
+            "hover/active states, a functioning form or CTA, and any JS the "
+            "page needs — everything inlined, no external CDNs, fonts, or "
+            "images.\n"
+            "- The file MUST be complete: every tag closed, ending with "
+            "</html>. Never abbreviate content to save tokens; if you must "
+            "choose, cut whole optional sections rather than leave a sentence "
+            "half-finished."
         )
     else:
         deliverable = (
             "Produce the SINGLE final deliverable file that achieves the "
-            "objective. If the objective mentions a specific file name (e.g. "
-            "README.md or app.py), write exactly that; otherwise write the "
-            "concise code/document file that fulfills the objective."
+            "objective, COMPLETE and correct. If the objective mentions a "
+            "specific file name (e.g. README.md or app.py), write exactly "
+            "that; otherwise write the concise code/document file that "
+            "fulfills the objective. Never truncate or half-finish output."
         )
     return (
         f"Task: {task_title}\n\n"
