@@ -29,6 +29,12 @@ _COMPLETION_TIMEOUT_S = int(os.environ.get("FLUXSWARM_DEMO_LLM_TIMEOUT_S", "90")
 _BUILDER_MAX_TOKENS = int(os.environ.get("FLUXSWARM_BUILDER_MAX_TOKENS", "3000"))
 _NORMAL_MAX_TOKENS = 800
 
+# Demo builder budget: big enough for a complete single-file page but small
+# enough to finish inside the demo wall-clock cap on the free pool (each pool
+# completion also sits under the per-call timeout). Real project launches keep
+# the full _BUILDER_MAX_TOKENS budget.
+_DEMO_BUILDER_MAX_TOKENS = int(os.environ.get("FLUXSWARM_DEMO_BUILDER_MAX_TOKENS", "2000"))
+
 # Transient upstream 5xx/429 are a fact of the free pool: retry a bounded
 # number of times with small backoff so a 503 hiccup mid-swarm doesn't park the
 # whole project board (the thin path would otherwise finalize launch_error at
@@ -166,6 +172,14 @@ def builder_max_tokens(objective: str = "") -> int:
     """Output-budget for the final deliverable lane (what /p/ renders live)."""
     if not objective or _is_web_objective(objective) or "html" in (objective or "").lower():
         return _BUILDER_MAX_TOKENS
+    return _NORMAL_MAX_TOKENS
+
+
+def demo_builder_max_tokens(objective: str = "") -> int:
+    """Demo-only builder budget: fits the demo wall-clock cap and per-call
+    timeout on the free pool while still yielding a complete single file."""
+    if not objective or _is_web_objective(objective) or "html" in (objective or "").lower():
+        return _DEMO_BUILDER_MAX_TOKENS
     return _NORMAL_MAX_TOKENS
 
 

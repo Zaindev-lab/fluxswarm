@@ -264,7 +264,7 @@ _DEMO_GLOBAL_WINDOW = 86400
 _DEMO_MICRO_IP_MAX = 5
 _DEMO_MICRO_GLOBAL_MAX = 200
 # Session 3 demo lifecycle (auto-close + workspace recycle).
-_DEMO_MAX_RUNTIME_S = int(os.getenv("FLUXSWARM_DEMO_MAX_RUNTIME_S", "600"))
+_DEMO_MAX_RUNTIME_S = int(os.getenv("FLUXSWARM_DEMO_MAX_RUNTIME_S", "900"))
 _DEMO_WORKSPACE_TTL_S = int(os.getenv("FLUXSWARM_DEMO_WORKSPACE_TTL_S", "86400"))
 _DEMO_LAST: dict[str, tuple] = {}
 _DEMO_LAST_TTL_S = 7200
@@ -1005,7 +1005,7 @@ def _demo_lifecycle_sweep() -> None:
     """Auto-close and recycle the throwaway ``flux-demo-*`` boards.
 
     Session 3 demo hygiene:
-      * a demo board still running past ``_DEMO_MAX_RUNTIME_S`` (10 min) is
+      * a demo board still running past ``_DEMO_MAX_RUNTIME_S`` (15 min) is
         sealed (kills its workers, drops the durable seal marker) — a stuck or
         hung demo must not hold the kanban concurrency budget;
       * a sealed demo board aged past ``_DEMO_WORKSPACE_TTL_S`` (24 h) has its
@@ -1454,13 +1454,14 @@ def _read_brief(text: str, n_lines: int = 12) -> str:
 
 def _run_builder(*, slug: str, task_id: str, workspace: str, provider, model,
                  objective: str, brief: str, task_title: str,
-                 api_key: str | None = None) -> dict:
+                 api_key: str | None = None, max_tokens: int | None = None) -> dict:
     """Build the final deliverable lane, with ONE automatic QA re-run.
 
     The builder's artifact is what /p/ renders live, so its output gets a
     larger token budget AND a light completeness gate: if a web deliverable
     (index.html) comes back truncated/hollow, the lane is re-run once with a
-    repair hint instead of shipping a broken page."""
+    repair hint instead of shipping a broken page. ``max_tokens`` lets the
+    demo path pass a lighter budget that fits its wall-clock cap."""
 
     def _execute(repair: bool = False, qa: list[str] | None = None) -> dict:
         return hc.thin_execute(
@@ -1470,7 +1471,7 @@ def _run_builder(*, slug: str, task_id: str, workspace: str, provider, model,
                                            repair=repair, qa=qa),
             objective=objective, api_key=api_key,
             artifact_name=demo_llm.deliverable_filename(objective),
-            max_tokens=demo_llm.builder_max_tokens(objective))
+            max_tokens=max_tokens or demo_llm.builder_max_tokens(objective))
 
     out = _execute()
     if out.get("ok") and demo_llm.deliverable_filename(objective) == "index.html":
@@ -1512,7 +1513,8 @@ def _demo_drive(*, slug: str, goal: str, planner_id: str, builder_id: str,
             outcomes.append(_run_builder(
                 slug=slug, task_id=builder_id, workspace=workspace,
                 provider=provider, model=model, objective=goal,
-                brief=_read_brief(plan_text), demo=True))
+                brief=_read_brief(plan_text), task_title=hc.DEMO_BUILDER_TITLE,
+                max_tokens=demo_llm.demo_builder_max_tokens(goal)))
             ok = len(outcomes) == 2 and all(o.get("ok") for o in outcomes)
         except Exception as e:
             try:

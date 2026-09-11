@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from pathlib import Path
 
 import hermes_client as hc
 import demo_llm
@@ -345,3 +346,91 @@ def test_error_kind_renders_in_activity_log(monkeypatch, tmp_path):
     ev = hc._task_activity_events(board, "t1")
     assert ev and ev[0]["kind"] == "error"
     assert "HTTP 429" in ev[0]["label"]
+
+
+def test_demo_drive_builder_lane_runs(monkeypatch, tmp_path):
+    """Regression: the demo builder lane must actually RUN and write index.html.
+
+    _demo_drive used to call _run_builder with a stale signature (demo=True,
+    no task_title) → TypeError → builder stayed pending forever → /p/ only
+    served the dark fallback card (the 'black page'). This drives the real
+    _run_builder wiring synchronously and proves the artifact is produced."""
+    import main as main_mod
+
+    class SyncThread:
+        def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+            self._target, self._args, self._kwargs = target, args, kwargs or {}
+
+        def start(self):
+            self._target(*self._args, **self._kwargs)
+
+    monkeypatch.setattr(main_mod.hc, "HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(main_mod.threading, "Thread", SyncThread)
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    def fake_execute(*, board, task_id, workspace, provider, model, prompt,
+                     objective="", artifact_name=None, api_key=None, max_tokens=None):
+        (Path(workspace) / artifact_name).write_text(
+            ("<!doctype html><html><head><style>body{background:#0b0f1a;"
+             "color:#eef1fb}</style></head><body><nav><a href='#f'>F</a></nav>"
+             "<section id='f'><h1>Nebula</h1>"
+             + ("<p>" + "x" * 300 + "</p>") * 2 +
+             "</section><footer>Nebula 2026</footer></body></html>")
+            if artifact_name == "index.html" else "plan: build the landing page",
+            encoding="utf-8")
+        return {"ok": True, "elapsed_s": 1}
+
+    monkeypatch.setattr(main_mod.hc, "thin_execute", fake_execute)
+
+    main_mod._demo_drive(
+        slug="flux-demo-regr", goal="Build a landing page for Nebula",
+        planner_id="tp", builder_id="tb", workspace=str(ws),
+        provider="gemini", model="g")
+
+    assert (ws / "index.html").exists()
+    assert "Nebula" in (ws / "index.html").read_text(encoding="utf-8")
+
+
+def test_run_builder_accepts_demo_call_shape(monkeypatch, tmp_path):
+    """The exact call shape _demo_drive uses must not TypeError."""
+    import main as main_mod
+
+    monkeypatch.setattr(main_mod.hc, "HERMES_HOME", str(tmp_path))
+    ws = tmp_path / "ws2"
+    ws.mkdir()
+    calls = {}
+
+    def fake_execute(*, board, task_id, workspace, provider, model, prompt,
+                     objective="", artifact_name=None, api_key=None, max_tokens=None):
+        calls["max_tokens"] = max_tokens
+        (Path(workspace) / artifact_name).write_text(
+            ("<!doctype html><html><head><style>body{background:#0b0f1a;"
+             "color:#eef1fb}</style></head><body><nav><a href='#f'>F</a></nav>"
+             "<section id='f'><h1>Nebula</h1>"
+             + ("<p>" + "x" * 300 + "</p>") * 2 +
+             "</section><footer>Nebula 2026</footer></body></html>"),
+            encoding="utf-8")
+        return {"ok": True, "elapsed_s": 1}
+
+    monkeypatch.setattr(main_mod.hc, "thin_execute", fake_execute)
+
+    out = main_mod._run_builder(
+        slug="flux-demo-regr", task_id="tb", workspace=str(ws),
+        provider="gemini", model="g", objective="Build a landing page for Nebula",
+        brief="plan", task_title=hc.DEMO_BUILDER_TITLE,
+        max_tokens=demo_llm.demo_builder_max_tokens("Build a landing page for Nebula"))
+
+    assert out["ok"]
+    assert calls["max_tokens"] == demo_llm.demo_builder_max_tokens(
+        "Build a landing page for Nebula")
+    assert calls["max_tokens"] < demo_llm.builder_max_tokens(
+        "Build a landing page for Nebula")
+
+
+def test_demo_builder_token_budget_is_web_scaled():
+    assert demo_llm.demo_builder_max_tokens("Build a landing page") \
+        < demo_llm.builder_max_tokens("Build a landing page")
+    assert demo_llm.demo_builder_max_tokens("make a CLI tool") \
+        == demo_llm.builder_max_tokens("make a CLI tool")
