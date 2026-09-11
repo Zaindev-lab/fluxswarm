@@ -9,31 +9,52 @@ honesty boundaries and the reaper's ownership split for flux-demo-* boards.
 """
 from __future__ import annotations
 
+import json
 import os
+import sqlite3
 
 import hermes_client as hc
 import demo_llm
 
 
-class _R:
-    def __init__(self, rc=0, stdout="", stderr=""):
-        self.returncode = rc
-        self.stdout = stdout
-        self.stderr = stderr
+def _mk_demo_board(tmp_path, monkeypatch, board="bdemo", task_ids=("t1",)):
+    """Point HERMES_HOME at a temp sandbox and create a real board DB with
+    generic 'ready' tasks (the launch_demo_profile shape minus the graph)."""
+    monkeypatch.setattr(hc, "HERMES_HOME", str(tmp_path))
+    hc._ensure_demo_board_db(board)
+    c = sqlite3.connect(str(hc._board_db_path(board)))
+    try:
+        for i, tid in enumerate(task_ids):
+            c.execute(
+                "INSERT INTO tasks (id,title,assignee,status,created_at) "
+                "VALUES (?,?,?,?,?)",
+                (tid, "Task", "ecc-planner", "ready", 1000 + i))
+            c.execute("INSERT INTO task_events (task_id,kind,payload,created_at) "
+                      "VALUES (?,?,?,?)",
+                      (tid, "created", None, 1000 + i))
+        c.commit()
+    finally:
+        c.close()
 
 
-def _capture_run(monkeypatch, resp=None):
-    calls = []
+def _db_events(board, tid):
+    c = sqlite3.connect(str(hc._board_db_path(board)))
+    try:
+        return c.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id=? ORDER BY id",
+            (tid,)).fetchall()
+    finally:
+        c.close()
 
-    def fake_run(args, board=None, capture=True, provider_keys=None):
-        calls.append((board, list(args)))
-        if resp is not None and len(calls) == 1:
-            return resp
-        return _R()
 
-    monkeypatch.setattr(hc, "_run", fake_run)
-    monkeypatch.setattr(hc, "_emit_working", lambda *a, **k: None)
-    return calls
+def _db_task(board, tid):
+    c = sqlite3.connect(str(hc._board_db_path(board)))
+    try:
+        row = c.execute(
+            "SELECT status, result, completed_at FROM tasks WHERE id=?", (tid,)).fetchone()
+        return row
+    finally:
+        c.close()
 
 
 def test_demo_llm_gemini_completion_payload(monkeypatch):
@@ -95,13 +116,14 @@ def test_deliverable_filename_mapping():
     assert demo_llm.deliverable_filename("anything else") == "deliverable.md"
 
 
-def test_thin_execute_runs_claim_attach_complete_sequence(monkeypatch, tmp_path):
-    """The thin executor drives the REAL board CLI (claim -> attach -> complete)
-    and writes the REAL artifact from the provider answer."""
+def test_thin_execute_drives_board_events_and_artifact(monkeypatch, tmp_path):
+    """The thin executor drives REAL board state (claim -> attach -> complete)
+    directly in kanban.db and writes the REAL artifact from the provider."""
     ws = tmp_path / "ws"
     ws.mkdir()
-    calls = _capture_run(monkeypatch)
-    monkeypatch.setattr(demo_llm, "completion", lambda p, m, prompt: "Final deliverable body\nsecond line")
+    _mk_demo_board(tmp_path, monkeypatch)
+    monkeypatch.setattr(demo_llm, "completion",
+                        lambda p, m, prompt: "Final deliverable body\nsecond line")
 
     res = hc.thin_execute("bdemo", "t1", str(ws), "gemini", "gemini-3.5-flash-lite",
                           "PROMPT", objective="write a README")
@@ -110,30 +132,53 @@ def test_thin_execute_runs_claim_attach_complete_sequence(monkeypatch, tmp_path)
     art = ws / "README.md"
     assert art.exists()
     assert "Final deliverable body" in art.read_text(encoding="utf-8")
-    kinds = []
-    for board, args in calls:
-        assert board == "bdemo"
-        if args[0] == "claim":
-            kinds.append(("claim", args[1]))
-        elif args[0] == "attach":
-            kinds.append(("attach", args[2]))
-        elif args[0] == "complete":
-            kinds.append(("complete", args[1], args[args.index("--result") + 1]))
-    assert kinds[0] == ("claim", "t1")
-    assert kinds[1][0] == "attach" and kinds[1][1] == str(art)
-    assert kinds[2] == ("complete", "t1", "Final deliverable body")
+
+    kinds = [k for k, _ in _db_events("bdemo", "t1")]
+    assert kinds == ["created", "claimed", "heartbeat", "heartbeat", "attached", "completed"]
+    status, result, completed_at = _db_task("bdemo", "t1")
+    assert status == "done"
+    assert result == "Final deliverable body"
+    assert completed_at
 
 
-def test_thin_execute_claim_failure_raises(monkeypatch, tmp_path):
-    """A claim the board refuses must fail the lane loudly (no silent skip)."""
+def test_thin_execute_failure_raises_and_marks_board(monkeypatch, tmp_path):
+    """A thin-lane failure must be VISIBLE on the board (error timeline row +
+    done-with-error task) before the lane re-raises — never silently stuck."""
     ws = tmp_path / "ws"
     ws.mkdir()
-    _capture_run(monkeypatch, resp=_R(rc=1, stderr="cannot claim t9: status=done"))
+    _mk_demo_board(tmp_path, monkeypatch)
+    monkeypatch.setattr(demo_llm, "completion",
+                        lambda p, m, prompt: (_ for _ in ()).throw(
+                            demo_llm.DemoLLMError("gemini HTTP 401: bad key")))
+
     try:
-        hc.thin_execute("bdemo", "t9", str(ws), "gemini", "model", "p", objective="x")
+        hc.thin_execute("bdemo", "t1", str(ws), "gemini", "g", "P", objective="x")
+        raise AssertionError("expected DemoLLMError to propagate")
+    except demo_llm.DemoLLMError:
+        pass
+
+    kinds = [k for k, _ in _db_events("bdemo", "t1")]
+    assert "claimed" in kinds          # the lane really started
+    assert "error" in kinds            # the reason is on the board
+    status, result, _ = _db_task("bdemo", "t1")
+    assert status == "done"            # never left running/stuck
+    assert "ERROR" in (result or "")
+
+
+def test_thin_execute_ignores_provider_absence_only_via_real_error(monkeypatch, tmp_path):
+    """A board with no copy of the lane still surfaces the write failure loudly
+    (error event) instead of pretending the lane ran."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _mk_demo_board(tmp_path, monkeypatch, task_ids=("t_other",))
+    monkeypatch.setattr(demo_llm, "completion", lambda p, m, prompt: "ok")
+    try:
+        hc.thin_execute("bdemo", "missing", str(ws), "gemini", "g", "P", objective="x")
         raise AssertionError("expected RuntimeError")
-    except RuntimeError as exc:
-        assert "could not be claimed" in str(exc)
+    except Exception:
+        pass
+    kinds = [k for k, _ in _db_events("bdemo", "missing")]
+    assert "error" in kinds
 
 
 def test_reaper_skips_demo_boards(monkeypatch):
@@ -161,15 +206,7 @@ def test_thin_execute_failure_lands_error_event(monkeypatch, tmp_path):
     before the lane re-raises — the demo never fails silently."""
     ws = tmp_path / "ws"
     ws.mkdir()
-    _capture_run(monkeypatch)
-    inserted = []
-
-    def fake_insert(board, task_id, kind, note, at=None):
-        inserted.append((board, task_id, kind, note))
-
-    monkeypatch.setattr(hc, "_insert_event", fake_insert)
-    monkeypatch.setattr(hc, "_emit_working", lambda *a, **k: None)
-    monkeypatch.setattr(hc, "_emit_error", lambda *a, **k: inserted.append(("E", a[1], a[2])))
+    _mk_demo_board(tmp_path, monkeypatch)
     monkeypatch.setattr(demo_llm, "completion",
                         lambda p, m, prompt: (_ for _ in ()).throw(
                             demo_llm.DemoLLMError("gemini HTTP 401: bad key")))
@@ -179,16 +216,12 @@ def test_thin_execute_failure_lands_error_event(monkeypatch, tmp_path):
         raise AssertionError("expected DemoLLMError to propagate")
     except demo_llm.DemoLLMError:
         pass
-    error_rows = [i for i in inserted if i[0] == "E"]
-    assert error_rows, "expected an error event on the board"
-    assert "HTTP 401" in error_rows[0][2]
+    err_rows = [p for k, p in _db_events("bdemo", "t1") if k == "error"]
+    assert err_rows and "HTTP 401" in (err_rows[0] or "")
 
 
 def test_error_kind_renders_in_activity_log(monkeypatch, tmp_path):
     """The UI timeline renders a 'Demo error: …' row for kind=error events."""
-    import sqlite3
-    import json
-    import time
     monkeypatch.setattr(hc, "HERMES_HOME", str(tmp_path))
     board = "flux-demo-render"
     db = hc._board_db_path(board)
@@ -198,7 +231,7 @@ def test_error_kind_renders_in_activity_log(monkeypatch, tmp_path):
                 "kind TEXT, payload TEXT, created_at REAL)")
     con.execute("INSERT INTO task_events (task_id, kind, payload, created_at) "
                 "VALUES (?, ?, ?, ?)",
-                ("t1", "error", json.dumps({"message": "gemini HTTP 429: rate limited"}), time.time()))
+                ("t1", "error", json.dumps({"message": "gemini HTTP 429: rate limited"}), 1000))
     con.commit()
     con.close()
     ev = hc._task_activity_events(board, "t1")

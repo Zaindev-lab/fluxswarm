@@ -358,67 +358,50 @@ class TestDemoLaunchRuntime:
 
 
 class TestDemoProfileBuild:
-    def test_launch_demo_profile_builds_two_lane_graph(self, monkeypatch):
-        """The demo 2-lane profile pins the runtime at CREATE time, seeds a tiny
-        dir: workspace, and links Builder under Planner — never the full squad."""
+    def test_launch_demo_profile_builds_two_lane_graph(self, monkeypatch, tmp_path):
+        """The demo 2-lane profile writes Planner (ready) then Builder (todo)
+        directly into the board DB and seeds a tiny dir: workspace — with NO
+        hermes CLI subprocess (the fat CLI OOMs a 512MB free host)."""
+        import sqlite3 as _sqlite3
         import hermes_client as hc_mod
-        calls: list = []
-        n = {"n": 0}
-
-        def fake_run(args, board=None, capture=True, provider_keys=None):
-            calls.append((board, list(args)))
-            n["n"] += 1
-            if n["n"] == 1:
-                return type("R", (), {"returncode": 0,
-                                      "stdout": "Created t_abc001  (ready, assignee=ecc-planner)"})()
-            return type("R", (), {"returncode": 0,
-                                  "stdout": "Created t_abc002  (todo, assignee=ecc-build-fixer)"})()
-
-        monkeypatch.setattr(hc_mod, "_run", fake_run)
-        monkeypatch.setattr(hc_mod, "_raise_preflight", lambda: None)
-        monkeypatch.setattr(hc_mod, "cleanup_profile_keys", lambda: None)
+        monkeypatch.setattr(hc_mod, "HERMES_HOME", str(tmp_path))
 
         res = hc_mod.launch_demo_profile(
             "bdemo", "Build a thing", provider="gemini", model="gemini-3.5-flash-lite")
 
-        assert res["planner_id"] == "t_abc001"
-        assert res["builder_id"] == "t_abc002"
+        assert res["planner_id"].startswith("t_")
+        assert res["builder_id"].startswith("t_")
+        assert res["planner_id"] != res["builder_id"]
         assert (hc_mod.demo_workspace_dir("bdemo") / "TASK.md").exists()
-        creates = [a for b, a in calls if a[0] == "create"]
-        assert len(creates) == 2
-        for b, a in calls:
-            assert b == "bdemo"
-        p = creates[0]
-        assert p[p.index("--assignee") + 1] == "ecc-planner"
-        ws = p[p.index("--workspace") + 1]
-        assert ws.startswith("dir:") and ws.endswith("demo-workspace")
-        assert p[p.index("--max-runtime") + 1] == str(hc_mod.DEMO_TASK_MAX_RUNTIME_S)
-        assert p[p.index("--model") + 1] == "gemini-3.5-flash-lite"
-        assert p[p.index("--provider") + 1] == "gemini"
-        b_args = creates[1]
-        assert b_args[b_args.index("--assignee") + 1] == "ecc-build-fixer"
-        assert "--parent" in b_args and b_args[b_args.index("--parent") + 1] == "t_abc001"
 
-    def test_launch_demo_profile_no_runtime_still_creates_unpinned_tasks(self, monkeypatch):
+        c = _sqlite3.connect(str(hc_mod._board_db_path("bdemo")))
+        try:
+            rows = c.execute(
+                "SELECT id, assignee, status FROM tasks ORDER BY created_at").fetchall()
+            created = c.execute(
+                "SELECT task_id FROM task_events WHERE kind='created'").fetchall()
+        finally:
+            c.close()
+        assert [r[1] for r in rows] == ["ecc-planner", "ecc-build-fixer"]
+        assert rows[0][2] == "ready"          # cursor lane: claimable immediately
+        assert rows[1][2] == "todo"           # dependent lane: parent-gated look
+        assert {r[0] for r in created} == {rows[0][0], rows[1][0]}
+
+    def test_launch_demo_profile_no_pick_still_builds(self, monkeypatch, tmp_path):
         """provider/model are optional: a demo with no pick still builds the
-        graph WITHOUT --model/--provider (the worker uses the env runtime)."""
+        graph (the thin driver passes the resolved runtime to thin_execute)."""
+        import sqlite3 as _sqlite3
         import hermes_client as hc_mod
-        calls = []
-        n = {"n": 0}
-
-        def fake_run(args, board=None, capture=True, provider_keys=None):
-            calls.append(list(args))
-            n["n"] += 1
-            return type("R", (), {"returncode": 0,
-                                  "stdout": f"Created t_af00{n['n']}  (ready, assignee=ecc-planner)"})()
-
-        monkeypatch.setattr(hc_mod, "_run", fake_run)
-        monkeypatch.setattr(hc_mod, "_raise_preflight", lambda: None)
-        monkeypatch.setattr(hc_mod, "cleanup_profile_keys", lambda: None)
+        monkeypatch.setattr(hc_mod, "HERMES_HOME", str(tmp_path))
         res = hc_mod.launch_demo_profile("bdemo2", "Do something")
-        assert res["planner_id"] == "t_af001"
-        asserts = [a for a in calls if a[0] == "create"]
-        assert "--model" not in asserts[0] and "--provider" not in asserts[0]
+        assert res["planner_id"] and res["builder_id"]
+        assert res["planner_id"] != res["builder_id"]
+        c = _sqlite3.connect(str(hc_mod._board_db_path("bdemo2")))
+        try:
+            n = c.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        finally:
+            c.close()
+        assert n == 2
 
 
 class TestVaultSecretFailFast:

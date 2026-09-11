@@ -17,10 +17,11 @@ from __future__ import annotations
 import json
 import os
 import re
-import sys
+import secrets
 import shutil
 import sqlite3
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -656,43 +657,81 @@ def _seed_demo_workspace(ws: Path, goal: str) -> None:
         encoding="utf-8")
 
 
+def _ensure_demo_board_db(board: str) -> None:
+    """Create the board directory and kanban.db with the Hermes schema (no CLI).
+
+    The fat ``hermes boards create`` CLI loads the entire workspace into memory
+    and takes 15-30s on a throttled 0.1-CPU free-tier host; running two of
+    them (ensure_board + create) inside a 512 MB container triggers an OOM
+    that kills the daemon driver thread and leaves the board stuck. Writing
+    the schema directly avoids that entirely (sub-second, <1 MB RSS).
+    """
+    db = _board_db_path(board)
+    db.parent.mkdir(parents=True, exist_ok=True)
+    if db.exists():
+        return
+    c = sqlite3.connect(str(db))
+    try:
+        c.executescript("""
+            CREATE TABLE IF NOT EXISTS tasks (
+                id TEXT PRIMARY KEY, title TEXT, assignee TEXT, status TEXT,
+                created_at INTEGER, started_at INTEGER, completed_at INTEGER,
+                last_heartbeat_at INTEGER, result TEXT, worker_pid INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS task_events (
+                id INTEGER PRIMARY KEY, task_id TEXT, kind TEXT,
+                payload TEXT, created_at INTEGER
+            );
+        """)
+        c.commit()
+    finally:
+        c.close()
+
+
+def _demo_insert_task(conn: sqlite3.Connection, board: str, *, task_id: str,
+                      title: str, assignee: str, status: str,
+                      created_by: str = "fluxswarm") -> None:
+    """Insert one task + its 'created' event directly into the board DB."""
+    now = int(time.time())
+    conn.execute(
+        "INSERT INTO tasks (id,title,assignee,status,created_at) VALUES (?,?,?,?,?)",
+        (task_id, title, assignee, status, now))
+    conn.execute(
+        "INSERT INTO task_events (task_id,kind,payload,created_at) VALUES (?,?,?,?)",
+        (task_id, "created", json.dumps({"created_by": created_by}), now))
+
+
 def launch_demo_profile(board: str, goal: str, provider: Optional[str] = None,
                         model: Optional[str] = None) -> dict:
     """Build the 2-lane demo graph directly in an existing board.
 
     Returns ``{"planner_id", "builder_id", "workspace"}``. Raises
     RuntimeError on any step (fail fast BEFORE the board is dispatched).
+
+    This writes tasks directly into kanban.db (no ``hermes kanban create``
+    CLI subprocess) so the demo path never loads the fat Hermes workspace
+    into memory on the throttled free-tier host.
     """
-    _raise_preflight()
-    cleanup_profile_keys()
     ws = demo_workspace_dir(board)
     _seed_demo_workspace(ws, goal)
-    ws_spec = f"dir:{ws}"
-    task_body = (goal or "").strip() + _DEMO_SPEED_BODY
+    _ensure_demo_board_db(board)
 
-    def _create(title: str, assignee: str, parent: str | None = None) -> str:
-        args = ["create", title, "--assignee", assignee, "--workspace", ws_spec,
-                "--max-runtime", str(DEMO_TASK_MAX_RUNTIME_S)]
-        if provider:
-            args += ["--provider", provider]
-        if model:
-            args += ["--model", model]
-        if parent:
-            args += ["--parent", parent]
-        args += ["--body", task_body, "--created-by", "fluxswarm"]
-        r = _run(args, board=board)
-        if r.returncode != 0:
-            raise RuntimeError(
-                f"demo task create failed (rc={r.returncode}): "
-                f"{(r.stderr or r.stdout or '').strip()[:400]}")
-        m = re.search(r"Created (t_[0-9a-f]+)", r.stdout or "")
-        if not m:
-            raise RuntimeError(
-                f"demo task create: no task id in output: {(r.stdout or '').strip()[:400]}")
-        return m.group(1)
+    planner_id = f"t_{secrets.token_hex(4)}"
+    builder_id = f"t_{secrets.token_hex(4)}"
 
-    planner_id = _create(DEMO_PLANNER_TITLE, _DEMO_PLANNER_ASSIGNEE)
-    builder_id = _create(DEMO_BUILDER_TITLE, _DEMO_BUILDER_ASSIGNEE, parent=planner_id)
+    db = _board_db_path(board)
+    c = sqlite3.connect(str(db))
+    try:
+        _demo_insert_task(c, board, task_id=planner_id,
+                          title=DEMO_PLANNER_TITLE, assignee=_DEMO_PLANNER_ASSIGNEE,
+                          status="ready")
+        _demo_insert_task(c, board, task_id=builder_id,
+                          title=DEMO_BUILDER_TITLE, assignee=_DEMO_BUILDER_ASSIGNEE,
+                          status="todo")
+        c.commit()
+    finally:
+        c.close()
+
     return {"planner_id": planner_id, "builder_id": builder_id, "workspace": str(ws)}
 
 
@@ -710,6 +749,27 @@ def _emit_error(board_display_log: str, task_id: str, reason: str, at: float | N
     """Best-effort 'Demo error: …' event so a failed lane is VISIBLE on the
     board timeline instead of silently stuck. Failures here never raise."""
     _insert_event(board_display_log, task_id, "error", reason, at)
+
+
+def _demo_fail_lane(board: str, task_id: str, reason: str) -> None:
+    """Mark one demo lane done-with-error: writes the error row AND completes
+    the task as terminal so the board resolves instead of parking 'running'.
+    Best-effort: never raises."""
+    _emit_error(board, task_id, reason)
+    db = _board_db_path(board)
+    try:
+        c = sqlite3.connect(str(db))
+        try:
+            now = int(time.time())
+            c.execute("UPDATE tasks SET status='done', completed_at=?, result=? WHERE id=?",
+                      (now, f"ERROR: {reason[:200]}", task_id))
+            c.execute("INSERT INTO task_events (task_id,kind,payload,created_at) VALUES (?,?,?,?)",
+                      (task_id, "completed", json.dumps({"summary": f"ERROR: {reason[:200]}"}), now))
+            c.commit()
+        finally:
+            c.close()
+    except Exception:
+        pass
 
 
 def _insert_event(board_display_log: str, task_id: str, kind: str, note: str, at: float | None = None) -> None:
@@ -743,24 +803,56 @@ def thin_execute(board: str, task_id: str, workspace: str, provider: str,
     size), so the free demo CANNOT converge with real agents. The thin executor
     still runs against the REAL board and REAL provider:
 
-      * ``kanban claim``  -> real ``claimed`` ("Started") event,
+      * direct DB claim  -> real ``claimed`` ("Started") event,
       * a real completion call to the resolved pool provider (demo_llm),
       * a real artifact file written into the task workspace,
-      * ``kanban attach`` -> real "Produced" event,
-      * ``kanban complete`` -> real result summary.
+      * direct DB attach -> real "Produced" event,
+      * direct DB complete -> real result summary.
 
-    Only the heavyweight agent loop (fat worker subprocess) is skipped. The
-    paid path keeps running full agents untouched.
+    All board writes go directly into kanban.db (no CLI subprocess) so the
+    demo path never loads the fat Hermes workspace into memory. The paid
+    path keeps running full agents untouched.
     """
     start = time.time()
-    emitted_error = False
-    r = _run(["claim", task_id, "--ttl", "600"], board=board)
-    if r.returncode != 0:
-        reason = f"demo task {task_id} could not be claimed: {(r.stderr or r.stdout or '').strip()[:300]}"
-        _emit_error(board, task_id, reason)
-        emitted_error = True
-        raise RuntimeError(reason)
+    db = _board_db_path(board)
+
+    def _claim():
+        now = int(start)
+        c = sqlite3.connect(str(db))
+        try:
+            cur = c.execute("UPDATE tasks SET status='running', started_at=?, worker_pid=0 WHERE id=?",
+                            (now, task_id))
+            if cur.rowcount == 0:
+                raise RuntimeError(f"demo task {task_id} not found on board")
+            c.execute("INSERT INTO task_events (task_id,kind,payload,created_at) VALUES (?,?,?,?)",
+                      (task_id, "claimed", None, now))
+            c.commit()
+        finally:
+            c.close()
+
+    def _attach(name: str):
+        c = sqlite3.connect(str(db))
+        try:
+            c.execute("INSERT INTO task_events (task_id,kind,payload,created_at) VALUES (?,?,?,?)",
+                      (task_id, "attached", json.dumps({"filename": name}), int(time.time())))
+            c.commit()
+        finally:
+            c.close()
+
+    def _complete(summary: str):
+        c = sqlite3.connect(str(db))
+        try:
+            now = int(time.time())
+            c.execute("UPDATE tasks SET status='done', completed_at=?, result=? WHERE id=?",
+                      (now, summary, task_id))
+            c.execute("INSERT INTO task_events (task_id,kind,payload,created_at) VALUES (?,?,?,?)",
+                      (task_id, "completed", json.dumps({"summary": summary}), now))
+            c.commit()
+        finally:
+            c.close()
+
     try:
+        _claim()
         _emit_working(board, task_id, "thin demo worker: provider completion in flight")
         text = demo_llm.completion(provider, model, prompt)
         name = artifact_name or demo_llm.deliverable_filename(objective or "")
@@ -769,25 +861,12 @@ def thin_execute(board: str, task_id: str, workspace: str, provider: str,
         artifact = ws / name
         artifact.write_text(text, encoding="utf-8")
         _emit_working(board, task_id, "artifact written; attaching")
-        ra = _run(["attach", task_id, str(artifact)], board=board)
-        if ra.returncode != 0:
-            # produced event is cosmetic to convergence; the real artifact is on
-            # disk — log and continue rather than fail the lane.
-            pass
+        _attach(name)
         summary = (text.strip().splitlines() or [name])[0][:160]
-        rc_ = _run(["complete", task_id, "--result", summary], board=board)
-        if rc_.returncode != 0:
-            reason = (f"demo task {task_id} could not be completed: "
-                      f"{(rc_.stderr or rc_.stdout or '').strip()[:300]}")
-            _emit_error(board, task_id, reason)
-            emitted_error = True
-            raise RuntimeError(reason)
+        _complete(summary)
     except BaseException as exc:
-        # The failure lands ON THE BOARD (visible timeline) before it reaches
-        # the driver — a demo that fails must say so, not sit silently stuck.
-        if not emitted_error:
-            _emit_error(board, task_id,
-                        f"{type(exc).__name__}: {str(exc)[:300]}")
+        reason = f"{type(exc).__name__}: {str(exc)[:300]}"
+        _demo_fail_lane(board, task_id, reason)
         raise
     return {"result": summary, "artifact": str(artifact), "ok": True,
             "elapsed_s": round(time.time() - start, 1)}

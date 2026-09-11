@@ -1267,7 +1267,6 @@ def _demo_launch_background(*, slug: str, goal: str, plan: str,
 
     def _run() -> None:
         try:
-            hc.ensure_board(slug)
             prof = hc.launch_demo_profile(board=slug, goal=goal,
                                           provider=provider, model=model)
             try:
@@ -1332,10 +1331,11 @@ def _demo_drive(*, slug: str, goal: str, planner_id: str, builder_id: str,
                 audit.audit("demo.drive", outcome="error", slug=slug,
                             reason=type(e).__name__)
                 if len(outcomes) == 0:
-                    # planner lane failed before reaching the builder — say so
-                    # on the builder lane too (its own codes never emitted).
-                    hc._emit_error(slug, builder_id,
-                                   "builder lane not started (planner lane failed)")
+                    # planner lane failed before reaching the builder — mark the
+                    # builder lane done-with-error too so the board resolves
+                    # instead of pointing a "todo" lane at a dead predecessor.
+                    hc._demo_fail_lane(slug, builder_id,
+                                       "builder lane not started (planner lane failed)")
             except Exception:
                 pass
         else:
