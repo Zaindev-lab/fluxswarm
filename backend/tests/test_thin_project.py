@@ -235,6 +235,44 @@ def test_swarm_payload_maps_dict_and_result_object():
     assert o == d
 
 
+def test_completion_retries_transient_503_then_succeeds(monkeypatch):
+    """A transient upstream 503 must be retried (with backoff) rather than
+    parking the whole project board at the first lane that sneezes."""
+    import demo_llm as llm
+    attempts = {"n": 0}
+
+    def flaky(url, payload, headers=None):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise demo_llm.DemoLLMError("gemini HTTP 503: Service Unavailable: ...")
+        return {"candidates": [{"content": {"parts": [{"text": "OK text"}]}}]}
+
+    monkeypatch.setattr(llm, "time", type("T", (), {"sleep": staticmethod(lambda *a, **k: None)})())
+    monkeypatch.setattr(llm, "_post_json", flaky)
+    monkeypatch.setenv("GEMINI_API_KEY", "gk")
+    out = llm.completion("gemini", "gemini-3.5-flash-lite", "P")
+    assert out == "OK text"
+    assert attempts["n"] == 3
+
+
+def test_completion_does_not_retry_401(monkeypatch):
+    import demo_llm as llm
+    attempts = {"n": 0}
+
+    def bad(url, payload, headers=None):
+        attempts["n"] += 1
+        raise demo_llm.DemoLLMError("gemini HTTP 401: API key not valid: ...")
+
+    monkeypatch.setattr(llm, "_post_json", bad)
+    monkeypatch.setenv("GEMINI_API_KEY", "gk")
+    try:
+        llm.completion("gemini", "m", "P")
+        raise AssertionError("expected DemoLLMError")
+    except demo_llm.DemoLLMError as e:
+        assert "401" in str(e)
+    assert attempts["n"] == 1
+
+
 def test_thin_driver_pass_goal_artifact_for_readme_goal(monkeypatch, tmp_path):
     """A README-style goal makes the final builder lane deliver README.md."""
     _host(monkeypatch, tmp_path)

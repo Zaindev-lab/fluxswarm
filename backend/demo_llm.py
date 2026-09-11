@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import time
 import urllib.error
 import urllib.request
 
@@ -21,9 +23,40 @@ _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 _COMPLETION_TIMEOUT_S = int(os.environ.get("FLUXSWARM_DEMO_LLM_TIMEOUT_S", "90"))
 
+# Transient upstream 5xx/429 are a fact of the free pool: retry a bounded
+# number of times with small backoff so a 503 hiccup mid-swarm doesn't park the
+# whole project board (the thin path would otherwise finalize launch_error at
+# the first lane to sneeze). 4xx (401/404/…) is never retried.
+_RETRYABLE_HTTP = {429, 500, 502, 503, 504}
+_THIN_RETRIES = int(os.environ.get("FLUXSWARM_THIN_RETRIES", "2"))
+_THIN_RETRY_BACKOFF_S = float(os.environ.get("FLUXSWARM_THIN_RETRY_BACKOFF_S", "2.0"))
+
+_HTTP_CODE_RE = re.compile(r" HTTP (\d{3}):")
+
 
 class DemoLLMError(RuntimeError):
     """A real, non-silent failure for the thin demo executor."""
+
+
+def _http_code(exc: BaseException) -> int | None:
+    m = _HTTP_CODE_RE.search(str(exc))
+    return int(m.group(1)) if m else None
+
+
+def _call_with_retries(request, attempts: int) -> str:
+    last: DemoLLMError | None = None
+    for i in range(max(1, attempts)):
+        try:
+            return request()
+        except DemoLLMError as exc:
+            last = exc
+            code = _http_code(exc)
+            if code is None or code not in _RETRYABLE_HTTP:
+                raise
+            if i == attempts - 1:
+                raise
+            time.sleep(_THIN_RETRY_BACKOFF_S * (i + 1))
+    raise DemoLLMError("retries exhausted") from last  # pragma: no cover
 
 
 def _post_json(url: str, payload: dict, headers: dict | None = None) -> dict:
@@ -74,12 +107,17 @@ def completion(provider: str, model: str, prompt: str, max_tokens: int = 400,
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.2},
         }
-        data = _post_json(url, payload)
-        try:
-            text = data["candidates"][0]["content"]["parts"][0]["text"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise DemoLLMError(f"gemini completion shape unexpected: {str(data)[:300]}") from exc
-        return text.strip()
+
+        def _run_gemini() -> str:
+            data = _post_json(url, payload)
+            try:
+                text = data["candidates"][0]["content"]["parts"][0]["text"]
+            except (KeyError, IndexError, TypeError) as exc:
+                raise DemoLLMError(
+                    f"gemini completion shape unexpected: {str(data)[:300]}") from exc
+            return text.strip()
+
+        return _call_with_retries(_run_gemini, attempts=_THIN_RETRIES + 1)
 
     if provider == "openrouter":
         url = _OPENROUTER_URL
@@ -89,12 +127,17 @@ def completion(provider: str, model: str, prompt: str, max_tokens: int = 400,
             "max_tokens": max_tokens,
             "temperature": 0.2,
         }
-        data = _post_json(url, payload, headers={"Authorization": f"Bearer {key}"})
-        try:
-            text = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise DemoLLMError(f"openrouter completion shape unexpected: {str(data)[:300]}") from exc
-        return text.strip()
+
+        def _run_openrouter() -> str:
+            data = _post_json(url, payload, headers={"Authorization": f"Bearer {key}"})
+            try:
+                text = data["choices"][0]["message"]["content"]
+            except (KeyError, IndexError, TypeError) as exc:
+                raise DemoLLMError(
+                    f"openrouter completion shape unexpected: {str(data)[:300]}") from exc
+            return text.strip()
+
+        return _call_with_retries(_run_openrouter, attempts=_THIN_RETRIES + 1)
 
     raise DemoLLMError(f"unhandled demo provider: {provider!r}")
 
