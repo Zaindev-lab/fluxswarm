@@ -232,7 +232,10 @@ _WEB_BUILD_SPEC = (
     "- Define CSS custom properties up front: --bg, --surface, --text, --muted, "
     "--accent, --accent-2, --border, --radius, --shadow. Choose ONE deliberate, "
     "coherent palette that fits the brand (monochrome base + 1-2 accents; dark "
-    "or light theme picked intentionally). Body text must keep WCAG AA contrast.\n"
+    "or light theme picked intentionally). Body text must keep WCAG AA contrast. "
+    "NEVER render dark-on-dark or light-on-light: any dark background must be "
+    "paired with an explicit light text color on the SAME selector, and every "
+    "CSS variable you reference must be defined (with a fallback).\n"
     "- Typography: system-ui font stack, a clear type scale using clamp() for "
     "the hero title, line-height 1.55 body / 1.1 headings, paragraphs capped at "
     "~70ch.\n"
@@ -281,6 +284,44 @@ def web_artifact_needs_repair(text: str) -> bool:
     return not bool(re.search(r"</html\s*>", t, re.IGNORECASE))
 
 
+_HEX_COLOR_RE = re.compile(r'#((?:[0-9a-f]{3}){1,2}|[0-9a-f]{8})\b', re.IGNORECASE)
+_BG_PROP_RE = re.compile(r'background(?:-color)?\s*:\s*([^;{}]+)')
+_TEXT_COLOR_RE = re.compile(r'(?<!-|[a-z])color\s*:\s*([^;{}]+)')
+
+
+def _hex_to_rgb(s: str) -> tuple[int, int, int] | None:
+    m = _HEX_COLOR_RE.search(s)
+    if not m:
+        return None
+    h = m.group(1)
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    if len(h) < 6:
+        return None
+    try:
+        return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+    except ValueError:
+        return None
+
+
+def _is_dark(hexish: str) -> bool:
+    rgb = _hex_to_rgb(hexish)
+    if not rgb:
+        return False
+    r, g, b = rgb
+    # simplified relative luminance; luminance < 0.2 ≈ visibly dark color.
+    lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
+    return lum < 0.2
+
+
+def _style_blocks(css: str) -> list[tuple[list[str], str]]:
+    out = []
+    for sel, body in re.findall(r'([^{}]+)\{([^}]*)\}', css):
+        sels = [s.strip() for s in sel.split(",")]
+        out.append((sels, body))
+    return out
+
+
 def web_qa_issues(html: str) -> list[str]:
     """Deterministic post-build audit of a generated web page. Runs on every
     web deliverable so a truncated, broken, hollow or sandbox-hostile page is
@@ -299,6 +340,34 @@ def web_qa_issues(html: str) -> list[str]:
         issues.append("no <footer> section")
     if not re.search(r"<h1\b", low):
         issues.append("no <h1> headline (page has no obvious title)")
+    # ---- invisible-page / black-page guards -------------------------------
+    css_blocks = [blk for blk in re.findall(r"<style[^>]*>(.*?)</style>", text, re.S)]
+    css_text = "\n".join(css_blocks)
+    for sels, body in _style_blocks(css_text):
+        if not any(s == "html" or s == "body" or s == "*" for s in sels):
+            continue
+        bgm = _BG_PROP_RE.search(body)
+        bg = _hex_to_rgb(bgm.group(1)) if bgm else None
+        if bg is None or not _is_dark(bgm.group(1)):
+            continue
+        colm = _TEXT_COLOR_RE.search(body)
+        if colm is None or _is_dark(colm.group(1)):
+            issues.append(
+                f"dark background with no light text color ({', '.join(sels)} "
+                f"uses {bgm.group(1).strip()}) — invisible/black page risk")
+    defined = set(re.findall(r"--([\w-]+)\s*:", css_text))
+    for v in sorted(set(re.findall(r"var\(\s*--([\w-]+)\s*", text))):
+        if v in defined:
+            continue
+        uses = re.findall(r"var\(\s*--" + re.escape(v) + r"\s*([,)])", text.lower())
+        if uses and any(clo == ")" for clo in uses):
+            issues.append(f"uses undefined CSS variable --{v} (no fallback — "
+                          "invisible-content risk)")
+    nodeps = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", text, flags=re.S)
+    visible_text = re.sub(r"\s+", " ",
+                          re.sub(r"<[^>]*>", " ", nodeps)).strip()
+    if len(visible_text) < 80:
+        issues.append("almost no readable text on the page (hollow/blank layout)")
     for pat, label in (("localstorage.", "localStorage"), ("sessionstorage.", "sessionStorage"),
                        ("document.cookie", "document.cookie"), ("fetch(", "fetch(…)")):
         if pat in low:
@@ -322,7 +391,9 @@ def web_qa_issues(html: str) -> list[str]:
 # repair round is triggered. Missing-nav/footer/filler-copy alone are soft and
 # would churn without adding real value.
 _HARD_QA_PREFIXES = ("truncated", "too short", "broken anchor", "sandbox-unsafe",
-                     "external resource", "dead link", "no closing")
+                     "external resource", "dead link", "no closing",
+                     "dark background", "undefined CSS variable",
+                     "almost no readable text")
 
 
 def web_qa_should_repair(issues: list[str]) -> bool:

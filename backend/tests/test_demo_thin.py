@@ -173,6 +173,30 @@ def test_web_qa_issues_detect_broken_and_sandbox_broken_pages():
     assert demo_llm.web_qa_issues(good) == []
 
 
+def test_web_qa_catches_invisible_black_page():
+    dark_on_dark = ("<!doctype html><html><head><style>"
+                    "body{background:#0b0f1a;color:#0b0f1a;font-family:system-ui}"
+                    "</style></head><body><nav><a href='#f'>F</a></nav>"
+                    + ("<p>'x' * 300</p>") + "garbage</body></html>")
+    joined = "\n".join(demo_llm.web_qa_issues(dark_on_dark))
+    assert "dark background with no light text color" in joined
+    assert demo_llm.web_qa_should_repair(demo_llm.web_qa_issues(dark_on_dark)) is True
+
+    undefined_var = ("<!doctype html><html><head><style>"
+                     "body{background:#0b0f1a;color:var(--text)}</style></head>"
+                     "<body><nav><a href='#f'>F</a></nav><section id='f'>"
+                     + ("<p>" + "x" * 300 + "</p>") * 2 + "</section></body></html>")
+    joined = "\n".join(demo_llm.web_qa_issues(undefined_var))
+    assert "undefined CSS variable --text" in joined
+
+    hollow = ("<!doctype html><html><head><style>"
+              "body{background:#fff;color:#111}</style></head>"
+              "<body><nav></nav><h1></h1><section></section><footer></footer>"
+              "</body></html>")
+    joined = "\n".join(demo_llm.web_qa_issues(hollow))
+    assert "almost no readable text" in joined
+
+
 def test_thin_execute_strips_wrapping_markdown_fence(monkeypatch, tmp_path):
     """A lenient completion that wraps HTML in backticks still lands a clean
     artifact on disk (the builder prompts forbid fences, but never trust the
