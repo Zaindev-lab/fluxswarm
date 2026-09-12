@@ -576,3 +576,71 @@ def test_run_builder_bounded_repair_stops_after_tail_salvage(monkeypatch, tmp_pa
     assert out.get("tail_completed") is True
     final = (ws / "index.html").read_text(encoding="utf-8")
     assert final.endswith("</body></html>")
+
+
+def test_web_qa_unlinked_only_semantic_sections():
+    """Form-field ids (#email etc.) are functional hooks, NOT 'walls the nav
+    never reaches' — the unlinked-section check must stay semantic-only."""
+    html = ("<!doctype html><html><head><style>body{background:#0b0f1a;"
+            "color:#eef1fb}</style></head><body><nav>"
+            "<a href='#sec'>S</a></nav><section id='sec'><h2>S</h2>"
+            + ("<p>" + "x" * 300 + "</p>") +
+            "</section><form><input id='email'></form>"
+            "<footer>N 2026</footer></body></html>")
+    joined = "\n".join(demo_llm.web_qa_issues(html))
+    assert "unlinked section id=#email" not in joined
+    assert not any("unlinked" in i for i in demo_llm.web_qa_issues(html))
+
+
+def test_anchor_repair_helpers():
+    issues = ["dead link: href='#' (no target)",
+              "broken anchor: #about links to a missing id",
+              "no <footer> section"]
+    assert demo_llm.web_qa_structural_repair(issues) is False
+    assert demo_llm.only_anchor_issues(issues) is True
+    anchors = demo_llm.web_anchor_issues(issues)
+    assert any("broken anchor" in i for i in anchors)
+    assert any("dead link" in i for i in anchors)
+    assert not any("unlinked" in i for i in anchors)
+    issues2 = ["sandbox-unsafe: uses fetch(…)", "dead link: href='#' (no target)"]
+    assert demo_llm.web_qa_structural_repair(issues2) is True
+    assert demo_llm.only_anchor_issues(issues2) is False
+
+
+def test_run_builder_anchor_patch_fixes_dead_link_without_rebuild(monkeypatch, tmp_path):
+    """A complete page whose ONLY defect is a dead href='#' must NOT burn a
+    full rebuild round: the deterministic corner-patch retargets it to #top
+    (and pins id='top' on <body>) so a single build call ships."""
+    import main as main_mod
+
+    monkeypatch.setattr(main_mod.hc, "HERMES_HOME", str(tmp_path))
+    ws = tmp_path / "wsA"
+    ws.mkdir()
+    calls = []
+
+    def fake_execute(*, board, task_id, workspace, provider, model, prompt,
+                     objective="", artifact_name=None, api_key=None, max_tokens=None):
+        calls.append(artifact_name)
+        (Path(workspace) / artifact_name).write_text(
+            ("<!doctype html><html><head><style>body{background:#0b0f1a;"
+             "color:#eef1fb}</style></head><body><nav>"
+             "<a href='#'>Home</a><a href='#features'>F</a></nav>"
+             "<section id='features'><h1>Nebula</h1>"
+             + ("<p>" + "x" * 300 + "</p>") * 2 +
+             "</section><footer>N 2026</footer></body></html>"),
+            encoding="utf-8")
+        return {"ok": True, "elapsed_s": 1}
+
+    monkeypatch.setattr(main_mod.hc, "thin_execute", fake_execute)
+
+    out = main_mod._run_builder(
+        slug="flux-demo-regr", task_id="tb", workspace=str(ws),
+        provider="gemini", model="g", objective="Build a landing page for Nebula",
+        brief="plan", task_title=hc.DEMO_BUILDER_TITLE,
+        max_tokens=demo_llm.demo_builder_max_tokens("Build a landing page for Nebula"))
+
+    assert calls.count("index.html") == 1          # no rebuild round
+    assert out.get("anchor_patched") is True
+    final = (ws / "index.html").read_text(encoding="utf-8")
+    assert 'href="#top"' in final
+    assert 'id="top"' in final

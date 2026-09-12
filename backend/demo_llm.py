@@ -448,7 +448,7 @@ def web_qa_issues(html: str) -> list[str]:
         nav_ids.add(h[1:])
         if h[1:] not in ids:
             issues.append(f"broken anchor: {h} links to a missing id")
-    for sid in sorted(ids):
+    for sid in sorted(web_section_ids(text)):
         if sid not in nav_ids:
             issues.append(f"unlinked section id=#{sid} (wall of content the "
                           "nav never reaches)")
@@ -457,6 +457,47 @@ def web_qa_issues(html: str) -> list[str]:
         if tok in low:
             issues.append(f"placeholder/filler copy: '{tok}'")
     return issues
+
+
+_SECTION_TAGS = ("section", "article", "main", "header", "footer")
+
+
+def web_section_ids(html: str) -> set[str]:
+    """ids attached to semantic block containers (real page sections), not to
+    form fields/buttons/wrappers — those are functional hooks, and calling
+    them "a wall the nav never reaches" was pure noise (observed live on
+    #workEmail/#mobileMenuBtn/#signupFormElement)."""
+    out: set[str] = set()
+    for m in re.finditer(r"<(section|article|main|header|footer)\b[^>]*>",
+                         html or "", flags=re.I):
+        im = re.search(r'''id=["']([^"']+)["']''', m.group(0))
+        if im:
+            out.add(im.group(1))
+    return out
+
+
+def web_anchor_issues(issues: list[str]) -> list[str]:
+    """Coherence defects a *targeted nav patch* can fix without a full rebuild
+    (full rebuilds risk re-truncation at the same token ceiling)."""
+    return [i for i in issues if i.startswith(("broken anchor:", "dead link:",
+                                               "unlinked section id=#"))]
+
+
+def web_qa_structural_repair(issues: list[str]) -> bool:
+    """Hard issues a FULL rebuild actually addresses (structural, sandbox,
+    visibility). Anchor coherence issues are deliberately excluded — they are
+    handled by the cheap bounded nav patch instead."""
+    return any(i.startswith(_HARD_QA_PREFIXES)
+               and not i.startswith(("broken anchor:", "dead link:"))
+               for i in issues)
+
+
+def only_anchor_issues(issues: list[str]) -> bool:
+    """True when every hard issue is an anchor/coherence one (the page is
+    otherwise fine and should be patched, not rebuilt)."""
+    hard = [i for i in issues if i.startswith(_HARD_QA_PREFIXES)]
+    return bool(hard) and all(
+        i.startswith(("broken anchor:", "dead link:")) for i in hard)
 
 
 def web_deliverable_score(html: str) -> int:
@@ -473,9 +514,9 @@ def web_deliverable_score(html: str) -> int:
     text = html or ""
     if "</html>" in text.lower():
         score += 10
-    ids = set(re.findall(r'''id=["']([^"']+)["']''', text))
+    section_ids = web_section_ids(text)
     nav = set(re.findall(r'''href=["']#([^"']*)["']''', text))
-    if ids and ids == (nav & ids) and nav:
+    if section_ids and section_ids <= nav:
         score += 5
     visible = len(re.sub(r"\s+", " ",
                          re.sub(r"<[^>]*>", " ", re.sub(

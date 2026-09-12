@@ -12,6 +12,7 @@ import atexit
 from contextlib import asynccontextmanager
 import datetime
 import ipaddress
+import difflib
 import json
 import mimetypes
 import os
@@ -1515,6 +1516,90 @@ def _append_missing_tail(*, slug: str, task_id: str, workspace: str, provider,
     return False
 
 
+def _anchor_patch(*, slug: str, task_id: str, workspace: str, provider, model,
+                  objective: str, api_key: str | None) -> bool:
+    """Targeted 'corner' patch for a COMPLETE page whose nav anchors still
+    dangle (broken anchors, dead href='#', unlinked sections). Never a full
+    rebuild — a rebuild at the same token ceiling re-truncates (measured).
+    Deterministic remap first (href='#'→#top + fuzzy retarget of missing ids),
+    then ONE bounded narrow nav-rewrite call only if anchors still dangle.
+    Returns True when the patch measurably reduced broken/dead links."""
+    try:
+        path = Path(workspace) / "index.html"
+        html = path.read_text(encoding="utf-8", errors="ignore")
+        if not html.strip():
+            return False
+        before = sum("broken anchor" in i or "dead link" in i
+                     for i in demo_llm.web_qa_issues(html))
+        changed = False
+        if re.search(r'''href=["']#["']''', html):
+            if 'id="top"' not in html and re.search(r"<body[^>]*>", html, re.I):
+                html = re.sub(r"(<body[^>]*)>", r'\1 id="top">', html, count=1,
+                              flags=re.I)
+            html = re.sub(r'''href=["']#["']''', 'href="#top"', html)
+            changed = True
+        ids = demo_llm.web_section_ids(html) | set(re.findall(
+            r'''id=["']([^"']+)["']''', html))
+        for t in sorted(set(re.findall(r'''href=["']#([^"']+)["']''', html))):
+            if t == "top" or t in ids:
+                continue
+            a = re.sub(r"[^a-z0-9]+", "", t.lower())
+            best, best_r = None, 0.6
+            for i in ids:
+                b = re.sub(r"[^a-z0-9]+", "", i.lower())
+                if a and b and a == b:
+                    best, best_r = i, 1.0
+                    break
+                r = difflib.SequenceMatcher(None, a, b).ratio()
+                if r > best_r:
+                    best, best_r = i, r
+            if best:
+                html = html.replace(f'href="#{t}"', f'href="#{best}"')
+                changed = True
+        if changed:
+            path.write_text(html, encoding="utf-8")
+        issues = demo_llm.web_qa_issues(html)
+        if any(i.startswith(("broken anchor:", "dead link:")) for i in issues):
+            nav_m = re.search(r"(<nav[^>]*>.*?</nav>)", html, re.S)
+            if nav_m:
+                nav0 = nav_m.group(1)
+                a0 = len(re.findall(r"<a\b", nav0, re.I))
+                prompt = (
+                    "A finished single-file page still has nav anchors that "
+                    "point at missing ids, or dead href='#' links. Existing "
+                    "element ids:\n" +
+                    ", ".join(sorted(i for i in ids if len(i) < 40))[:600] +
+                    "\nCurrent nav block:\n" + nav0[:1500] +
+                    "\n\nOutput ONLY a corrected <nav>...</nav> block that "
+                    "keeps every link label but retargets each href to the "
+                    "closest existing id (best semantic match). No href='#', "
+                    "no dangling anchors, no markdown fences, no explanation.\n"
+                )
+                res = hc.thin_execute(
+                    board=slug, task_id=task_id, workspace=workspace,
+                    provider=provider, model=model, prompt=prompt,
+                    objective=objective, api_key=api_key,
+                    artifact_name="index-nav.html", max_tokens=1200)
+                nav_raw = (Path(workspace) / "index-nav.html").read_text(
+                    encoding="utf-8", errors="ignore").strip()
+                m2 = re.search(r"<nav[^>]*>.*?</nav>", nav_raw, re.S)
+                nav1 = m2.group(0) if m2 else ""
+                if (nav1 and nav1.count("<a") >= a0 and len(nav1) < 6000
+                        and "href='#'" not in nav1 and 'href="#"' not in nav1):
+                    html = html.replace(nav0, nav1, 1)
+                    path.write_text(html, encoding="utf-8")
+                try:
+                    (Path(workspace) / "index-nav.html").unlink()
+                except Exception:
+                    pass
+        after = sum("broken anchor" in i or "dead link" in i
+                    for i in demo_llm.web_qa_issues(
+                        path.read_text(encoding="utf-8", errors="ignore")))
+        return after < before
+    except Exception:
+        return False
+
+
 def _run_builder(*, slug: str, task_id: str, workspace: str, provider, model,
                  objective: str, brief: str, task_title: str,
                  api_key: str | None = None, max_tokens: int | None = None) -> dict:
@@ -1553,10 +1638,12 @@ def _run_builder(*, slug: str, task_id: str, workspace: str, provider, model,
         # pass can itself come back truncated/broken (observed: a truncated
         # landing page shipped "'fixed'" and stayed broken). At most 2 repairs.
         # Scoring drives the gate too: a structurally-fine but weak page
-        # (score < 50) gets one polish attempt.
+        # (score < 50) gets one polish attempt. Anchor-only coherence defects
+        # (broken anchors/dead links) do NOT trigger a rebuild — the cheap
+        # corner-patch below fixes those without risking re-truncation.
         for _ in range(2):
-            if not needs and not demo_llm.web_qa_should_repair(issues) \
-                    and score >= 50:
+            if not needs and not demo_llm.web_qa_structural_repair(issues) \
+                    and (score >= 50 or demo_llm.only_anchor_issues(issues)):
                 break
             if score < 50:
                 issues.append(f"overall quality score {score}/100 — needs polish")
@@ -1572,6 +1659,15 @@ def _run_builder(*, slug: str, task_id: str, workspace: str, provider, model,
                     provider=provider, model=model, objective=objective,
                     api_key=api_key):
                 out["tail_completed"] = True
+            text, issues, needs, score = _audit()
+        # Corner-patch: page is complete now, but nav anchors may still dangle
+        # (dead href='#', anchors to missing ids). Fix deterministically, and
+        # only as a last resort via ONE bounded nav rewrite — never rebuild.
+        if not needs and demo_llm.web_anchor_issues(issues):
+            if _anchor_patch(slug=slug, task_id=task_id, workspace=workspace,
+                             provider=provider, model=model,
+                             objective=objective, api_key=api_key):
+                out["anchor_patched"] = True
     return out
 
 
