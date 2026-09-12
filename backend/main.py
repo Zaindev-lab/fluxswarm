@@ -863,6 +863,15 @@ def _ws_brief(root, limit: int = 2500) -> str:
     return "\n\n".join(parts)[:limit]
 
 
+def _doc(path, limit: int = 6000) -> str:
+    """Read one workspace artifact (best-effort, bounded)."""
+    try:
+        p = Path(path)
+        return p.read_text(encoding="utf-8", errors="ignore")[:limit] if p.exists() else ""
+    except Exception:
+        return ""
+
+
 def _bg_thin_project(slug: str, goal: str, provider_keys=None, pid: int | None = None) -> None:
     """Drive the thin 6-lane project squad to completion in a daemon thread.
 
@@ -907,8 +916,12 @@ def _bg_thin_project(slug: str, goal: str, provider_keys=None, pid: int | None =
             if artifact is None:
                 _run_builder(
                     slug=slug, task_id=tid, workspace=str(ws_root),
-                    provider=provider, model=model, objective=goal,
-                    brief=brief, task_title=hc.SYNTHESIZER[2],
+                    provider=provider,
+                    model=_lane_model("BUILDER", model), objective=goal,
+                    brief=demo_llm.plan_to_brief(
+                        _doc(ws_root / "PLAN.md"),
+                        fallback=_ws_brief(ws_root)),
+                    task_title=hc.SYNTHESIZER[2],
                     api_key=api_key)
             else:
                 hc.thin_execute(board=slug, task_id=tid, workspace=str(ws_root),
@@ -1452,6 +1465,14 @@ def _read_brief(text: str, n_lines: int = 12) -> str:
     return "\n".join((text or "").strip().splitlines()[:n_lines])
 
 
+def _lane_model(role: str, model: str) -> str:
+    """Per-lane model routing: an operator can pin a stronger/cheaper model
+    per role via FLUXSWARM_<ROLE>_MODEL (e.g. FLUXSWARM_BUILDER_MODEL); the
+    lane falls back to the launch runtime model otherwise."""
+    override = os.environ.get(f"FLUXSWARM_{role.upper()}_MODEL", "").strip()
+    return override or model
+
+
 def _append_missing_tail(*, slug: str, task_id: str, workspace: str, provider,
                          model, objective: str, api_key: str | None) -> bool:
     """Deterministic-bounded salvage for a TRUNCATED page: ask the model for
@@ -1515,27 +1536,33 @@ def _run_builder(*, slug: str, task_id: str, workspace: str, provider, model,
             artifact_name=demo_llm.deliverable_filename(objective),
             max_tokens=max_tokens or demo_llm.builder_max_tokens(objective))
 
-    def _audit() -> tuple[str, list[str], bool]:
+    def _audit() -> tuple[str, list[str], bool, int]:
         try:
             text = (Path(workspace) / "index.html").read_text(
                 encoding="utf-8", errors="ignore")
         except Exception:
             text = ""
-        return (text, demo_llm.web_qa_issues(text),
-                demo_llm.web_artifact_needs_repair(text))
+        issues = demo_llm.web_qa_issues(text)
+        return (text, issues, demo_llm.web_artifact_needs_repair(text),
+                demo_llm.web_deliverable_score(text))
 
     out = _execute()
     if out.get("ok") and demo_llm.deliverable_filename(objective) == "index.html":
-        text, issues, needs = _audit()
+        text, issues, needs, score = _audit()
         # Bounded repair loop: re-audit AFTER every repair, because a repair
         # pass can itself come back truncated/broken (observed: a truncated
         # landing page shipped "'fixed'" and stayed broken). At most 2 repairs.
+        # Scoring drives the gate too: a structurally-fine but weak page
+        # (score < 50) gets one polish attempt.
         for _ in range(2):
-            if not needs and not demo_llm.web_qa_should_repair(issues):
+            if not needs and not demo_llm.web_qa_should_repair(issues) \
+                    and score >= 50:
                 break
+            if score < 50:
+                issues.append(f"overall quality score {score}/100 — needs polish")
             out = _execute(repair=True, qa=issues)
             out["retried"] = True
-            text, issues, needs = _audit()
+            text, issues, needs, score = _audit()
         # Deterministic salvage for a STILL-structural broken page (cut off):
         # append the missing tail instead of re-doing a full rebuild that will
         # hit the same token ceiling again.
@@ -1572,8 +1599,11 @@ def _demo_drive(*, slug: str, goal: str, planner_id: str, builder_id: str,
                 pass
             outcomes.append(_run_builder(
                 slug=slug, task_id=builder_id, workspace=workspace,
-                provider=provider, model=model, objective=goal,
-                brief=_read_brief(plan_text), task_title=hc.DEMO_BUILDER_TITLE,
+                provider=provider,
+                model=_lane_model("BUILDER", model), objective=goal,
+                brief=demo_llm.plan_to_brief(
+                    plan_text, fallback=_read_brief(plan_text)),
+                task_title=hc.DEMO_BUILDER_TITLE,
                 max_tokens=demo_llm.demo_builder_max_tokens(goal)))
             ok = len(outcomes) == 2 and all(o.get("ok") for o in outcomes)
         except Exception as e:

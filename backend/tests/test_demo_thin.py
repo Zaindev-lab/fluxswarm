@@ -435,6 +435,60 @@ def test_demo_builder_token_budget_is_web_scaled():
         == demo_llm._NORMAL_MAX_TOKENS
 
 
+def test_planner_prompt_asks_for_structured_json_plan():
+    p = demo_llm.planner_prompt("Plan the demo deliverable", "landing page")
+    assert "JSON" in p
+    assert '"sections"' in p
+    assert '"ids"' in p
+
+
+def test_plan_to_brief_parses_json_with_and_without_fences():
+    plan = ('{"overview": "Nebula landing", "palette": "dark + indigo/cyan", '
+            '"sections": ["Features", "Pricing"], '
+            '"ids": {"Features": "features", "Pricing": "pricing"}, '
+            '"features": ["auth", "insights"], '
+            '"cta": "Start free", "constraints": ["no external resources"]}')
+    for wrapped in (plan, "```json\n" + plan + "\n```"):
+        brief = demo_llm.plan_to_brief(wrapped)
+        assert "Features #features" in brief
+        assert "Pricing #pricing" in brief
+        assert "Start free" in brief
+        assert "no external resources" in brief
+    # plain-text fallback never throws
+    assert demo_llm.plan_to_brief("plain lines\nhere") \
+        and "plain lines" in demo_llm.plan_to_brief("plain lines\nhere")
+
+
+def test_web_qa_unlinked_sections_and_score(monkeypatch, tmp_path):
+    coherent = ("<!doctype html><html><head><style>body{background:#0b0f1a;"
+                "color:#eef1fb}</style></head><body><nav>"
+                "<a href='#features'>F</a></nav><section id='features'>"
+                "<h1>Nebula</h1>" + ("<p>" + "x" * 300 + "</p>") * 3 +
+                "</section><footer>N 2026</footer></body></html>")
+    assert not any("unlinked" in i for i in demo_llm.web_qa_issues(coherent))
+    assert demo_llm.web_deliverable_score(coherent) >= 70
+
+    orphan = ("<!doctype html><html><head><style>body{background:#0b0f1a;"
+              "color:#eef1fb}</style></head><body><nav></nav>"
+              "<section id='orphan'>" + ("<p>" + "x" * 300 + "</p>") * 2 +
+              "</section></body>")  # truncated (no </html>)
+    joined = "\n".join(demo_llm.web_qa_issues(orphan))
+    assert "unlinked section id=#orphan" in joined
+    assert demo_llm.web_qa_should_repair(demo_llm.web_qa_issues(orphan)) is True
+    assert demo_llm.web_deliverable_score(orphan) < 50
+
+
+def test_lane_model_override_respects_env(monkeypatch):
+    import main as main_mod
+
+    monkeypatch.delenv("FLUXSWARM_BUILDER_MODEL", raising=False)
+    assert main_mod._lane_model("BUILDER", "base-model") == "base-model"
+    monkeypatch.setenv("FLUXSWARM_BUILDER_MODEL", "paid-gpt")
+    assert main_mod._lane_model("BUILDER", "base-model") == "paid-gpt"
+    # default fork still falls back when role differs
+    assert main_mod._lane_model("PLANNER", "base-model") == "base-model"
+
+
 def test_run_builder_repairs_then_reaudits_broken_deliverable(monkeypatch, tmp_path):
     """A truncated deliverable is repaired ONCE and the repaired artifact is
     re-audited — a repair that comes back good must ship the good page."""

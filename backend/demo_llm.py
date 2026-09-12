@@ -196,11 +196,58 @@ def planner_prompt(task_title: str, objective: str) -> str:
     return (
         f"Task: {task_title}\n\n"
         f"Objective: {objective}\n\n"
-        "Act as the Planner. Produce a SHORT plan (at most 12 lines, plain text)"
-        " describing the minimal steps to achieve the objective."
+        "Act as the Planner. Produce a SHORT but STRUCTURED plan as a SINGLE "
+        "JSON object (output ONLY the JSON, no markdown, no fences) with keys: "
+        "{\"overview\": \"2 lines\", \"palette\": \"one line CSS palette "
+        "description\", \"sections\": [\"<nav item>\", ...], \"ids\": {"
+        "\"<nav item>\": \"<unique section id>\"}, \"features\": [\"...\"], "
+        "\"cta\": \"one line\", \"constraints\": [\"...\"]}. List 4-7 "
+        "sections; every nav item must map to the exact id of its section."
         f"{prefix}"
-        " Do not write any files. Output only the plan text.\n"
+        " Do not write any files.\n"
     )
+
+
+def plan_to_brief(plan_text: str, fallback: str = "") -> str:
+    """Turn the Planner's structured JSON into a compact, lossless builder
+    brief. Tolerates ``` fences and stray prose; falls back to a plain-text
+    excerpt when the JSON cannot be parsed (never throws)."""
+    raw = (plan_text or "").strip()
+    try:
+        obj = json.loads(raw)
+    except Exception:
+        m = re.search(r"\{.*\}", raw, re.S)
+        if not m:
+            return fallback or ("\n".join(raw.splitlines()[:12]) if raw else "")
+        try:
+            obj = json.loads(m.group(0))
+        except Exception:
+            return fallback or ("\n".join(raw.splitlines()[:12]) if raw else "")
+    if not isinstance(obj, dict):
+        return fallback or ""
+    lines = []
+    def _add(label, val):
+        if isinstance(val, list):
+            items = [str(x) for x in val if str(x).strip()]
+            if items:
+                lines.append(f"{label}: {', '.join(items)}")
+        elif isinstance(val, dict) and label == "ids":
+            pairs = [f"{k} #{v}" for k, v in val.items() if k and v]
+            if pairs:
+                lines.append("sections↔ids (MUST match href ids): " + ", ".join(pairs))
+        elif str(val).strip():
+            lines.append(f"{label}: {val}".strip())
+    for k in ("overview", "palette", "cta"):
+        _add(k.capitalize(), obj.get(k))
+    _add("ids", obj.get("ids"))
+    _add("Sections", obj.get("sections"))
+    _add("Features", obj.get("features"))
+    constraints = obj.get("constraints")
+    if isinstance(constraints, list):
+        for c in constraints:
+            if str(c).strip():
+                lines.append(f"Constraint: {c}")
+    return "\n".join(lines) or (fallback or "")
 
 
 def builder_prompt(task_title: str, objective: str, plan: str,
@@ -256,6 +303,9 @@ _WEB_BUILD_SPEC = (
     "- Layout & shapes: a centered container (~1140px max), one consistent "
     "spacing rhythm, section padding ~96-120px desktop / 56-64px mobile; cards "
     "in an auto-fit grid with 12-16px radius, hairline border and soft shadow.\n"
+    "- NAV/ANCHOR CONTRACT: every nav item renders an <a href=\"#id\"> and a "
+    "unique id=\"id\" exists on its target section; nav covers ALL major "
+    "sections; no href=\"#\" placeholders.\n"
     "- Motion: subtle hover lift on cards/buttons, smooth-scroll navigation, "
     "gentle fade/slide reveals — all respecting prefers-reduced-motion.\n"
     "- Responsive: mobile hamburger menu with a working toggle, clamp() "
@@ -391,14 +441,51 @@ def web_qa_issues(html: str) -> list[str]:
     if re.search(r'''href=["']#["']''', text):
         issues.append("dead link: href='#' (no target)")
     ids = set(re.findall(r'''id=["']([^"']+)["']''', text))
+    nav_ids: set[str] = set()
     for h in sorted(set(re.findall(r'''href=["'](#[^"']*)["']''', text))):
-        if h != "#" and h[1:] not in ids:
+        if h == "#":
+            continue
+        nav_ids.add(h[1:])
+        if h[1:] not in ids:
             issues.append(f"broken anchor: {h} links to a missing id")
+    for sid in sorted(ids):
+        if sid not in nav_ids:
+            issues.append(f"unlinked section id=#{sid} (wall of content the "
+                          "nav never reaches)")
     for tok in ("lorem ipsum", "sample text", "your text here", "replace this",
                 "image here", "type your", "change this", "dummy "):
         if tok in low:
             issues.append(f"placeholder/filler copy: '{tok}'")
     return issues
+
+
+def web_deliverable_score(html: str) -> int:
+    """Deterministic 0-100 quality grade used by the repair gate (score < 50
+    with a real artifact triggers one bounded repair). Mirrors web_qa_issues
+    but weighted: coherence and content count more than cosmetics."""
+    issues = web_qa_issues(html)
+    score = 100
+    hard = web_qa_should_repair(issues)
+    n_issues = len(issues)
+    if hard:
+        score -= 55
+    score -= min(30, 6 * n_issues)
+    text = html or ""
+    if "</html>" in text.lower():
+        score += 10
+    ids = set(re.findall(r'''id=["']([^"']+)["']''', text))
+    nav = set(re.findall(r'''href=["']#([^"']*)["']''', text))
+    if ids and ids == (nav & ids) and nav:
+        score += 5
+    visible = len(re.sub(r"\s+", " ",
+                         re.sub(r"<[^>]*>", " ", re.sub(
+                             r"<(script|style)[^>]*>.*?</\1>", " ", text,
+                             flags=re.S))).strip())
+    if visible >= 800:
+        score += 10
+    elif visible < 80:
+        score -= 30
+    return max(0, min(100, score))
 
 
 # Issue prefixes that are hard failures (structural/sandbox) → an automatic
