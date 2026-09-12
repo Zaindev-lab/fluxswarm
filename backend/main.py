@@ -264,7 +264,7 @@ _DEMO_GLOBAL_WINDOW = 86400
 _DEMO_MICRO_IP_MAX = 5
 _DEMO_MICRO_GLOBAL_MAX = 200
 # Session 3 demo lifecycle (auto-close + workspace recycle).
-_DEMO_MAX_RUNTIME_S = int(os.getenv("FLUXSWARM_DEMO_MAX_RUNTIME_S", "900"))
+_DEMO_MAX_RUNTIME_S = int(os.getenv("FLUXSWARM_DEMO_MAX_RUNTIME_S", "1200"))
 _DEMO_WORKSPACE_TTL_S = int(os.getenv("FLUXSWARM_DEMO_WORKSPACE_TTL_S", "86400"))
 _DEMO_LAST: dict[str, tuple] = {}
 _DEMO_LAST_TTL_S = 7200
@@ -1005,7 +1005,7 @@ def _demo_lifecycle_sweep() -> None:
     """Auto-close and recycle the throwaway ``flux-demo-*`` boards.
 
     Session 3 demo hygiene:
-      * a demo board still running past ``_DEMO_MAX_RUNTIME_S`` (15 min) is
+      * a demo board still running past ``_DEMO_MAX_RUNTIME_S`` (20 min) is
         sealed (kills its workers, drops the durable seal marker) — a stuck or
         hung demo must not hold the kanban concurrency budget;
       * a sealed demo board aged past ``_DEMO_WORKSPACE_TTL_S`` (24 h) has its
@@ -1473,18 +1473,27 @@ def _run_builder(*, slug: str, task_id: str, workspace: str, provider, model,
             artifact_name=demo_llm.deliverable_filename(objective),
             max_tokens=max_tokens or demo_llm.builder_max_tokens(objective))
 
-    out = _execute()
-    if out.get("ok") and demo_llm.deliverable_filename(objective) == "index.html":
+    def _audit() -> tuple[str, list[str], bool]:
         try:
             text = (Path(workspace) / "index.html").read_text(
                 encoding="utf-8", errors="ignore")
         except Exception:
             text = ""
-        issues = demo_llm.web_qa_issues(text)
-        if demo_llm.web_artifact_needs_repair(text) \
-                or demo_llm.web_qa_should_repair(issues):
-            _execute(repair=True, qa=issues)
+        return (text, demo_llm.web_qa_issues(text),
+                demo_llm.web_artifact_needs_repair(text))
+
+    out = _execute()
+    if out.get("ok") and demo_llm.deliverable_filename(objective) == "index.html":
+        text, issues, needs = _audit()
+        # Bounded repair loop: re-audit AFTER every repair, because a repair
+        # pass can itself come back truncated/broken (observed: a truncated
+        # landing page shipped "'fixed'" and stayed broken). At most 2 repairs.
+        for _ in range(2):
+            if not needs and not demo_llm.web_qa_should_repair(issues):
+                break
+            out = _execute(repair=True, qa=issues)
             out["retried"] = True
+            text, issues, needs = _audit()
     return out
 
 

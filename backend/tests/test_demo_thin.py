@@ -425,12 +425,86 @@ def test_run_builder_accepts_demo_call_shape(monkeypatch, tmp_path):
     assert out["ok"]
     assert calls["max_tokens"] == demo_llm.demo_builder_max_tokens(
         "Build a landing page for Nebula")
-    assert calls["max_tokens"] < demo_llm.builder_max_tokens(
-        "Build a landing page for Nebula")
 
 
 def test_demo_builder_token_budget_is_web_scaled():
     assert demo_llm.demo_builder_max_tokens("Build a landing page") \
-        < demo_llm.builder_max_tokens("Build a landing page")
+        >= demo_llm.builder_max_tokens("Build a landing page")
     assert demo_llm.demo_builder_max_tokens("make a CLI tool") \
-        == demo_llm.builder_max_tokens("make a CLI tool")
+        == demo_llm.builder_max_tokens("make a CLI tool") \
+        == demo_llm._NORMAL_MAX_TOKENS
+
+
+def test_run_builder_repairs_then_reaudits_broken_deliverable(monkeypatch, tmp_path):
+    """A truncated deliverable is repaired ONCE and the repaired artifact is
+    re-audited — a repair that comes back good must ship the good page."""
+    import main as main_mod
+
+    monkeypatch.setattr(main_mod.hc, "HERMES_HOME", str(tmp_path))
+    ws = tmp_path / "ws3"
+    ws.mkdir()
+    calls = []
+
+    def fake_execute(*, board, task_id, workspace, provider, model, prompt,
+                     objective="", artifact_name=None, api_key=None, max_tokens=None):
+        n = len(calls)
+        calls.append(prompt)
+        if artifact_name == "index.html":
+            if n == 0:
+                (Path(workspace) / artifact_name).write_text(
+                    "<!doctype html><html><head><style>.hero p { max-width: 650px;",
+                    encoding="utf-8")  # first build is truncated
+            else:
+                (Path(workspace) / artifact_name).write_text(
+                    ("<!doctype html><html><head><style>body{background:#0b0f1a;"
+                     "color:#eef1fb}</style></head><body><nav><a href='#f'>F</a></nav>"
+                     "<section id='f'><h1>Nebula</h1>"
+                     + ("<p>" + "x" * 300 + "</p>") * 2 +
+                     "</section><footer>Nebula 2026</footer></body></html>"),
+                    encoding="utf-8")
+        else:
+            (Path(workspace) / artifact_name).write_text("plan", encoding="utf-8")
+        return {"ok": True, "elapsed_s": 1}
+
+    monkeypatch.setattr(main_mod.hc, "thin_execute", fake_execute)
+
+    out = main_mod._run_builder(
+        slug="flux-demo-regr", task_id="tb", workspace=str(ws),
+        provider="gemini", model="g", objective="Build a landing page for Nebula",
+        brief="plan", task_title=hc.DEMO_BUILDER_TITLE,
+        max_tokens=demo_llm.demo_builder_max_tokens("Build a landing page for Nebula"))
+
+    assert out["ok"]
+    assert out.get("retried") is True
+    # 1 initial build + 1 repair (good page ships)
+    assert len(calls) == 2
+    assert "</html>" in (ws / "index.html").read_text(encoding="utf-8")
+
+
+def test_run_builder_bounded_repair_stops_after_two_attempts(monkeypatch, tmp_path):
+    """A repair that is ITSELF still truncated must not loop forever: at most
+    1 build + 2 repair passes, then the best-effort page ships."""
+    import main as main_mod
+
+    monkeypatch.setattr(main_mod.hc, "HERMES_HOME", str(tmp_path))
+    ws = tmp_path / "ws4"
+    ws.mkdir()
+    calls = []
+
+    def fake_execute(*, board, task_id, workspace, provider, model, prompt,
+                     objective="", artifact_name=None, api_key=None, max_tokens=None):
+        calls.append(objective)
+        (Path(workspace) / artifact_name).write_text(
+            "<!doctype html><html><head><style>.hero p { max-width: 650px;",
+            encoding="utf-8")  # always truncated (mid-CSS, no </html>)
+        return {"ok": True, "elapsed_s": 1}
+
+    monkeypatch.setattr(main_mod.hc, "thin_execute", fake_execute)
+
+    main_mod._run_builder(
+        slug="flux-demo-regr", task_id="tb", workspace=str(ws),
+        provider="gemini", model="g", objective="Build a landing page for Nebula",
+        brief="plan", task_title=hc.DEMO_BUILDER_TITLE,
+        max_tokens=demo_llm.demo_builder_max_tokens("Build a landing page for Nebula"))
+
+    assert len(calls) == 3  # build + 2 repairs, loop bounded

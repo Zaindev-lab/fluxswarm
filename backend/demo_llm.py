@@ -21,7 +21,7 @@ _GEMINI_URL = (
 )
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-_COMPLETION_TIMEOUT_S = int(os.environ.get("FLUXSWARM_DEMO_LLM_TIMEOUT_S", "90"))
+_COMPLETION_TIMEOUT_S = int(os.environ.get("FLUXSWARM_DEMO_LLM_TIMEOUT_S", "240"))
 
 # A full landing page / web app rarely fits in the 400-token lane default; the
 # builder lane (the artifact the user actually sees in /p/) gets a much larger
@@ -33,7 +33,7 @@ _NORMAL_MAX_TOKENS = 800
 # enough to finish inside the demo wall-clock cap on the free pool (each pool
 # completion also sits under the per-call timeout). Real project launches keep
 # the full _BUILDER_MAX_TOKENS budget.
-_DEMO_BUILDER_MAX_TOKENS = int(os.environ.get("FLUXSWARM_DEMO_BUILDER_MAX_TOKENS", "2000"))
+_DEMO_BUILDER_MAX_TOKENS = int(os.environ.get("FLUXSWARM_DEMO_BUILDER_MAX_TOKENS", "4000"))
 
 # Transient upstream 5xx/429 are a fact of the free pool: retry a bounded
 # number of times with small backoff so a 503 hiccup mid-swarm doesn't park the
