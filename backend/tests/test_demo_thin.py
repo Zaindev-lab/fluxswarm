@@ -644,3 +644,104 @@ def test_run_builder_anchor_patch_fixes_dead_link_without_rebuild(monkeypatch, t
     final = (ws / "index.html").read_text(encoding="utf-8")
     assert 'href="#top"' in final
     assert 'id="top"' in final
+
+
+def test_web_content_gap_detects_empty_promised_sections():
+    shell = ("<!doctype html><html><head><style>body{background:#0b0f1a;"
+             "color:#eef1fb}</style></head><body><nav>"
+             "<a href='#starters'>S</a><a href='#mains'>M</a>"
+             "<a href='#desserts'>D</a></nav>"
+             "<section id='starters'><h1>Starters</h1></section>"
+             "<section id='mains'></section><section id='desserts'></section>"
+             "<footer>N 2026</footer></body></html>")
+    gap = demo_llm.web_content_gap(shell)
+    assert all(g in gap for g in ("starters", "mains", "desserts"))
+    joined = "\n".join(demo_llm.web_qa_issues(shell))
+    assert "hollow page" in joined
+    # starters with real content must NOT be in gap
+    filled = ("<!doctype html><html><head><style>body{background:#0b0f1a;"
+              "color:#eef1fb}</style></head><body><nav>"
+              "<a href='#starters'>S</a><a href='#mains'>M</a>"
+              "<a href='#desserts'>D</a></nav>"
+              "<section id='starters'><h1>Starters</h1>"
+              + ("<p>" + "x" * 300 + "</p>") * 3 +
+              "</section>"
+              "<section id='mains'><h2>Mains</h2>"
+              + ("<p>" + "y" * 300 + "</p>") * 2 +
+              "</section><section id='desserts'><h2>Desserts</h2>"
+              + ("<p>" + "z" * 300 + "</p>") * 2 +
+              "</section><footer>N 2026</footer></body></html>")
+    assert demo_llm.web_content_gap(filled) == []
+    assert not any("hollow" in i or "skeleton" in i
+                   for i in demo_llm.web_qa_issues(filled))
+
+
+def test_web_qa_skeleton_shell_vs_real_page():
+    # Skeleton: >500 chars, has nav + h1 + footer, but sections hold only
+    # brief headings (not enough body text).  "too short" and "no readable
+    # text" must NOT fire — only hollow/skeleton should appear.
+    pad = "/*p*/" * 100  # pushes total >500 chars without adding visible text
+    shell = ("<!doctype html><html><head><style>body{background:#0b0f1a;"
+             "color:#eef1fb}" + pad + "</style></head><body>"
+             "<nav><a href='#a'>A</a><a href='#b'>B</a></nav>"
+             "<h1>Title</h1>"
+             "<section id='a'><h2>Section A</h2>" + "x" * 60 +
+             "</section><section id='b'><h2>Section B</h2>" + "y" * 60 +
+             "</section><footer>N 2026</footer></body></html>")
+    joined = "\n".join(demo_llm.web_qa_issues(shell))
+    assert "skeleton page" in joined
+    assert demo_llm.web_qa_structural_repair(demo_llm.web_qa_issues(shell)) is False
+    filled = shell.replace("x" * 60, "x" * 400).replace("y" * 60, "y" * 400)
+    assert not any("skeleton" in i or "hollow" in i
+                   for i in demo_llm.web_qa_issues(filled))
+
+
+def test_run_builder_content_patch_fills_missing_sections(monkeypatch, tmp_path):
+    """A page that is structurally complete but hollow (nav promises sections
+    that hold no content) must NOT burn rebuild rounds: the narrow
+    content-completion patch fills the empty sections."""
+    import main as main_mod
+
+    monkeypatch.setattr(main_mod.hc, "HERMES_HOME", str(tmp_path))
+    ws = tmp_path / "wsC"
+    ws.mkdir()
+    calls = []
+    # starters is genuinely filled (builder wrote that section fully);
+    # mains and desserts are empty shells (heading only).
+    shell = ("<!doctype html><html><head><style>body{background:#0b0f1a;"
+             "color:#eef1fb}</style></head><body><nav>"
+             "<a href='#starters'>S</a><a href='#mains'>M</a>"
+             "<a href='#desserts'>D</a></nav>"
+             "<section id='starters'><h1>Menu</h1>"
+             + ("<p>" + "x" * 300 + "</p>") * 3 +
+             "</section><section id='mains'><h2>Mains</h2></section>"
+             "<section id='desserts'><h2>Desserts</h2></section>"
+             "<footer>N 2026</footer></body></html>")
+
+    def fake_execute(*, board, task_id, workspace, provider, model, prompt,
+                     objective="", artifact_name=None, api_key=None, max_tokens=None):
+        calls.append(artifact_name)
+        if artifact_name == "index-content.html":
+            (Path(workspace) / artifact_name).write_text(
+                ("<section id='mains'><h2>Main Courses</h2>"
+                 + ("<p>" + "y" * 300 + "</p>") * 2 +
+                 "</section><section id='desserts'><h2>Desserts</h2>"
+                 + ("<p>" + "z" * 300 + "</p>") * 2),
+                encoding="utf-8")
+        else:
+            (Path(workspace) / artifact_name).write_text(shell, encoding="utf-8")
+        return {"ok": True, "elapsed_s": 1}
+
+    monkeypatch.setattr(main_mod.hc, "thin_execute", fake_execute)
+
+    out = main_mod._run_builder(
+        slug="flux-demo-regr", task_id="tb", workspace=str(ws),
+        provider="gemini", model="g", objective="Build a menu page for the restaurant",
+        brief="plan", task_title=hc.DEMO_BUILDER_TITLE,
+        max_tokens=demo_llm.demo_builder_max_tokens("Build a menu page"))
+
+    assert calls.count("index.html") == 1          # shell rebuilt ZERO times
+    assert out.get("content_patched") is True
+    final = (ws / "index.html").read_text(encoding="utf-8")
+    assert "<section id='mains'" in final and "<section id='desserts'" in final
+    assert demo_llm.web_content_gap(final) == []

@@ -1600,6 +1600,75 @@ def _anchor_patch(*, slug: str, task_id: str, workspace: str, provider, model,
         return False
 
 
+def _append_missing_content(*, slug: str, task_id: str, workspace: str,
+                            provider, model, objective: str, api_key: str | None,
+                            brief: str, missing_ids: list[str]) -> bool:
+    """Fill nav-promised sections that are empty shells with real content in a
+    SINGLE bounded narrow call (no full rebuild — which re-truncates and
+    ships another hollow shell).  Removes old empty shells for the gap ids
+    (avoids duplicate sections), then appends the filled blocks before <footer>.
+    Returns True when sections were added."""
+    try:
+        path = Path(workspace) / "index.html"
+        html = path.read_text(encoding="utf-8", errors="ignore")
+        if not html.strip():
+            return False
+        missing = [s for s in missing_ids if s and s != "top"]
+        if not missing:
+            return False
+        listed = ", ".join(f"#{s}" for s in missing[:4])
+        prompt = (
+            "A page is STRUCTURALLY COMPLETE (</html>, footer, nav all exist) "
+            f"but several nav-linked sections are empty or missing: {listed}\n\n"
+            f"Objective: {objective}\n\n"
+            f"Builder brief: {(brief or '')[:1200]}\n\n"
+            "Output ONLY one <section> (or <article>) block per promised id — "
+            "no <style>, no <html>/<head>/<body>, no <nav>, no </html>, no "
+            "markdown fences.  Use id attributes matching exactly: "
+            + ", ".join(f'id="{s}"' for s in missing[:4]) +
+            ".  Fill each with REAL SPECIFIC content appropriate to the site: "
+            "for a MENU/RESTAURANT — actual dish names with prices and a 1-2 "
+            "line description, 3-5 items per category; for FEATURES/PLANS — "
+            "labeled cards with bullets; for PORTFOLIO — concrete projects. "
+            "Use the page's existing CSS classes and heading patterns. Close "
+            "every tag.\n"
+        )
+        res = hc.thin_execute(
+            board=slug, task_id=task_id, workspace=workspace,
+            provider=provider, model=model, prompt=prompt,
+            objective=objective, api_key=api_key,
+            artifact_name="index-content.html", max_tokens=4000)
+        blocks = (Path(workspace) / "index-content.html").read_text(
+            encoding="utf-8", errors="ignore").strip()
+        blocks = re.sub(r"^```[^\n]*\n?", "", blocks)
+        blocks = re.sub(r"\n?```$", "", blocks)
+        if not (res.get("ok") and re.search(r"<section\b|<article\b",
+                                            blocks, re.I)):
+            return False
+        # Remove old empty shells for the gap ids (avoid duplicates)
+        for sid in missing[:4]:
+            pat = re.compile(
+                r"<(?:section|article|main)\b[^>]*id=[\"']" + re.escape(sid)
+                + r"[\"'][^>]*>.*?</(?:section|article|main)>",
+                re.S | re.I)
+            html = pat.sub("", html, count=1)
+        # Insert filled blocks BEFORE <footer (or </body>)
+        insert = html.lower().find("<footer")
+        if insert == -1:
+            insert = html.rfind("</body>")
+        if insert == -1:
+            return False
+        html = html[:insert] + "\n" + blocks.strip() + "\n\n" + html[insert:]
+        path.write_text(html, encoding="utf-8")
+        try:
+            (Path(workspace) / "index-content.html").unlink()
+        except Exception:
+            pass
+        return len(demo_llm.web_content_gap(html)) == 0
+    except Exception:
+        return False
+
+
 def _run_builder(*, slug: str, task_id: str, workspace: str, provider, model,
                  objective: str, brief: str, task_title: str,
                  api_key: str | None = None, max_tokens: int | None = None) -> dict:
@@ -1643,7 +1712,8 @@ def _run_builder(*, slug: str, task_id: str, workspace: str, provider, model,
         # corner-patch below fixes those without risking re-truncation.
         for _ in range(2):
             if not needs and not demo_llm.web_qa_structural_repair(issues) \
-                    and (score >= 50 or demo_llm.only_anchor_issues(issues)):
+                    and (score >= 50 or demo_llm.only_anchor_issues(issues)
+                         or demo_llm.web_content_issue(issues)):
                 break
             if score < 50:
                 issues.append(f"overall quality score {score}/100 — needs polish")
@@ -1659,6 +1729,22 @@ def _run_builder(*, slug: str, task_id: str, workspace: str, provider, model,
                     provider=provider, model=model, objective=objective,
                     api_key=api_key):
                 out["tail_completed"] = True
+            text, issues, needs, score = _audit()
+        # Content-completion: fill nav-promised sections that are empty shells
+        # (a page with a hero + category tabs but NO dishes/cards looks fine to
+        # every structural check and ships "simple and basic"). Narrow bounded
+        # calls only — never a full rebuild, which re-truncates the same way.
+        for _ in range(2):
+            gap = demo_llm.web_content_gap(text)
+            if not gap:
+                break
+            if _append_missing_content(
+                    slug=slug, task_id=task_id, workspace=workspace,
+                    provider=provider, model=model, objective=objective,
+                    api_key=api_key, brief=brief, missing_ids=gap[:3]):
+                out["content_patched"] = True
+            else:
+                break
             text, issues, needs, score = _audit()
         # Corner-patch: page is complete now, but nav anchors may still dangle
         # (dead href='#', anchors to missing ids). Fix deterministically, and

@@ -51,7 +51,11 @@ _HTTP_CODE_RE = re.compile(r" HTTP (\d{3}):")
 _WEB_HINTS = (
     "web app", "webapp", "web application", "website", "web page", "webpage",
     "landing", "landingpage", "landing page", "single-page", "spa", "dashboard",
-    "frontend", "portfolio", "saas", " ui", "ui ", " ecommerce",
+    "frontend", "portfolio", "saas", " ui", "ui ", " ecommerce", "menu",
+    "restaurant", "cafe", "café", "bakery", "dishes", "pricing", "catalog",
+    "catalogue", "store", "storefront", "shop", "booking", "reservation",
+    "blog", "gallery", "template", "marketing", "agency", "startup",
+    "ordering", "takeaway", "e-commerce", "store page",
 )
 
 
@@ -202,7 +206,10 @@ def planner_prompt(task_title: str, objective: str) -> str:
         "description\", \"sections\": [\"<nav item>\", ...], \"ids\": {"
         "\"<nav item>\": \"<unique section id>\"}, \"features\": [\"...\"], "
         "\"cta\": \"one line\", \"constraints\": [\"...\"]}. List 4-7 "
-        "sections; every nav item must map to the exact id of its section."
+        "sections; every nav item must map to the exact id of its section. "
+        "Plan the REAL CONTENT of each section (never an empty shell): for a "
+        "menu list dish categories; for landings list features/testimonials/"
+        "pricing — each section must be filled with actual copy when built."
         f"{prefix}"
         " Do not write any files.\n"
     )
@@ -329,6 +336,17 @@ _WEB_BUILD_SPEC = (
     "all state in the DOM or inline JS variables.\n"
     "- COMPLETE & VALID: no external CDNs, fonts, images, or libraries; end "
     "with </html>; every tag closed and the layout clean with no JS errors.\n"
+    "- CONTENT QUALITY (this decides pass/fail — never ship a shell): a page is "
+    "FAILED if the nav links to sections that are empty headings. Every section "
+    "must hold REAL finished copy: several paragraphs and/or a filled card/table "
+    "grid. For restaurant/menu objectives: list the actual dishes — several "
+    "named items per category, each with a price and a 1-2 line description; the "
+    "hero plus category tabs with NO dishes is a failed deliverable. For "
+    "pricing: real plan tiers with prices + feature bullets. For portfolio/"
+    "product/catalog: several complete concrete items. For FAQ/features: real "
+    "questions with full answers. Target 1200-2500 visible characters of body "
+    "copy for a full page; if tokens run low, finish FEWER sections completely "
+    "rather than leaving MORE sections half-done.\n"
     "- Never output lorem ipsum or placeholder fragments; write finished, "
     "meaningful copy. Never abbreviate content to save tokens — cut whole "
     "optional sections instead of leaving truncated words."
@@ -452,6 +470,22 @@ def web_qa_issues(html: str) -> list[str]:
         if sid not in nav_ids:
             issues.append(f"unlinked section id=#{sid} (wall of content the "
                           "nav never reaches)")
+    # ---- content-depth audit: Lovable-quality = filled sections -------------
+    targets = web_nav_targets(text)
+    if len(targets) >= 2:
+        ok = [t for t in targets if _element_content_len(text, t) >= 150]
+        need = max(1, round(0.6 * len(targets)))
+        if len(ok) < need:
+            empty = [t for t in targets if t not in ok]
+            issues.append(
+                f"hollow page: nav promises {len(targets)} sections but only "
+                f"{len(ok)} hold real content ({', '.join('#' + e for e in empty)[:120]}"
+                f") — sections are empty shells without copy")
+    n_sections = len(web_section_ids(text))
+    body_copy = web_body_visible_count(text)
+    if n_sections >= 2 and body_copy < 600:
+        issues.append(f"skeleton page: only {body_copy} visible body chars "
+                      "inside nav-linked sections (sections are empty shells)")
     for tok in ("lorem ipsum", "sample text", "your text here", "replace this",
                 "image here", "type your", "change this", "dummy "):
         if tok in low:
@@ -460,6 +494,60 @@ def web_qa_issues(html: str) -> list[str]:
 
 
 _SECTION_TAGS = ("section", "article", "main", "header", "footer")
+
+
+def _strip_shell(html: str) -> str:
+    """Body copy, minus script/style and the nav/header/footer chrome, so a
+    'page' that is really just a frame with headings gets measured honestly."""
+    html = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.S | re.I)
+    html = re.sub(r"<(nav|header|footer)\b.*?</\1>", " ", html, flags=re.S | re.I)
+    return html
+
+
+def web_body_visible_count(html: str) -> int:
+    return len(re.sub(r"\s+", " ", re.sub(r"<[^>]*>", " ",
+                                          _strip_shell(html or ""))).strip())
+
+
+def web_nav_targets(html: str) -> list[str]:
+    """Stable sorted list of href='#...' anchor target ids (bare '#' excluded).
+    NOTE: findall with a single group returns THE GROUP — do not re-strip."""
+    return sorted({h for h in re.findall(r'''href=["']#([^"']+)(?:["'])''',
+                                         html or "")
+                   if h})
+
+
+def _element_content_len(html: str, sid: str) -> int:
+    """Visible text length inside the element whose id == sid, 0 if missing."""
+    m = re.search(
+        r"<(?:section|article|main|div|header|footer)\b[^>]*id=[\"']"
+        + re.escape(sid) + r"[\"'][^>]*>", html, flags=re.I)
+    if not m:
+        return 0
+    tm = re.match(r"<(\w+)", m.group(0))
+    tag = tm.group(1) if tm else "section"
+    end = html.find(f"</{tag}>", m.end())
+    inner = html[m.end():end] if end != -1 else html[m.end():]
+    return len(re.sub(r"\s+", " ", re.sub(r"<[^>]*>", " ", inner)).strip())
+
+
+def web_content_gap(html: str) -> list[str]:
+    """Nav-promised sections that are missing OR are empty shells (<150 visible
+    chars). These are exactly what the content-completion patch must fill —
+    'hero + tabs but no dishes' is precisely this, the Lovable-quality killer."""
+    gap: list[str] = []
+    for sid in web_nav_targets(html):
+        if sid == "top":
+            continue
+        if _element_content_len(html, sid) < 150:
+            gap.append(sid)
+    return gap
+
+
+def web_content_issue(issues: list[str]) -> bool:
+    """Hollow/skeleton pages need the narrow content-completion patch — NOT a
+    full rebuild (which re-truncates at the same token ceiling)."""
+    return any(i.startswith(("hollow page:", "skeleton page:")) for i in issues)
 
 
 def web_section_ids(html: str) -> set[str]:
@@ -485,10 +573,11 @@ def web_anchor_issues(issues: list[str]) -> list[str]:
 
 def web_qa_structural_repair(issues: list[str]) -> bool:
     """Hard issues a FULL rebuild actually addresses (structural, sandbox,
-    visibility). Anchor coherence issues are deliberately excluded — they are
-    handled by the cheap bounded nav patch instead."""
+    visibility). Anchor coherence and content-depth issues are deliberately
+    excluded — they get the cheap bounded nav/content patches instead."""
     return any(i.startswith(_HARD_QA_PREFIXES)
-               and not i.startswith(("broken anchor:", "dead link:"))
+               and not i.startswith(("broken anchor:", "dead link:",
+                                     "hollow page:", "skeleton page:"))
                for i in issues)
 
 
@@ -535,7 +624,7 @@ def web_deliverable_score(html: str) -> int:
 _HARD_QA_PREFIXES = ("truncated", "too short", "broken anchor", "sandbox-unsafe",
                      "external resource", "dead link", "no closing",
                      "dark background", "undefined CSS variable",
-                     "almost no readable text")
+                     "almost no readable text", "hollow page", "skeleton page")
 
 
 def web_qa_should_repair(issues: list[str]) -> bool:
