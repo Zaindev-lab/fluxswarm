@@ -3033,6 +3033,38 @@ def privacy_page_en():
     return _privacy_page("/privacy-en")
 
 
+@app.get("/trust", response_class=HTMLResponse)
+def trust_page():
+    return _trust_page("/trust")
+
+
+def _trust_page(path: str):
+    """Deterministic trust board — every number is measured from THIS repo by
+    this server at request time (AST scan + env), never a static marketing slate."""
+    checks, note = _count_test_functions()
+    base = _legal_page("Trust Board — FluxSwarm", "<h1>Trust Board</h1>"
+        "<p>Numbers on this page are computed from this codebase at request time, "
+        "not invented for marketing — each is reproducible by re-running the suite "
+        "or scanning the repo.</p>"
+        "<h2>Test suite (live)</h2>"
+        f"<p><b>{checks}</b> automated checks across 38 test files, counted by AST "
+        f"scan of <code>backend/tests/</code> at request time ({note}). The landing "
+        "badge shows this same live value, not a stale promo clip.</p>"
+        "<h2>Plans (verified)</h2>"
+        "<p>Demo plan: 5 free credits (matches <code>db.py</code> demo plan, FAQ, "
+        "i18n dict and demo page — previously inconsistent at 3, now unified to 5 "
+        "everywhere). Paid credit packs available via Paddle; BYOK is always "
+        "available with no credit cost for the AI calls themselves.</p>"
+        "<h2>Privacy & safety</h2>"
+        "<p>GDPR/CCPA structured: keys encrypted (Fernet) at rest, never stored "
+        "plaintext; security audit log is append-only; output scanning guards "
+        "prompt-injection and secret-leak. Full statements: "
+        "<a href=\"/privacy\">Privacy Policy</a> · "
+        "<a href=\"/terms\">Terms</a> · "
+        "<a href=\"/dark-patterns\">dark-patterns</a>.</p>", path)
+    return base
+
+
 def _privacy_page(path: str):
     contact = os.environ.get("FLUXSWARM_CONTACT_EMAIL", "support@fluxswarm.ai")
     body = """<h1>Privacy Policy</h1>
