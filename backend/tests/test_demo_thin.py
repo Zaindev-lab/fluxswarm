@@ -481,9 +481,10 @@ def test_run_builder_repairs_then_reaudits_broken_deliverable(monkeypatch, tmp_p
     assert "</html>" in (ws / "index.html").read_text(encoding="utf-8")
 
 
-def test_run_builder_bounded_repair_stops_after_two_attempts(monkeypatch, tmp_path):
+def test_run_builder_bounded_repair_stops_after_tail_salvage(monkeypatch, tmp_path):
     """A repair that is ITSELF still truncated must not loop forever: at most
-    1 build + 2 repair passes, then the best-effort page ships."""
+    1 build + 2 repair passes, then the deterministic tail-completion appends
+    the missing closure so a valid page ships."""
     import main as main_mod
 
     monkeypatch.setattr(main_mod.hc, "HERMES_HOME", str(tmp_path))
@@ -493,18 +494,31 @@ def test_run_builder_bounded_repair_stops_after_two_attempts(monkeypatch, tmp_pa
 
     def fake_execute(*, board, task_id, workspace, provider, model, prompt,
                      objective="", artifact_name=None, api_key=None, max_tokens=None):
-        calls.append(objective)
-        (Path(workspace) / artifact_name).write_text(
-            "<!doctype html><html><head><style>.hero p { max-width: 650px;",
-            encoding="utf-8")  # always truncated (mid-CSS, no </html>)
+        calls.append(artifact_name)
+        if artifact_name == "index-tail.html":
+            (Path(workspace) / artifact_name).write_text(
+                "</body></html>", encoding="utf-8")
+        else:
+            (Path(workspace) / artifact_name).write_text(
+                ("<!doctype html><html><head><style>.hero p { max-width: 650px;\n"
+                 + ".features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }\n"
+                 + ".pricing { margin-top: 48px; }\n" + "/*pad*/" * 60
+                 + "\n</style>"),
+                encoding="utf-8")  # always truncated (mid-CSS, no </html>)
         return {"ok": True, "elapsed_s": 1}
 
     monkeypatch.setattr(main_mod.hc, "thin_execute", fake_execute)
 
-    main_mod._run_builder(
+    out = main_mod._run_builder(
         slug="flux-demo-regr", task_id="tb", workspace=str(ws),
         provider="gemini", model="g", objective="Build a landing page for Nebula",
         brief="plan", task_title=hc.DEMO_BUILDER_TITLE,
         max_tokens=demo_llm.demo_builder_max_tokens("Build a landing page for Nebula"))
 
-    assert len(calls) == 3  # build + 2 repairs, loop bounded
+    # build + 2 repairs + 1 tail-salvage
+    assert calls.count("index.html") == 3
+    assert calls.count("index-tail.html") == 1
+    assert out.get("retried") is True
+    assert out.get("tail_completed") is True
+    final = (ws / "index.html").read_text(encoding="utf-8")
+    assert final.endswith("</body></html>")

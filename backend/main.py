@@ -1452,6 +1452,48 @@ def _read_brief(text: str, n_lines: int = 12) -> str:
     return "\n".join((text or "").strip().splitlines()[:n_lines])
 
 
+def _append_missing_tail(*, slug: str, task_id: str, workspace: str, provider,
+                         model, objective: str, api_key: str | None) -> bool:
+    """Deterministic-bounded salvage for a TRUNCATED page: ask the model for
+    ONLY the missing tail and append it. A full rebuild at the same token
+    ceiling just truncates again (measured twice), so this narrowly-scoped
+    continuation call (small budget, 'continue from the snippet') can always
+    close the document. Returns True when the composed file closes properly."""
+    try:
+        path = Path(workspace) / "index.html"
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        if not text.strip():
+            return False
+        snippet = text[-220:].replace("`", "'").replace("```", "''")
+        prompt = (
+            "A single-file HTML page was cut off while being written. The "
+            "document so far ends with this snippet:\n\n```\n" + snippet +
+            "\n```\n\nContinue the document EXACTLY from where the snippet "
+            "ends. Output ONLY the missing remainder (no markdown fences, no "
+            "repeated snippet, no wrapper). If the body content/HTML markup "
+            "after the head/styles was never written yet, write it now. "
+            "Close every open tag and finish with </body></html>.\n"
+        )
+        res = hc.thin_execute(
+            board=slug, task_id=task_id, workspace=workspace,
+            provider=provider, model=model, prompt=prompt,
+            objective=objective, api_key=api_key,
+            artifact_name="index-tail.html", max_tokens=1200)
+        tail = (Path(workspace) / "index-tail.html").read_text(
+            encoding="utf-8", errors="ignore")
+        if res.get("ok") and tail.strip():
+            combined = text + ("\n" if tail[:1] not in "\n\t " else "") + tail
+            path.write_text(combined, encoding="utf-8")
+            try:
+                (Path(workspace) / "index-tail.html").unlink()
+            except Exception:
+                pass
+            return demo_llm.web_artifact_needs_repair(combined) is False
+    except Exception:
+        pass
+    return False
+
+
 def _run_builder(*, slug: str, task_id: str, workspace: str, provider, model,
                  objective: str, brief: str, task_title: str,
                  api_key: str | None = None, max_tokens: int | None = None) -> dict:
@@ -1494,6 +1536,15 @@ def _run_builder(*, slug: str, task_id: str, workspace: str, provider, model,
             out = _execute(repair=True, qa=issues)
             out["retried"] = True
             text, issues, needs = _audit()
+        # Deterministic salvage for a STILL-structural broken page (cut off):
+        # append the missing tail instead of re-doing a full rebuild that will
+        # hit the same token ceiling again.
+        if needs:
+            if _append_missing_tail(
+                    slug=slug, task_id=task_id, workspace=workspace,
+                    provider=provider, model=model, objective=objective,
+                    api_key=api_key):
+                out["tail_completed"] = True
     return out
 
 
